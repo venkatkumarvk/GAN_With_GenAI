@@ -10,7 +10,6 @@ import fitz  # PyMuPDF
 import pandas as pd
 from datetime import datetime
 import io
-import zipfile
 from azure.storage.blob import BlobServiceClient, ContentSettings
 
 # Load environment variables from .env file
@@ -45,12 +44,6 @@ def image_to_data_url(image_bytes, mime_type='image/png'):
     """
     base64_encoded_data = base64.b64encode(image_bytes).decode('utf-8')
     return f"data:{mime_type};base64,{base64_encoded_data}"
-
-def extract_text_from_page(page):
-    """
-    Extract text content from a PDF page.
-    """
-    return page.get_text()
 
 def call_azure_openai_vision(prompt, image_data_url, client, deployment_name):
     """
@@ -109,7 +102,6 @@ def process_pdf(pdf_file, prompt, client, deployment_name, progress_bar=None, pr
                 
                 # Create a list to store extracted data from all pages
                 all_page_results = []
-                all_text_content = []
                 
                 # Process each page in the PDF
                 for page_num in range(page_count):
@@ -122,10 +114,6 @@ def process_pdf(pdf_file, prompt, client, deployment_name, progress_bar=None, pr
                         
                         # Load the current page
                         page = doc.load_page(page_num)
-                        
-                        # Extract text from the page
-                        page_text = extract_text_from_page(page)
-                        all_text_content.append(f"--- PAGE {page_num+1} ---\n{page_text}\n")
                         
                         # Process image
                         zoom = 2  # Zoom factor for image quality
@@ -141,8 +129,7 @@ def process_pdf(pdf_file, prompt, client, deployment_name, progress_bar=None, pr
                         # Add page info to the collected results
                         extracted_info_with_page = {
                             "page": page_num + 1,
-                            "data": extracted_info,
-                            "text_content": page_text
+                            "data": extracted_info
                         }
                         
                         # Add to our collection of all page results
@@ -153,10 +140,8 @@ def process_pdf(pdf_file, prompt, client, deployment_name, progress_bar=None, pr
                         st.warning(error_msg)
                         all_page_results.append({
                             "page": page_num + 1,
-                            "data": {"error": str(e)},
-                            "text_content": "Error extracting text"
+                            "data": {"error": str(e)}
                         })
-                        all_text_content.append(f"--- PAGE {page_num+1} ---\nError extracting text: {str(e)}\n")
         finally:
             # Clean up the temporary file
             try:
@@ -168,8 +153,7 @@ def process_pdf(pdf_file, prompt, client, deployment_name, progress_bar=None, pr
         final_result = {
             "filename": filename,
             "total_pages": page_count,
-            "pages": all_page_results,
-            "full_text": "".join(all_text_content)
+            "pages": all_page_results
         }
         
         return final_result
@@ -181,8 +165,7 @@ def process_pdf(pdf_file, prompt, client, deployment_name, progress_bar=None, pr
             "filename": pdf_file.name,
             "error": str(e),
             "total_pages": 0,
-            "pages": [],
-            "full_text": f"Error processing document: {str(e)}"
+            "pages": []
         }
 
 def create_results_dataframe(all_pdf_results):
@@ -215,51 +198,11 @@ def create_results_dataframe(all_pdf_results):
     # Create DataFrame
     return pd.DataFrame(rows)
 
-def create_text_files_zip(all_pdf_results):
+def create_page_results_text(pdf_result):
     """
-    Create a zip file containing text files for each PDF.
-    """
-    # Create a BytesIO object to store the zip file
-    zip_buffer = io.BytesIO()
-    
-    # Create a ZipFile object
-    with zipfile.ZipFile(zip_buffer, 'a', zipfile.ZIP_DEFLATED, False) as zip_file:
-        for pdf_result in all_pdf_results:
-            filename = pdf_result["filename"]
-            base_filename = os.path.splitext(filename)[0]
-            
-            # Add the full text file
-            full_text = pdf_result.get("full_text", "No text content available")
-            zip_file.writestr(f"{base_filename}_full_text.txt", full_text)
-            
-            # Add structured data as a text file
-            structured_text = f"Filename: {filename}\nTotal Pages: {pdf_result['total_pages']}\n\n"
-            for page in pdf_result["pages"]:
-                page_num = page["page"]
-                data = page["data"]
-                
-                structured_text += f"--- PAGE {page_num} ---\n"
-                for key, value in data.items():
-                    structured_text += f"{key}: {value}\n"
-                structured_text += "\n"
-            
-            zip_file.writestr(f"{base_filename}_structured_data.txt", structured_text)
-    
-    # Seek to the beginning of the BytesIO object
-    zip_buffer.seek(0)
-    return zip_buffer
-
-def create_individual_page_results_text(pdf_result):
-    """
-    Create a text file for each page's extracted key-value data.
+    Create a text file containing only the key-value pairs from each page.
     Returns a string with the formatted key-value pairs.
     """
-    # Get current timestamp for filename
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    filename = pdf_result["filename"]
-    base_filename = os.path.splitext(filename)[0]
-    
-    # Create text content with simple key-value pairs
     result_text = ""
     
     for page in pdf_result["pages"]:
@@ -270,7 +213,7 @@ def create_individual_page_results_text(pdf_result):
         
         # Add each key-value pair in the format 'key: value'
         for key, value in data.items():
-            # Convert camelCase to normal text (e.g., customerName -> Customer Name)
+            # Convert camelCase to normal text (e.g., customerName -> customer name)
             display_key = ''.join(' ' + char if char.isupper() else char for char in key).strip().lower()
             result_text += f"{display_key}: {value}\n"
         
@@ -384,12 +327,6 @@ def main():
                 # Create a timestamp for the filename
                 timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
                 
-                # Create download button for combined results
-                combined_json = json.dumps({
-                    "total_documents": len(all_pdf_results),
-                    "documents": all_pdf_results
-                }, ensure_ascii=False, indent=2)
-                
                 # Save individual text files for each PDF and upload to Azure Blob Storage
                 blob_upload_results = []
                 text_files_info = []
@@ -400,13 +337,13 @@ def main():
                         base_filename = os.path.splitext(filename)[0]
                         
                         # Create the text content with key-value pairs
-                        page_results_text = create_individual_page_results_text(pdf_result)
+                        page_results_text = create_page_results_text(pdf_result)
                         
-                        # Create timestamp for filename
+                        # Create timestamp filename
                         timestamp_filename = f"{base_filename}_{timestamp}"
                         
                         # Upload text file to blob storage
-                        text_blob_name = f"text/{timestamp_filename}.txt"
+                        text_blob_name = f"{timestamp_filename}.txt"
                         text_success, text_url = upload_to_blob_storage(
                             blob_service_client,
                             azure_storage_container_name,
@@ -416,7 +353,7 @@ def main():
                         )
                         
                         # Upload JSON to blob storage
-                        json_blob_name = f"json/{timestamp_filename}.json"
+                        json_blob_name = f"{timestamp_filename}.json"
                         pdf_json = json.dumps(pdf_result, ensure_ascii=False, indent=2)
                         json_success, json_url = upload_to_blob_storage(
                             blob_service_client,
@@ -453,36 +390,18 @@ def main():
                 results_df = create_results_dataframe(all_pdf_results)
                 st.dataframe(results_df, use_container_width=True)
                 
-                # Create zip file with text extractions
-                text_zip = create_text_files_zip(all_pdf_results)
-                
                 # Download buttons
                 st.subheader("Download Options")
-                col1, col2, col3 = st.columns(3)
+                col1, col2 = st.columns(2)
                 
                 with col1:
-                    st.download_button(
-                        label="Download JSON Results",
-                        data=combined_json,
-                        file_name=f"financial_data_extraction_{timestamp}.json",
-                        mime="application/json"
-                    )
-                
-                with col2:
+                    # Download as CSV
                     csv = results_df.to_csv(index=False)
                     st.download_button(
                         label="Download CSV Results",
                         data=csv,
                         file_name=f"financial_data_extraction_{timestamp}.csv",
                         mime="text/csv"
-                    )
-                
-                with col3:
-                    st.download_button(
-                        label="Download Text Files (ZIP)",
-                        data=text_zip,
-                        file_name=f"financial_data_extraction_text_{timestamp}.zip",
-                        mime="application/zip"
                     )
                 
                 # Display Blob Storage upload results
@@ -505,7 +424,7 @@ def main():
                         st.info("No files were uploaded to Azure Blob Storage.")
                 
                 # Text files preview section
-                st.subheader("Page Results Text Files Preview")
+                st.subheader("Extracted Key-Value Pairs Preview")
                 
                 # Create tabs for each PDF
                 if len(all_pdf_results) > 0:
@@ -522,39 +441,22 @@ def main():
                                 page_results_text = next((info["text_content"] for info in text_files_info if info["filename"] == filename), "")
                                 timestamp_filename = next((info["timestamp_filename"] for info in text_files_info if info["filename"] == filename), "")
                             else:
-                                page_results_text = create_individual_page_results_text(pdf_result)
+                                page_results_text = create_page_results_text(pdf_result)
                                 timestamp_filename = f"{base_filename}_{timestamp}"
                             
                             # Display the key-value page results
                             st.text_area(
-                                "Extracted Key-Value Pairs",
+                                f"Extracted Data for {filename}",
                                 value=page_results_text,
-                                height=250,
+                                height=300,
                                 disabled=True
                             )
                             
-                            # Allow downloading the page results text file
+                            # Allow downloading individual text file
                             st.download_button(
-                                label=f"Download Page Results for {filename}",
+                                label=f"Download Text File for {filename}",
                                 data=page_results_text,
                                 file_name=f"{timestamp_filename}.txt",
-                                mime="text/plain"
-                            )
-                            
-                            # Display full text content
-                            full_text = pdf_result.get("full_text", "No text content available")
-                            st.text_area(
-                                "Full Extracted Text",
-                                value=full_text,
-                                height=400,
-                                disabled=True
-                            )
-                            
-                            # Download button for full text
-                            st.download_button(
-                                label=f"Download Full Text for {filename}",
-                                data=full_text,
-                                file_name=f"{timestamp_filename}_full_text.txt",
                                 mime="text/plain"
                             )
             else:
