@@ -1,0 +1,564 @@
+import base64
+import os
+import json
+import tempfile
+import streamlit as st
+from dotenv import load_dotenv
+from openai import AzureOpenAI
+from pathlib import Path
+import fitz  # PyMuPDF
+import pandas as pd
+from datetime import datetime
+import io
+import zipfile
+from azure.storage.blob import BlobServiceClient, ContentSettings
+
+# Load environment variables from .env file
+load_dotenv()
+
+# Azure OpenAI environment variables
+aoai_endpoint = os.getenv("AOAI_ENDPOINT")
+aoai_api_key = os.getenv("AOAI_API_KEY")
+aoai_deployment_name = os.getenv("AOAI_DEPLOYMENT")
+
+# Azure Blob Storage environment variables
+azure_storage_connection_string = os.getenv("AZURE_STORAGE_CONNECTION_STRING")
+azure_storage_container_name = os.getenv("AZURE_STORAGE_CONTAINER_NAME", "pdf-extraction-results")
+
+# Initialize the Azure OpenAI client
+@st.cache_resource
+def get_client():
+    return AzureOpenAI(
+        azure_endpoint=aoai_endpoint,
+        api_key=aoai_api_key,
+        api_version="2024-08-01-preview"
+    )
+
+# Initialize the Azure Blob Storage client
+@st.cache_resource
+def get_blob_service_client():
+    return BlobServiceClient.from_connection_string(azure_storage_connection_string)
+
+def image_to_data_url(image_bytes, mime_type='image/png'):
+    """
+    Convert image bytes to a data URL.
+    """
+    base64_encoded_data = base64.b64encode(image_bytes).decode('utf-8')
+    return f"data:{mime_type};base64,{base64_encoded_data}"
+
+def extract_text_from_page(page):
+    """
+    Extract text content from a PDF page.
+    """
+    return page.get_text()
+
+def call_azure_openai_vision(prompt, image_data_url, client, deployment_name):
+    """
+    Call the Azure OpenAI Vision service to analyze an image.
+    """
+    try:
+        completion = client.chat.completions.create(
+            model=deployment_name,
+            messages=[{
+                "role": "system",
+                "content": "You are an AI helpful assistant that extracts information from documents. Your task is to extract customer name, account number, and balance (in USD) from financial documents. Return ONLY a JSON object with keys 'customerName', 'accountNumber', and 'balanceUSD'."
+            }, {
+                "role": "user",
+                "content": [{
+                    "type": "text",
+                    "text": prompt
+                }, {
+                    "type": "image_url",
+                    "image_url": {
+                        "url": image_data_url
+                    }
+                }]
+            }],
+            max_tokens=2000,
+            temperature=0.7,
+            response_format={"type": "json_object"}
+        )
+        
+        # Extract and parse the response content
+        response_content = completion.choices[0].message.content
+        return json.loads(response_content)
+    except Exception as e:
+        st.error(f"Error calling Azure OpenAI: {str(e)}")
+        return {"error": str(e)}
+
+def process_pdf(pdf_file, prompt, client, deployment_name, progress_bar=None, progress_text=None):
+    """
+    Process a PDF file and extract information from all pages.
+    """
+    try:
+        # Create a temporary file to store the uploaded PDF
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp_file:
+            tmp_file.write(pdf_file.getvalue())
+            tmp_path = tmp_file.name
+        
+        # Get the filename
+        filename = pdf_file.name
+        
+        try:
+            # Open the PDF file
+            with fitz.open(tmp_path) as doc:
+                page_count = len(doc)
+                
+                if progress_text:
+                    progress_text.text(f"Processing {filename} - {page_count} pages...")
+                
+                # Create a list to store extracted data from all pages
+                all_page_results = []
+                all_text_content = []
+                
+                # Process each page in the PDF
+                for page_num in range(page_count):
+                    try:
+                        # Update progress
+                        if progress_bar:
+                            progress_bar.progress((page_num + 1) / page_count)
+                        if progress_text:
+                            progress_text.text(f"Processing {filename} - Page {page_num+1}/{page_count}")
+                        
+                        # Load the current page
+                        page = doc.load_page(page_num)
+                        
+                        # Extract text from the page
+                        page_text = extract_text_from_page(page)
+                        all_text_content.append(f"--- PAGE {page_num+1} ---\n{page_text}\n")
+                        
+                        # Process image
+                        zoom = 2  # Zoom factor for image quality
+                        pix = page.get_pixmap(matrix=fitz.Matrix(zoom, zoom))
+                        image_bytes = pix.tobytes()
+                        
+                        # Convert image to data URL
+                        image_data_url = image_to_data_url(image_bytes)
+                        
+                        # Call Azure OpenAI Vision to extract structured information
+                        extracted_info = call_azure_openai_vision(prompt, image_data_url, client, deployment_name)
+                        
+                        # Add page info to the collected results
+                        extracted_info_with_page = {
+                            "page": page_num + 1,
+                            "data": extracted_info,
+                            "text_content": page_text
+                        }
+                        
+                        # Add to our collection of all page results
+                        all_page_results.append(extracted_info_with_page)
+                        
+                    except Exception as e:
+                        error_msg = f"Error processing page {page_num+1} of {filename}: {e}"
+                        st.warning(error_msg)
+                        all_page_results.append({
+                            "page": page_num + 1,
+                            "data": {"error": str(e)},
+                            "text_content": "Error extracting text"
+                        })
+                        all_text_content.append(f"--- PAGE {page_num+1} ---\nError extracting text: {str(e)}\n")
+        finally:
+            # Clean up the temporary file
+            try:
+                os.unlink(tmp_path)
+            except Exception as e:
+                st.warning(f"Could not remove temporary file {tmp_path}: {e}")
+        
+        # Create a result object that contains all pages' data
+        final_result = {
+            "filename": filename,
+            "total_pages": page_count,
+            "pages": all_page_results,
+            "full_text": "".join(all_text_content)
+        }
+        
+        return final_result
+        
+    except Exception as e:
+        error_msg = f"Error processing {pdf_file.name}: {e}"
+        st.error(error_msg)
+        return {
+            "filename": pdf_file.name,
+            "error": str(e),
+            "total_pages": 0,
+            "pages": [],
+            "full_text": f"Error processing document: {str(e)}"
+        }
+
+def create_results_dataframe(all_pdf_results):
+    """
+    Create a pandas DataFrame from the extracted results for easy viewing.
+    """
+    rows = []
+    
+    for pdf_result in all_pdf_results:
+        filename = pdf_result["filename"]
+        
+        for page in pdf_result["pages"]:
+            page_num = page["page"]
+            data = page["data"]
+            
+            # Extract data or use placeholders for errors
+            customer_name = data.get("customerName", "N/A")
+            account_number = data.get("accountNumber", "N/A")
+            balance_usd = data.get("balanceUSD", "N/A")
+            
+            # Add to rows
+            rows.append({
+                "Filename": filename,
+                "Page": page_num,
+                "Customer Name": customer_name,
+                "Account Number": account_number,
+                "Balance (USD)": balance_usd
+            })
+    
+    # Create DataFrame
+    return pd.DataFrame(rows)
+
+def create_text_files_zip(all_pdf_results):
+    """
+    Create a zip file containing text files for each PDF.
+    """
+    # Create a BytesIO object to store the zip file
+    zip_buffer = io.BytesIO()
+    
+    # Create a ZipFile object
+    with zipfile.ZipFile(zip_buffer, 'a', zipfile.ZIP_DEFLATED, False) as zip_file:
+        for pdf_result in all_pdf_results:
+            filename = pdf_result["filename"]
+            base_filename = os.path.splitext(filename)[0]
+            
+            # Add the full text file
+            full_text = pdf_result.get("full_text", "No text content available")
+            zip_file.writestr(f"{base_filename}_full_text.txt", full_text)
+            
+            # Add structured data as a text file
+            structured_text = f"Filename: {filename}\nTotal Pages: {pdf_result['total_pages']}\n\n"
+            for page in pdf_result["pages"]:
+                page_num = page["page"]
+                data = page["data"]
+                
+                structured_text += f"--- PAGE {page_num} ---\n"
+                for key, value in data.items():
+                    structured_text += f"{key}: {value}\n"
+                structured_text += "\n"
+            
+            zip_file.writestr(f"{base_filename}_structured_data.txt", structured_text)
+    
+    # Seek to the beginning of the BytesIO object
+    zip_buffer.seek(0)
+    return zip_buffer
+
+def create_individual_page_results_text(pdf_result):
+    """
+    Create a text file for each page's extracted key-value data.
+    Returns a string with the formatted key-value pairs.
+    """
+    # Get current timestamp for filename
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    filename = pdf_result["filename"]
+    base_filename = os.path.splitext(filename)[0]
+    
+    # Create text content with simple key-value pairs
+    result_text = ""
+    
+    for page in pdf_result["pages"]:
+        page_num = page["page"]
+        data = page["data"]
+        
+        result_text += f"--- PAGE {page_num} ---\n"
+        
+        # Add each key-value pair in the format 'key: value'
+        for key, value in data.items():
+            # Convert camelCase to normal text (e.g., customerName -> Customer Name)
+            display_key = ''.join(' ' + char if char.isupper() else char for char in key).strip().lower()
+            result_text += f"{display_key}: {value}\n"
+        
+        result_text += "\n"
+        
+    return result_text
+
+def upload_to_blob_storage(blob_service_client, container_name, blob_name, data, content_type):
+    """
+    Upload data to Azure Blob Storage.
+    """
+    try:
+        # Get the blob client
+        container_client = blob_service_client.get_container_client(container_name)
+        
+        # Create the container if it doesn't exist
+        if not container_client.exists():
+            container_client.create_container()
+        
+        # Upload blob
+        blob_client = container_client.get_blob_client(blob_name)
+        
+        # Set content settings
+        content_settings = ContentSettings(content_type=content_type)
+        
+        # Upload the file
+        blob_client.upload_blob(data, overwrite=True, content_settings=content_settings)
+        
+        return True, blob_client.url
+    except Exception as e:
+        return False, str(e)
+
+def main():
+    st.set_page_config(
+        page_title="PDF Financial Data Extractor",
+        page_icon="📊",
+        layout="wide"
+    )
+    
+    st.title("PDF Financial Data Extractor")
+    st.subheader("Upload financial documents to extract customer information")
+    
+    # Check if Azure OpenAI credentials are available
+    if not all([aoai_endpoint, aoai_api_key, aoai_deployment_name]):
+        st.error("Azure OpenAI credentials are missing. Please set AOAI_ENDPOINT, AOAI_API_KEY, and AOAI_DEPLOYMENT environment variables.")
+        return
+    
+    # Check if Azure Blob Storage credentials are available
+    if not azure_storage_connection_string:
+        st.warning("Azure Blob Storage connection string is missing. Results will not be saved to the cloud. Please set AZURE_STORAGE_CONNECTION_STRING environment variable.")
+    
+    # Initialize the clients
+    client = get_client()
+    blob_service_client = get_blob_service_client() if azure_storage_connection_string else None
+    
+    # File uploader
+    uploaded_files = st.file_uploader(
+        "Upload PDF files", 
+        type="pdf", 
+        accept_multiple_files=True,
+        help="Upload one or more PDF files containing financial statements"
+    )
+    
+    # Advanced settings in an expandable section
+    with st.expander("Advanced Settings"):
+        prompt = st.text_area(
+            "Extraction Prompt", 
+            """Based on this image, extract the following information:   
+            1) What is the customer name?  
+            2) What is the account number?
+            3) What is the balance (in USD) in the account?""",
+            help="Customize the prompt sent to Azure OpenAI Vision to extract information"
+        )
+    
+    # Process button
+    if uploaded_files and st.button("Process Documents", type="primary"):
+        if not uploaded_files:
+            st.warning("Please upload at least one PDF file.")
+            return
+            
+        with st.spinner("Processing documents..."):
+            # Create containers for progress tracking
+            progress_container = st.container()
+            with progress_container:
+                progress_bar = st.progress(0)
+                progress_text = st.empty()
+                
+                # Store all PDF results
+                all_pdf_results = []
+                
+                # Process each uploaded PDF
+                for i, pdf_file in enumerate(uploaded_files):
+                    progress_text.text(f"Processing file {i+1}/{len(uploaded_files)}: {pdf_file.name}")
+                    
+                    # Process the PDF and get results
+                    pdf_result = process_pdf(
+                        pdf_file, 
+                        prompt, 
+                        client, 
+                        aoai_deployment_name,
+                        progress_bar,
+                        progress_text
+                    )
+                    
+                    # Add to our collection of all PDF results
+                    all_pdf_results.append(pdf_result)
+                    
+                    # Update overall progress
+                    progress_bar.progress((i + 1) / len(uploaded_files))
+                
+                # Create a timestamp for the filename
+                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                
+                # Create download button for combined results
+                combined_json = json.dumps({
+                    "total_documents": len(all_pdf_results),
+                    "documents": all_pdf_results
+                }, ensure_ascii=False, indent=2)
+                
+                # Save individual text files for each PDF and upload to Azure Blob Storage
+                blob_upload_results = []
+                text_files_info = []
+                
+                if blob_service_client:
+                    for pdf_result in all_pdf_results:
+                        filename = pdf_result["filename"]
+                        base_filename = os.path.splitext(filename)[0]
+                        
+                        # Create the text content with key-value pairs
+                        page_results_text = create_individual_page_results_text(pdf_result)
+                        
+                        # Create timestamp for filename
+                        timestamp_filename = f"{base_filename}_{timestamp}"
+                        
+                        # Upload text file to blob storage
+                        text_blob_name = f"text/{timestamp_filename}.txt"
+                        text_success, text_url = upload_to_blob_storage(
+                            blob_service_client,
+                            azure_storage_container_name,
+                            text_blob_name,
+                            page_results_text,
+                            "text/plain"
+                        )
+                        
+                        # Upload JSON to blob storage
+                        json_blob_name = f"json/{timestamp_filename}.json"
+                        pdf_json = json.dumps(pdf_result, ensure_ascii=False, indent=2)
+                        json_success, json_url = upload_to_blob_storage(
+                            blob_service_client,
+                            azure_storage_container_name,
+                            json_blob_name,
+                            pdf_json,
+                            "application/json"
+                        )
+                        
+                        # Store results
+                        blob_upload_results.append({
+                            "filename": filename,
+                            "text_success": text_success,
+                            "text_url": text_url if text_success else None,
+                            "json_success": json_success,
+                            "json_url": json_url if json_success else None
+                        })
+                        
+                        # Store text file info for display
+                        text_files_info.append({
+                            "filename": filename,
+                            "text_content": page_results_text,
+                            "timestamp_filename": timestamp_filename
+                        })
+                
+                progress_text.text("Processing complete!")
+                progress_bar.progress(1.0)
+                
+            # Display results
+            st.subheader("Extraction Results")
+            
+            # Create a DataFrame view
+            if all_pdf_results:
+                results_df = create_results_dataframe(all_pdf_results)
+                st.dataframe(results_df, use_container_width=True)
+                
+                # Create zip file with text extractions
+                text_zip = create_text_files_zip(all_pdf_results)
+                
+                # Download buttons
+                st.subheader("Download Options")
+                col1, col2, col3 = st.columns(3)
+                
+                with col1:
+                    st.download_button(
+                        label="Download JSON Results",
+                        data=combined_json,
+                        file_name=f"financial_data_extraction_{timestamp}.json",
+                        mime="application/json"
+                    )
+                
+                with col2:
+                    csv = results_df.to_csv(index=False)
+                    st.download_button(
+                        label="Download CSV Results",
+                        data=csv,
+                        file_name=f"financial_data_extraction_{timestamp}.csv",
+                        mime="text/csv"
+                    )
+                
+                with col3:
+                    st.download_button(
+                        label="Download Text Files (ZIP)",
+                        data=text_zip,
+                        file_name=f"financial_data_extraction_text_{timestamp}.zip",
+                        mime="application/zip"
+                    )
+                
+                # Display Blob Storage upload results
+                if blob_service_client:
+                    st.subheader("Azure Blob Storage Upload Results")
+                    
+                    if blob_upload_results:
+                        # Create a table to show upload results
+                        upload_rows = []
+                        for result in blob_upload_results:
+                            upload_rows.append({
+                                "Filename": result["filename"],
+                                "Text File": "✅ Uploaded" if result["text_success"] else "❌ Failed",
+                                "JSON File": "✅ Uploaded" if result["json_success"] else "❌ Failed"
+                            })
+                        
+                        upload_df = pd.DataFrame(upload_rows)
+                        st.dataframe(upload_df, use_container_width=True)
+                    else:
+                        st.info("No files were uploaded to Azure Blob Storage.")
+                
+                # Text files preview section
+                st.subheader("Page Results Text Files Preview")
+                
+                # Create tabs for each PDF
+                if len(all_pdf_results) > 0:
+                    pdf_tabs = st.tabs([pdf_result["filename"] for pdf_result in all_pdf_results])
+                    
+                    for i, tab in enumerate(pdf_tabs):
+                        with tab:
+                            pdf_result = all_pdf_results[i]
+                            filename = pdf_result["filename"]
+                            base_filename = os.path.splitext(filename)[0]
+                            
+                            # Generate or retrieve page results text
+                            if text_files_info:
+                                page_results_text = next((info["text_content"] for info in text_files_info if info["filename"] == filename), "")
+                                timestamp_filename = next((info["timestamp_filename"] for info in text_files_info if info["filename"] == filename), "")
+                            else:
+                                page_results_text = create_individual_page_results_text(pdf_result)
+                                timestamp_filename = f"{base_filename}_{timestamp}"
+                            
+                            # Display the key-value page results
+                            st.text_area(
+                                "Extracted Key-Value Pairs",
+                                value=page_results_text,
+                                height=250,
+                                disabled=True
+                            )
+                            
+                            # Allow downloading the page results text file
+                            st.download_button(
+                                label=f"Download Page Results for {filename}",
+                                data=page_results_text,
+                                file_name=f"{timestamp_filename}.txt",
+                                mime="text/plain"
+                            )
+                            
+                            # Display full text content
+                            full_text = pdf_result.get("full_text", "No text content available")
+                            st.text_area(
+                                "Full Extracted Text",
+                                value=full_text,
+                                height=400,
+                                disabled=True
+                            )
+                            
+                            # Download button for full text
+                            st.download_button(
+                                label=f"Download Full Text for {filename}",
+                                data=full_text,
+                                file_name=f"{timestamp_filename}_full_text.txt",
+                                mime="text/plain"
+                            )
+            else:
+                st.warning("No results were extracted from the PDFs.")
+
+if __name__ == "__main__":
+    main()
