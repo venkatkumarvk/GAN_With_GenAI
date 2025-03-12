@@ -24,18 +24,6 @@ client = AzureOpenAI(
 def image_to_data_url(image_bytes, mime_type='image/png'):  
     """  
     Convert image bytes to a data URL.  
-  
-    Parameters:  
-    -----------  
-    image_bytes : bytes  
-        The image data in bytes.  
-    mime_type : str  
-        The MIME type of the image.  
-  
-    Returns:  
-    --------  
-    str  
-        A data URL representing the image.  
     """  
     base64_encoded_data = base64.b64encode(image_bytes).decode('utf-8')  
     return f"data:{mime_type};base64,{base64_encoded_data}"  
@@ -43,41 +31,13 @@ def image_to_data_url(image_bytes, mime_type='image/png'):
 def extract_text_from_page(page):
     """
     Extract text content from a PDF page.
-    
-    Parameters:
-    -----------
-    page : fitz.Page
-        The PDF page object.
-        
-    Returns:
-    --------
-    str
-        The extracted text content.
     """
-    text = page.get_text()
-    return text
+    return page.get_text()
 
 def call_azure_openai_vision(prompt, image_data_url, client=client, aoai_deployment_name=aoai_deployment_name):  
     """  
-    Call the Azure OpenAI Vision service to analyze an image using the standard API.
-  
-    Parameters:  
-    -----------  
-    prompt : str  
-        The prompt to send to the model.  
-    image_data_url : str  
-        The data URL of the image.  
-    client : AzureOpenAI  
-        The Azure OpenAI client instance.  
-    aoai_deployment_name : str  
-        The deployment name of the Azure OpenAI model.  
-
-    Returns:  
-    --------  
-    dict  
-        The parsed response containing extracted information.
+    Call the Azure OpenAI Vision service to analyze an image.
     """  
-  
     completion = client.chat.completions.create(  
         model=aoai_deployment_name,  
         messages=[{  
@@ -100,53 +60,97 @@ def call_azure_openai_vision(prompt, image_data_url, client=client, aoai_deploym
         response_format={"type": "json_object"}
     )  
     
-    # Extract the response content
+    # Extract and parse the response content
     response_content = completion.choices[0].message.content
-    
-    # Parse the JSON string into a Python dictionary
-    extracted_information = json.loads(response_content)
-    
-    return extracted_information  
+    return json.loads(response_content)  
 
-def save_structured_text_file(extracted_info, output_path, page_num):
+def process_pdf(pdf_path, prompt):
     """
-    Save extracted structured information to a formatted text file.
+    Process a PDF file and extract information from all pages at once.
     
     Parameters:
     -----------
-    extracted_info : dict
-        The extracted structured information.
-    output_path : Path
-        The path to save the text file.
-    page_num : int
-        The page number.
+    pdf_path : Path
+        Path to the PDF file.
+    prompt : str
+        The prompt to use for Azure OpenAI Vision.
+        
+    Returns:
+    --------
+    dict
+        A dictionary containing the extracted information from all pages.
     """
-    with open(output_path, 'w', encoding='utf-8') as text_file:
-        text_file.write(f"Page {page_num}\n")
-        for key, value in extracted_info.items():
-            text_file.write(f"\"{key}\": \"{value}\"\n")
+    try:
+        # Open the PDF file
+        doc = fitz.open(pdf_path)
+        page_count = len(doc)
+        print(f"Processing {pdf_path.name} - {page_count} pages...")
+        
+        # Create a list to store extracted data from all pages
+        all_page_results = []
+        
+        # Process each page in the PDF
+        for page_num in range(page_count):
+            try:
+                # Load the current page
+                page = doc.load_page(page_num)
+                
+                # Extract text from the page
+                page_text = extract_text_from_page(page)
+                
+                # Process image
+                zoom = 2  # Zoom factor for image quality
+                pix = page.get_pixmap(matrix=fitz.Matrix(zoom, zoom))
+                image_bytes = pix.tobytes()
+                
+                # Convert image to data URL
+                image_data_url = image_to_data_url(image_bytes)
+                
+                # Call Azure OpenAI Vision to extract structured information
+                extracted_info = call_azure_openai_vision(prompt, image_data_url)
+                
+                # Add page info to the collected results
+                extracted_info_with_page = {
+                    "page": page_num + 1,
+                    "data": extracted_info,
+                    "text_content": page_text
+                }
+                
+                # Add to our collection of all page results
+                all_page_results.append(extracted_info_with_page)
+                print(f"- Processed page {page_num+1}: {extracted_info}")
+                
+            except Exception as e:
+                print(f"Error processing page {page_num+1} of {pdf_path.name}: {e}")
+                all_page_results.append({
+                    "page": page_num + 1,
+                    "data": {"error": str(e)},
+                    "text_content": "Error extracting text"
+                })
+        
+        # Create a result object that contains all pages' data
+        final_result = {
+            "filename": pdf_path.name,
+            "total_pages": page_count,
+            "pages": all_page_results
+        }
+        
+        return final_result
+        
+    except Exception as e:
+        print(f"Error processing {pdf_path.name}: {e}")
+        return {
+            "filename": pdf_path.name,
+            "error": str(e),
+            "total_pages": 0,
+            "pages": []
+        }
   
 def main():  
     # Define input and output directories  
     input_dir = Path('input_documents')  
     output_dir = Path('output_results')  
     output_dir.mkdir(exist_ok=True)  
-
-    # Define output images directory  
-    output_images_dir = Path('output_images')  
-    output_images_dir.mkdir(exist_ok=True)
-    
-    # Define output text directory
-    output_text_dir = Path('output_text')
-    output_text_dir.mkdir(exist_ok=True)
-    
-    # Define output structured text directory
-    output_structured_txt_dir = Path('output_structured_txt')
-    output_structured_txt_dir.mkdir(exist_ok=True)
-    
-    # Define output structured JSON directory
-    output_structured_json_dir = Path('output_structured_json')
-    output_structured_json_dir.mkdir(exist_ok=True)
   
     # Prompt to extract specific information  
     prompt = """Based on this image, extract the following information:   
@@ -154,97 +158,34 @@ def main():
                 2) What is the account number?
                 3) What is the balance (in USD) in the account?"""  
   
+    # Store all PDF results
+    all_pdf_results = []
+    
     # Iterate over each PDF in the input directory  
     for pdf_file in input_dir.glob('*.pdf'):  
-        if pdf_file.is_file():  
-            print(f"Processing {pdf_file.name}...")  
-  
-            # Open the PDF file  
-            try:  
-                doc = fitz.open(pdf_file)
-                page_count = len(doc)
-                print(f"Found {page_count} pages in {pdf_file.name}")
-                
-                # Create a list to store extracted data from all pages
-                all_page_results = []
-                
-                # Process each page in the PDF
-                for page_num in range(page_count):
-                    try:
-                        # Load the current page
-                        page = doc.load_page(page_num)
-                        
-                        # Extract text from the page
-                        page_text = extract_text_from_page(page)
-                        
-                        # Save extracted text to a file
-                        text_output_path = output_text_dir / f"{pdf_file.stem}_page{page_num+1}.txt"
-                        with open(text_output_path, 'w', encoding='utf-8') as text_file:
-                            text_file.write(page_text)
-                        print(f"Saved raw text to {text_output_path.name}")
-                        
-                        # Process image
-                        zoom = 2  # Zoom factor for image quality
-                        pix = page.get_pixmap(matrix=fitz.Matrix(zoom, zoom))
-                        image_bytes = pix.tobytes()
-                        
-                        # Save the image to output_images directory with page number in filename
-                        image_output_path = output_images_dir / f"{pdf_file.stem}_page{page_num+1}.png"
-                        pix.save(str(image_output_path))
-                        print(f"Saved image to {image_output_path.name}")
-                        
-                        # Convert image to data URL
-                        image_data_url = image_to_data_url(image_bytes)
-                        
-                        # Call Azure OpenAI Vision to extract structured information
-                        extracted_info = call_azure_openai_vision(prompt, image_data_url)
-                        
-                        # 1. Save structured info to text file in the format requested
-                        txt_output_path = output_structured_txt_dir / f"{pdf_file.stem}_page{page_num+1}.txt"
-                        save_structured_text_file(extracted_info, txt_output_path, page_num+1)
-                        print(f"Saved structured text to {txt_output_path.name}")
-                        
-                        # 2. Save structured info to JSON file for each page
-                        json_output_path = output_structured_json_dir / f"{pdf_file.stem}_page{page_num+1}.json"
-                        with open(json_output_path, 'w', encoding='utf-8') as json_file:
-                            page_json = {
-                                "page": page_num + 1,
-                                "data": extracted_info
-                            }
-                            json.dump(page_json, json_file, ensure_ascii=False, indent=2)
-                        print(f"Saved structured JSON to {json_output_path.name}")
-                        
-                        # Add page info to the collected results for the complete PDF JSON
-                        extracted_info_with_page = {
-                            "page": page_num + 1,
-                            "data": extracted_info,
-                            "text_content": page_text
-                        }
-                        
-                        # Add to our collection of all page results
-                        all_page_results.append(extracted_info_with_page)
-                        
-                    except Exception as e:
-                        print(f"Error processing page {page_num+1} of {pdf_file.name}: {e}")
-                
-                # Define output file path for the entire PDF
-                output_file = output_dir / f"{pdf_file.stem}.json"
-                
-                # Create a result object that contains all pages' data
-                final_result = {
-                    "filename": pdf_file.name,
-                    "total_pages": page_count,
-                    "pages": all_page_results
-                }
-                
-                # Save the result as a JSON file
-                with open(output_file, 'w', encoding='utf-8') as json_file:
-                    json.dump(final_result, json_file, ensure_ascii=False, indent=2)
-                
-                print(f"Saved complete PDF information to {output_file.name}")
-                
-            except Exception as e:
-                print(f"Error processing {pdf_file.name}: {e}")
+        if pdf_file.is_file():
+            # Process the PDF and get results
+            pdf_result = process_pdf(pdf_file, prompt)
+            
+            # Add to our collection of all PDF results
+            all_pdf_results.append(pdf_result)
+            
+            # Save individual PDF result
+            output_file = output_dir / f"{pdf_file.stem}.json"
+            with open(output_file, 'w', encoding='utf-8') as json_file:
+                json.dump(pdf_result, json_file, ensure_ascii=False, indent=2)
+            
+            print(f"Saved complete PDF information to {output_file.name}")
+    
+    # Save combined results from all PDFs
+    combined_output_file = output_dir / "all_documents_results.json"
+    with open(combined_output_file, 'w', encoding='utf-8') as json_file:
+        json.dump({
+            "total_documents": len(all_pdf_results),
+            "documents": all_pdf_results
+        }, json_file, ensure_ascii=False, indent=2)
+    
+    print(f"Saved combined results from all PDFs to {combined_output_file.name}")
   
 if __name__ == "__main__":  
     main()
