@@ -3,7 +3,6 @@ import os
 import json  
 from dotenv import load_dotenv  
 from openai import AzureOpenAI  
-from pydantic import BaseModel  
 from pathlib import Path  
 import fitz  # PyMuPDF  
   
@@ -58,9 +57,9 @@ def extract_text_from_page(page):
     text = page.get_text()
     return text
 
-def call_azure_openai(prompt, image_data_url, response_format, client=client, aoai_deployment_name=aoai_deployment_name):  
+def call_azure_openai_vision(prompt, image_data_url, client=client, aoai_deployment_name=aoai_deployment_name):  
     """  
-    Call the Azure OpenAI service to analyze an image.  
+    Call the Azure OpenAI Vision service to analyze an image using the standard API.
   
     Parameters:  
     -----------  
@@ -68,8 +67,6 @@ def call_azure_openai(prompt, image_data_url, response_format, client=client, ao
         The prompt to send to the model.  
     image_data_url : str  
         The data URL of the image.  
-    response_format : BaseModel  
-        The pydantic BaseModel defining the expected structured output.  
     client : AzureOpenAI  
         The Azure OpenAI client instance.  
     aoai_deployment_name : str  
@@ -78,14 +75,14 @@ def call_azure_openai(prompt, image_data_url, response_format, client=client, ao
     Returns:  
     --------  
     dict  
-        The parsed response from the Azure OpenAI model.  
+        The parsed response containing extracted information.
     """  
   
-    completion = client.beta.chat.completions.parse(  
+    completion = client.chat.completions.create(  
         model=aoai_deployment_name,  
         messages=[{  
             "role": "system",  
-            "content": "You are an AI helpful assistant that extracts information from documents."  
+            "content": "You are an AI helpful assistant that extracts information from documents. Your task is to extract customer name, account number, and balance (in USD) from financial documents. Return ONLY a JSON object with keys 'customerName', 'accountNumber', and 'balanceUSD'."  
         }, {  
             "role": "user",  
             "content": [{  
@@ -100,13 +97,15 @@ def call_azure_openai(prompt, image_data_url, response_format, client=client, ao
         }],  
         max_tokens=2000,  
         temperature=0.7,  
-        response_format=response_format  
+        response_format={"type": "json_object"}
     )  
-
-    response = json.loads(completion.model_dump_json(indent=2))
-
-    extracted_information = response['choices'][0]['message']['parsed']  
-
+    
+    # Extract the response content
+    response_content = completion.choices[0].message.content
+    
+    # Parse the JSON string into a Python dictionary
+    extracted_information = json.loads(response_content)
+    
     return extracted_information  
 
 def save_structured_text_file(extracted_info, output_path, page_num):
@@ -150,16 +149,10 @@ def main():
     output_structured_json_dir.mkdir(exist_ok=True)
   
     # Prompt to extract specific information  
-    prompt = """Based on this image, answer the questions:   
+    prompt = """Based on this image, extract the following information:   
                 1) What is the customer name?  
                 2) What is the account number?
                 3) What is the balance (in USD) in the account?"""  
-  
-    # Define the structured output format using pydantic  
-    class ExtractedAnswers(BaseModel):  
-        customerName: str  
-        accountNumber: str
-        balanceUSD: str  
   
     # Iterate over each PDF in the input directory  
     for pdf_file in input_dir.glob('*.pdf'):  
@@ -203,8 +196,8 @@ def main():
                         # Convert image to data URL
                         image_data_url = image_to_data_url(image_bytes)
                         
-                        # Call Azure OpenAI to extract structured information
-                        extracted_info = call_azure_openai(prompt, image_data_url, response_format=ExtractedAnswers)
+                        # Call Azure OpenAI Vision to extract structured information
+                        extracted_info = call_azure_openai_vision(prompt, image_data_url)
                         
                         # 1. Save structured info to text file in the format requested
                         txt_output_path = output_structured_txt_dir / f"{pdf_file.stem}_page{page_num+1}.txt"
