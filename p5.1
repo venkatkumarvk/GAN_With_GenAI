@@ -1,0 +1,119 @@
+def get_blob_containers(blob_service_client):
+    """
+    Get a list of available containers in the Azure Blob Storage account.
+    """
+    try:
+        containers = []
+        for container in blob_service_client.list_containers():
+            containers.append(container.name)
+        return containers
+    except Exception as e:
+        st.error(f"Error listing containers: {e}")
+        return []
+
+def get_blob_folders(blob_service_client, container_name):
+    """
+    Get a list of "folders" (common prefixes) in the Azure Blob Storage container.
+    Note: Blob storage doesn't have actual folders, but we can simulate them using prefixes.
+    """
+    try:
+        container_client = blob_service_client.get_container_client(container_name)
+        
+        # Get all blobs in the container
+        blobs = container_client.list_blobs()
+        
+        # Extract folder paths (common prefixes before the last '/')
+        folders = set()
+        for blob in blobs:
+            name = blob.name
+            if '/' in name:
+                folder = name.rsplit('/', 1)[0] + '/'
+                folders.add(folder)
+            
+        # Add a root option
+        folders.add("")  # root directory
+        
+        return sorted(list(folders))
+    except Exception as e:
+        st.error(f"Error listing folders in container {container_name}: {e}")
+        return []
+
+def list_pdf_blobs(blob_service_client, container_name, folder_prefix=""):
+    """
+    List all PDF blobs in the specified container and folder prefix.
+    """
+    try:
+        container_client = blob_service_client.get_container_client(container_name)
+        
+        # Get blobs with the folder prefix that are PDFs
+        pdf_blobs = []
+        for blob in container_client.list_blobs(name_starts_with=folder_prefix):
+            if blob.name.lower().endswith('.pdf'):
+                pdf_blobs.append(blob.name)
+                
+        return pdf_blobs
+    except Exception as e:
+        st.error(f"Error listing PDF blobs: {e}")
+        return []
+
+def download_blob_to_memory(blob_service_client, container_name, blob_name):
+    """
+    Download a blob to memory.
+    """
+    try:
+        container_client = blob_service_client.get_container_client(container_name)
+        blob_client = container_client.get_blob_client(blob_name)
+        
+        # Download the blob content
+        download_stream = blob_client.download_blob()
+        content = download_stream.readall()
+        
+        return content
+    except Exception as e:
+        st.error(f"Error downloading blob {blob_name}: {e}")
+        return None
+
+def process_blob_pdfs(blob_service_client, container_name, pdf_blobs, prompt, client, deployment_name):
+    """
+    Process PDF blobs from Azure Blob Storage.
+    """
+    all_pdf_results = []
+    
+    # Create progress tracking
+    progress_bar = st.progress(0)
+    progress_text = st.empty()
+    
+    for i, blob_name in enumerate(pdf_blobs):
+        progress_text.text(f"Processing file {i+1}/{len(pdf_blobs)}: {blob_name}")
+        
+        # Download blob to memory
+        blob_content = download_blob_to_memory(blob_service_client, container_name, blob_name)
+        
+        if blob_content is None:
+            st.warning(f"Could not download blob: {blob_name}")
+            continue
+        
+        # Create a BytesIO object from the blob content
+        blob_file = io.BytesIO(blob_content)
+        blob_file.name = blob_name.split('/')[-1]  # Set the filename to the blob name without folder path
+        
+        # Process the PDF
+        pdf_result = process_pdf(
+            blob_file,
+            prompt,
+            client,
+            deployment_name,
+            progress_bar,
+            progress_text
+        )
+        
+        # Add to results
+        all_pdf_results.append(pdf_result)
+        
+        # Update overall progress
+        progress_bar.progress((i + 1) / len(pdf_blobs))
+    
+    progress_text.text("Processing complete!")
+    progress_bar.progress(1.0)
+    
+    return all_pdf_results
