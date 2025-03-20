@@ -237,10 +237,10 @@ def convert_pdf_to_base64(pdf_file):
         st.error(f"Error converting PDF to base64: {e}")
         return None
 
-def display_pdf_viewer(base64_pdf, height=500):
+def display_pdf_viewer(base64_pdf, height=800):
     """
     Display a PDF viewer in the Streamlit app using base64 encoded PDF.
-    No temporary files are created on disk.
+    No temporary files are created on disk. Shows all pages of the PDF.
     
     Parameters:
     - base64_pdf: base64 encoded PDF data
@@ -250,13 +250,13 @@ def display_pdf_viewer(base64_pdf, height=500):
         st.error("No PDF data available to display")
         return
         
-    # Create the HTML with PDF.js for better viewing
+    # Create the HTML with a PDF viewer that shows all pages at full width
     pdf_display = f"""
     <iframe src="data:application/pdf;base64,{base64_pdf}" width="100%" height="{height}" 
-    type="application/pdf"></iframe>
+    type="application/pdf" style="width: 100%; height: {height}px;"></iframe>
     """
     
-    # Display the PDF
+    # Display the PDF at full container width
     st.markdown(pdf_display, unsafe_allow_html=True)
 
 def display_pdf_preview_tab(all_pdf_results, files, input_method, blob_service_client=None, container_name=None):
@@ -313,7 +313,8 @@ def display_pdf_preview_tab(all_pdf_results, files, input_method, blob_service_c
                 
                 if base64_pdf:
                     st.write(f"### Preview of {filename}")
-                    display_pdf_viewer(base64_pdf)
+                    # Use taller display for better viewing of multi-page documents
+                    display_pdf_viewer(base64_pdf, height=800)
                 else:
                     st.error(f"Could not create preview for {filename}")
                     
@@ -810,8 +811,4 @@ def evaluate_extraction_results(all_pdf_results):
             total = evaluation_results["field_confidence"][field]["total"]
             if total > 0:
                 above_threshold = evaluation_results["field_confidence"][field]["pages_above_threshold"]
-                evaluation_results["field_confidence"][field]["percent_above_threshold"] = round((above_threshold / total) * 100, 2)
-    
-    # Calculate overall success rate
-    if evaluation_results["total_pages"] > 0:
-        evaluation_
+                evaluation_results["field_confidence"][field]["percent_above_threshold"] = round((above_
