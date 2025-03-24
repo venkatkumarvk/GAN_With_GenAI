@@ -1,0 +1,272 @@
+def upload_to_blob_storage_with_confidence_check(blob_service_client, container_name, pdf_result, timestamp):
+    """
+    Upload data to Azure Blob Storage only if confidence scores are high enough.
+    Returns a dict with upload status information.
+    """
+    filename = pdf_result["filename"]
+    base_filename = os.path.splitext(filename)[0]
+    timestamp_filename = f"{base_filename}_{timestamp}"
+    
+    # Check confidence scores
+    high_confidence = True  # Assume high confidence initially
+    
+    for page in pdf_result["pages"]:
+        data = page["data"]
+        
+        if "error" in data:
+            high_confidence = False
+            continue
+            
+        for field in ["VendorName", "InvoiceNumber", "InvoiceDate", "CustomerName", 
+                    "PurchaseOrder", "StockCode", "UnitPrice", "InvoiceAmount", 
+                    "Freight", "Salestax", "Total"]:
+            field_data = data.get(field, {})
+            
+            if isinstance(field_data, dict) and "confidence" in field_data:
+                confidence = field_data.get("confidence", 0)
+                
+                # If any field has confidence < 0.9, mark as low confidence
+                if confidence < 0.9:
+                    high_confidence = False
+                    break
+        
+        if not high_confidence:
+            break
+    
+    # If all fields have high confidence, upload to blob storage
+    if high_confidence:
+        # Create the text content with key-value pairs
+        page_results_text = create_page_results_text(pdf_result)
+        
+        # Upload text file to blob storage
+        text_blob_name = f"{timestamp_filename}.txt"
+        text_success, text_url = upload_to_blob_storage(
+            blob_service_client,
+            container_name,
+            text_blob_name,
+            page_results_text,
+            "text/plain"
+        )
+        
+        # Upload JSON to blob storage
+        json_blob_name = f"{timestamp_filename}.json"
+        pdf_json = json.dumps(pdf_result, ensure_ascii=False, indent=2)
+        json_success, json_url = upload_to_blob_storage(
+            blob_service_client,
+            container_name,
+            json_blob_name,
+            pdf_json,
+            "application/json"
+        )
+        
+        return {
+            "filename": filename,
+            "text_success": text_success,
+            "text_url": text_url if text_success else None,
+            "json_success": json_success,
+            "json_url": json_url if json_success else None,
+            "high_confidence": True
+        }
+    else:
+        # Return status indicating low confidence (no upload)
+        return {
+            "filename": filename,
+            "text_success": False,
+            "text_url": None,
+            "json_success": False,
+            "json_url": None,
+            "high_confidence": False
+        }
+        
+        
+        
+#Main
+# Replace the existing blob upload code with this
+blob_upload_results = []
+text_files_info = []
+
+if blob_service_client:
+    result_upload_container = st.text_input(
+        "Output Container Name",
+        value=azure_storage_container_name,
+        help="Container where results will be uploaded (will be created if doesn't exist)"
+    )
+    
+    st.info(f"Uploading high confidence results to Azure Blob Storage container: {result_upload_container}")
+    
+    for pdf_result in all_pdf_results:
+        # Use the confidence-aware upload function
+        upload_result = upload_to_blob_storage_with_confidence_check(
+            blob_service_client,
+            result_upload_container,
+            pdf_result,
+            timestamp
+        )
+        
+        # Add to results
+        blob_upload_results.append(upload_result)
+        
+        # Store text file info for display (for all results, regardless of confidence)
+        text_files_info.append({
+            "filename": pdf_result["filename"],
+            "text_content": create_page_results_text(pdf_result),
+            "timestamp_filename": f"{os.path.splitext(pdf_result['filename'])[0]}_{timestamp}"
+        })
+        
+        
+#Main
+# In the section where you display upload results
+if blob_service_client and blob_upload_results:
+    st.subheader("5. Azure Blob Storage Upload Results")
+    
+    # Create a table to show upload results
+    upload_rows = []
+    for result in blob_upload_results:
+        if result["high_confidence"]:
+            upload_rows.append({
+                "Filename": result["filename"],
+                "Result": "✅ Uploaded (high confidence)",
+                "Text File": "✅ Uploaded" if result["text_success"] else "❌ Failed",
+                "JSON File": "✅ Uploaded" if result["json_success"] else "❌ Failed"
+            })
+        else:
+            upload_rows.append({
+                "Filename": result["filename"],
+                "Result": "⚠️ Not uploaded (low confidence)",
+                "Text File": "N/A",
+                "JSON File": "N/A"
+            })
+    
+    upload_df = pd.DataFrame(upload_rows)
+    st.dataframe(upload_df, use_container_width=True)
+    
+    
+    
+#Function
+
+def create_results_dataframe(all_pdf_results):
+    """
+    Create a pandas DataFrame from the extracted results for easy viewing.
+    Add date and time columns to the data.
+    """
+    rows = []
+    
+    # Define the fields we're extracting
+    fields = [
+        "VendorName", "InvoiceNumber", "InvoiceDate", "CustomerName", 
+        "PurchaseOrder", "StockCode", "UnitPrice", "InvoiceAmount", 
+        "Freight", "Salestax", "Total"
+    ]
+    
+    # Get current date and time
+    current_date = datetime.now().strftime("%Y-%m-%d")
+    current_time = datetime.now().strftime("%H:%M:%S")
+    
+    for pdf_result in all_pdf_results:
+        filename = pdf_result["filename"]
+        
+        for page in pdf_result["pages"]:
+            page_num = page["page"]
+            data = page["data"]
+            
+            # Check for errors
+            if "error" in data:
+                row_data = {
+                    "Filename": filename,
+                    "Page": page_num,
+                    "ExtractDate": current_date,  # Add date column
+                    "ExtractTime": current_time   # Add time column
+                }
+                
+                # Add placeholders for all fields and confidence values
+                for field in fields:
+                    row_data[field] = "N/A"
+                    row_data[f"{field} Confidence"] = 0
+                
+                rows.append(row_data)
+                continue
+            
+            # Initialize row data
+            row_data = {
+                "Filename": filename,
+                "Page": page_num,
+                "ExtractDate": current_date,  # Add date column
+                "ExtractTime": current_time   # Add time column
+            }
+            
+            # Process each field
+            for field in fields:
+                field_data = data.get(field, {})
+                
+                if isinstance(field_data, dict):
+                    value = field_data.get("value", "N/A")
+                    confidence = field_data.get("confidence", 0)
+                else:
+                    value = field_data if field_data else "N/A"
+                    confidence = 0
+                
+                # Ensure values are strings to avoid PyArrow errors
+                if isinstance(value, (list, dict)):
+                    value = str(value)
+                
+                # Add to row data
+                row_data[field] = value
+                row_data[f"{field} Confidence"] = round(confidence * 100, 2)
+            
+            # Add completed row to rows
+            rows.append(row_data)
+    
+    try:
+        # First method: Try creating a DataFrame with string type
+        # This avoids PyArrow conversion issues for mixed types
+        return pd.DataFrame(rows, dtype=str)
+    except Exception as e:
+        st.warning(f"Error creating DataFrame: {e}. Trying alternative method...")
+        
+        try:
+            # Second method: Try with pandas default types but disable PyArrow
+            with pd.option_context('mode.dtype_backend', 'numpy'):  # Use NumPy instead of PyArrow
+                return pd.DataFrame(rows)
+        except Exception as e:
+            st.warning(f"Second method failed: {e}. Using final fallback method...")
+            
+            try:
+                # Third method: Convert all values to strings explicitly before creating DataFrame
+                string_rows = []
+                for row in rows:
+                    string_row = {}
+                    for key, value in row.items():
+                        string_row[key] = str(value)
+                    string_rows.append(string_row)
+                return pd.DataFrame(string_rows)
+            except Exception as e:
+                st.error(f"All DataFrame creation methods failed: {e}")
+                # Return empty DataFrame as absolute last resort
+                return pd.DataFrame()
+                
+#main        
+with col2:
+    try:
+        # Download as CSV
+        if 'results_df' in locals() and not results_df.empty:
+            # Create a copy of the DataFrame for CSV export
+            csv_df = results_df.copy()
+            
+            # Add date and time columns only to the CSV export
+            csv_df["ExtractDate"] = datetime.now().strftime("%Y-%m-%d")
+            csv_df["ExtractTime"] = datetime.now().strftime("%H:%M:%S")
+            
+            # Convert to CSV
+            csv = csv_df.to_csv(index=False)
+            
+            st.download_button(
+                label="Download CSV Results",
+                data=csv,
+                file_name=f"financial_data_extraction_{timestamp}.csv",
+                mime="text/csv"
+            )
+        else:
+            st.info("CSV download not available due to DataFrame creation issues.")
+    except Exception as e:
+        st.error(f"Error creating CSV: {e}")
+        st.info("CSV download is unavailable due to an error.")
