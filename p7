@@ -1,0 +1,1079 @@
+import base64
+import os
+import json
+import tempfile
+import streamlit as st
+from dotenv import load_dotenv
+from openai import AzureOpenAI
+from pathlib import Path
+import fitz  # PyMuPDF
+import pandas as pd
+from datetime import datetime
+import io
+import zipfile
+from azure.storage.blob import BlobServiceClient, ContentSettings
+
+# Load environment variables from .env file
+load_dotenv()
+
+# Azure OpenAI environment variables
+aoai_endpoint = os.getenv("AOAI_ENDPOINT")
+aoai_api_key = os.getenv("AOAI_API_KEY")
+aoai_deployment_name = os.getenv("AOAI_DEPLOYMENT")
+
+# Azure Blob Storage environment variables
+azure_storage_connection_string = os.getenv("AZURE_STORAGE_CONNECTION_STRING")
+azure_storage_container_name = os.getenv("AZURE_STORAGE_CONTAINER_NAME", "pdf-extraction-results")
+
+# Initialize the Azure OpenAI client
+@st.cache_resource
+def get_client():
+    return AzureOpenAI(
+        azure_endpoint=aoai_endpoint,
+        api_key=aoai_api_key,
+        api_version="2024-08-01-preview"
+    )
+
+# Initialize the Azure Blob Storage client
+@st.cache_resource
+def get_blob_service_client():
+    return BlobServiceClient.from_connection_string(azure_storage_connection_string)
+
+def get_blob_containers(blob_service_client):
+    """
+    Get a list of available containers in the Azure Blob Storage account.
+    """
+    try:
+        containers = []
+        for container in blob_service_client.list_containers():
+            containers.append(container.name)
+        return containers
+    except Exception as e:
+        st.error(f"Error listing containers: {e}")
+        return []
+
+def get_blob_folders(blob_service_client, container_name):
+    """
+    Get a list of "folders" (common prefixes) in the Azure Blob Storage container.
+    Note: Blob storage doesn't have actual folders, but we can simulate them using prefixes.
+    """
+    try:
+        container_client = blob_service_client.get_container_client(container_name)
+        
+        # Get all blobs in the container
+        blobs = container_client.list_blobs()
+        
+        # Extract folder paths (common prefixes before the last '/')
+        folders = set()
+        for blob in blobs:
+            name = blob.name
+            if '/' in name:
+                folder = name.rsplit('/', 1)[0] + '/'
+                folders.add(folder)
+            
+        # Add a root option
+        folders.add("")  # root directory
+        
+        return sorted(list(folders))
+    except Exception as e:
+        st.error(f"Error listing folders in container {container_name}: {e}")
+        return []
+
+def list_pdf_blobs(blob_service_client, container_name, folder_prefix=""):
+    """
+    List all PDF blobs in the specified container and folder prefix.
+    """
+    try:
+        container_client = blob_service_client.get_container_client(container_name)
+        
+        # Get blobs with the folder prefix that are PDFs
+        pdf_blobs = []
+        for blob in container_client.list_blobs(name_starts_with=folder_prefix):
+            if blob.name.lower().endswith('.pdf'):
+                pdf_blobs.append(blob.name)
+                
+        return pdf_blobs
+    except Exception as e:
+        st.error(f"Error listing PDF blobs: {e}")
+        return []
+
+def download_blob_to_memory(blob_service_client, container_name, blob_name):
+    """
+    Download a blob to memory.
+    """
+    try:
+        container_client = blob_service_client.get_container_client(container_name)
+        blob_client = container_client.get_blob_client(blob_name)
+        
+        # Download the blob content
+        download_stream = blob_client.download_blob()
+        content = download_stream.readall()
+        
+        return content
+    except Exception as e:
+        st.error(f"Error downloading blob {blob_name}: {e}")
+        return None
+
+def render_pdf_preview(pdf_file):
+    """
+    Render a preview of the first page of a PDF file.
+    For uploaded files or blob downloads.
+    """
+    tmp_path = None
+    try:
+        # If it's a uploaded file, get the bytes
+        if hasattr(pdf_file, 'getvalue'):
+            pdf_bytes = pdf_file.getvalue()
+        else:
+            # Assume it's already bytes (from blob storage)
+            pdf_bytes = pdf_file
+            
+        # Create a temporary file
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp_file:
+            tmp_file.write(pdf_bytes)
+            tmp_path = tmp_file.name
+            
+        # Open the PDF and get the first page as an image
+        with fitz.open(tmp_path) as doc:
+            if len(doc) > 0:
+                # Get the first page
+                page = doc.load_page(0)
+                
+                # Render the page to an image (with higher resolution)
+                zoom = 2.0  # zoom factor
+                mat = fitz.Matrix(zoom, zoom)
+                pix = page.get_pixmap(matrix=mat)
+                
+                # Convert to an image
+                img_bytes = pix.tobytes()
+                
+                # Return the image
+                return img_bytes
+            else:
+                st.sidebar.warning("PDF appears to be empty")
+                return None
+                
+    except Exception as e:
+        st.sidebar.error(f"Error rendering PDF preview: {e}")
+        return None
+    finally:
+        # Clean up temporary file
+        if tmp_path and os.path.exists(tmp_path):
+            try:
+                os.unlink(tmp_path)
+            except Exception as cleanup_error:
+                st.sidebar.warning(f"Could not remove temporary preview file: {cleanup_error}")
+
+def display_pdf_previews_sidebar(files, blob_service_client=None, container_name=None):
+    """
+    Display preview thumbnails of PDFs in the sidebar.
+    Works with both uploaded files and blob references.
+    """
+    st.sidebar.header("PDF Previews")
+    
+    if not files:
+        st.sidebar.info("No PDF files to preview")
+        return
+    
+    # Create a scrollable area for previews
+    preview_area = st.sidebar.container()
+    
+    with preview_area:
+        for i, file in enumerate(files):
+            # Create an expander for each file
+            if isinstance(file, str):  # It's a blob name
+                filename = file.split('/')[-1]  # Extract filename from path
+                with st.sidebar.expander(f"{i+1}. {filename}"):
+                    # Download blob contents
+                    blob_content = download_blob_to_memory(blob_service_client, container_name, file)
+                    if blob_content:
+                        img_bytes = render_pdf_preview(blob_content)
+                        if img_bytes:
+                            # Display image with caption
+                            st.image(img_bytes, caption=f"Page 1 of {filename}", use_column_width=True)
+                        else:
+                            st.warning("Could not generate preview")
+                    else:
+                        st.error(f"Could not download {filename}")
+            else:  # It's an uploaded file
+                with st.sidebar.expander(f"{i+1}. {file.name}"):
+                    # Get file position
+                    pos = file.tell()
+                    
+                    # Generate preview
+                    img_bytes = render_pdf_preview(file)
+                    
+                    # Reset file position for later use
+                    file.seek(pos)
+                    
+                    if img_bytes:
+                        # Display image with caption
+                        st.image(img_bytes, caption=f"Page 1 of {file.name}", use_column_width=True)
+                    else:
+                        st.warning("Could not generate preview")
+
+def convert_pdf_to_base64(pdf_file):
+    """
+    Convert a PDF file to base64 for embedding in HTML.
+    
+    Parameters:
+    - pdf_file: Either a BytesIO object or bytes
+    
+    Returns:
+    - base64 string of the PDF file
+    """
+    try:
+        # If it's an uploaded file with getvalue method, use that
+        if hasattr(pdf_file, 'getvalue'):
+            pdf_bytes = pdf_file.getvalue()
+        else:
+            # Assume it's already bytes
+            pdf_bytes = pdf_file
+            
+        # Encode to base64
+        base64_pdf = base64.b64encode(pdf_bytes).decode('utf-8')
+        return base64_pdf
+    except Exception as e:
+        st.error(f"Error converting PDF to base64: {e}")
+        return None
+
+def display_pdf_viewer(base64_pdf, height=800):
+    """
+    Display a PDF viewer in the Streamlit app using base64 encoded PDF.
+    No temporary files are created on disk. Shows all pages of the PDF.
+    
+    Parameters:
+    - base64_pdf: base64 encoded PDF data
+    - height: height of the viewer iframe
+    """
+    if not base64_pdf:
+        st.error("No PDF data available to display")
+        return
+        
+    # Create the HTML with a PDF viewer that shows all pages at full width
+    pdf_display = f"""
+    <iframe src="data:application/pdf;base64,{base64_pdf}" width="100%" height="{height}" 
+    type="application/pdf" style="width: 100%; height: {height}px;"></iframe>
+    """
+    
+    # Display the PDF at full container width
+    st.markdown(pdf_display, unsafe_allow_html=True)
+
+def display_pdf_preview_tab(all_pdf_results, files, input_method, blob_service_client=None, container_name=None):
+    """
+    Display PDF preview tab after processing.
+    All previews are generated directly from memory without creating temporary files.
+    
+    Parameters:
+    - all_pdf_results: Processed PDF results
+    - files: Original files (either uploaded files or blob references)
+    - input_method: "Upload Files" or "Azure Blob Storage"
+    - blob_service_client: Optional, for Azure Blob Storage
+    - container_name: Optional, for Azure Blob Storage
+    """
+    if not files or not all_pdf_results:
+        st.info("No PDFs available to preview")
+        return
+    
+    # Create tabs for each PDF
+    pdf_tabs = st.tabs([pdf_result["filename"] for pdf_result in all_pdf_results])
+    
+    for i, tab in enumerate(pdf_tabs):
+        with tab:
+            try:
+                filename = all_pdf_results[i]["filename"]
+                
+                if input_method == "Upload Files":
+                    # For uploaded files, find the matching file object
+                    file_obj = next((f for f in files if f.name == filename), None)
+                    
+                    if file_obj:
+                        # Get file position and reset after use
+                        pos = file_obj.tell()
+                        base64_pdf = convert_pdf_to_base64(file_obj)
+                        file_obj.seek(pos)  # Reset file position
+                    else:
+                        st.error(f"Could not find original file for {filename}")
+                        continue
+                else:
+                    # For blob files, find the matching blob reference
+                    blob_name = next((b for b in files if b.split('/')[-1] == filename), None)
+                    
+                    if blob_name and blob_service_client:
+                        # Download blob content directly to memory
+                        blob_content = download_blob_to_memory(blob_service_client, container_name, blob_name)
+                        if blob_content:
+                            base64_pdf = convert_pdf_to_base64(blob_content)
+                        else:
+                            st.error(f"Could not download blob content for {filename}")
+                            continue
+                    else:
+                        st.error(f"Could not find original blob for {filename}")
+                        continue
+                
+                if base64_pdf:
+                    st.write(f"### Preview of {filename}")
+                    # Use taller display for better viewing of multi-page documents
+                    display_pdf_viewer(base64_pdf, height=800)
+                else:
+                    st.error(f"Could not create preview for {filename}")
+                    
+            except Exception as e:
+                st.error(f"Error displaying preview for PDF {i+1}: {e}")
+
+def image_to_data_url(image_bytes, mime_type='image/png'):
+    """
+    Convert image bytes to a data URL.
+    """
+    base64_encoded_data = base64.b64encode(image_bytes).decode('utf-8')
+    return f"data:{mime_type};base64,{base64_encoded_data}"
+
+def call_azure_openai_vision(prompt, image_data_url, client, deployment_name):
+    """
+    Call the Azure OpenAI Vision service to analyze an image.
+    """
+    try:
+        completion = client.chat.completions.create(
+            model=deployment_name,
+            messages=[{
+                "role": "system",
+                "content": "You are an AI helpful assistant that extracts information from invoice documents. Your task is to extract the following fields from invoices: VendorName, InvoiceNumber, InvoiceDate, CustomerName, PurchaseOrder, StockCode, UnitPrice, InvoiceAmount, Freight, Salestax, and Total. Return a JSON object with these keys. For each field, also include a confidence score between 0 and 1. The response format should be: {\"VendorName\": {\"value\": \"ABC Corp\", \"confidence\": 0.95}, \"InvoiceNumber\": {\"value\": \"INV-12345\", \"confidence\": 0.87}, ...and so on for each field.}"
+            }, {
+                "role": "user",
+                "content": [{
+                    "type": "text",
+                    "text": prompt
+                }, {
+                    "type": "image_url",
+                    "image_url": {
+                        "url": image_data_url
+                    }
+                }]
+            }],
+            max_tokens=2000,
+            temperature=0.7,
+            response_format={"type": "json_object"}
+        )
+        
+        # Extract and parse the response content
+        response_content = completion.choices[0].message.content
+        return json.loads(response_content)
+    except Exception as e:
+        st.error(f"Error calling Azure OpenAI: {str(e)}")
+        return {"error": str(e)}
+
+def process_pdf(pdf_file, prompt, client, deployment_name, progress_bar=None, progress_text=None):
+    """
+    Process a PDF file and extract information from all pages.
+    """
+    tmp_path = None
+    try:
+        # Create a temporary file to store the uploaded PDF
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp_file:
+            tmp_file.write(pdf_file.getvalue())
+            tmp_path = tmp_file.name
+        
+        # Get the filename
+        filename = pdf_file.name
+        
+        # Open the PDF file
+        with fitz.open(tmp_path) as doc:
+            page_count = len(doc)
+            
+            if progress_text:
+                progress_text.text(f"Processing {filename} - {page_count} pages...")
+            
+            # Create a list to store extracted data from all pages
+            all_page_results = []
+            
+            # Process each page in the PDF
+            for page_num in range(page_count):
+                try:
+                    # Update progress
+                    if progress_bar:
+                        progress_bar.progress((page_num + 1) / page_count)
+                    if progress_text:
+                        progress_text.text(f"Processing {filename} - Page {page_num+1}/{page_count}")
+                    
+                    # Load the current page
+                    page = doc.load_page(page_num)
+                    
+                    # Process image
+                    zoom = 2  # Zoom factor for image quality
+                    pix = page.get_pixmap(matrix=fitz.Matrix(zoom, zoom))
+                    image_bytes = pix.tobytes()
+                    
+                    # Convert image to data URL
+                    image_data_url = image_to_data_url(image_bytes)
+                    
+                    # Call Azure OpenAI Vision to extract structured information
+                    extracted_info = call_azure_openai_vision(prompt, image_data_url, client, deployment_name)
+                    
+                    # Add page info to the collected results
+                    extracted_info_with_page = {
+                        "page": page_num + 1,
+                        "data": extracted_info
+                    }
+                    
+                    # Add to our collection of all page results
+                    all_page_results.append(extracted_info_with_page)
+                    
+                except Exception as e:
+                    error_msg = f"Error processing page {page_num+1} of {filename}: {e}"
+                    st.warning(error_msg)
+                    all_page_results.append({
+                        "page": page_num + 1,
+                        "data": {"error": str(e)}
+                    })
+        
+        # Create a result object that contains all pages' data
+        final_result = {
+            "filename": filename,
+            "total_pages": page_count,
+            "pages": all_page_results
+        }
+        
+        return final_result
+        
+    except Exception as e:
+        error_msg = f"Error processing {pdf_file.name}: {e}"
+        st.error(error_msg)
+        return {
+            "filename": pdf_file.name,
+            "error": str(e),
+            "total_pages": 0,
+            "pages": []
+        }
+    finally:
+        # Clean up the temporary file
+        if tmp_path and os.path.exists(tmp_path):
+            try:
+                os.unlink(tmp_path)
+            except Exception as cleanup_error:
+                st.warning(f"Could not remove temporary file {tmp_path}: {cleanup_error}")
+
+def process_blob_pdfs(blob_service_client, container_name, pdf_blobs, prompt, client, deployment_name):
+    """
+    Process PDF blobs from Azure Blob Storage.
+    """
+    all_pdf_results = []
+    
+    # Create progress tracking
+    progress_bar = st.progress(0)
+    progress_text = st.empty()
+    
+    for i, blob_name in enumerate(pdf_blobs):
+        progress_text.text(f"Processing file {i+1}/{len(pdf_blobs)}: {blob_name}")
+        tmp_path = None
+        
+        try:
+            # Download blob to memory
+            blob_content = download_blob_to_memory(blob_service_client, container_name, blob_name)
+            
+            if blob_content is None:
+                st.warning(f"Could not download blob: {blob_name}")
+                continue
+            
+            # Create a BytesIO object from the blob content
+            blob_file = io.BytesIO(blob_content)
+            filename = blob_name.split('/')[-1]  # Set the filename to the blob name without folder path
+            blob_file.name = filename
+            
+            # Create a temporary file for processing
+            with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp_file:
+                tmp_file.write(blob_content)
+                tmp_path = tmp_file.name
+                
+            # Open the PDF file
+            with fitz.open(tmp_path) as doc:
+                page_count = len(doc)
+                
+                progress_text.text(f"Processing {filename} - {page_count} pages...")
+                
+                # Create a list to store extracted data from all pages
+                all_page_results = []
+                
+                # Process each page in the PDF
+                for page_num in range(page_count):
+                    try:
+                        # Update progress
+                        sub_progress = (i + (page_num + 1) / page_count) / len(pdf_blobs)
+                        progress_bar.progress(sub_progress)
+                        progress_text.text(f"Processing {filename} - Page {page_num+1}/{page_count}")
+                        
+                        # Load the current page
+                        page = doc.load_page(page_num)
+                        
+                        # Process image
+                        zoom = 2  # Zoom factor for image quality
+                        pix = page.get_pixmap(matrix=fitz.Matrix(zoom, zoom))
+                        image_bytes = pix.tobytes()
+                        
+                        # Convert image to data URL
+                        image_data_url = image_to_data_url(image_bytes)
+                        
+                        # Call Azure OpenAI Vision to extract structured information
+                        extracted_info = call_azure_openai_vision(prompt, image_data_url, client, deployment_name)
+                        
+                        # Add page info to the collected results
+                        extracted_info_with_page = {
+                            "page": page_num + 1,
+                            "data": extracted_info
+                        }
+                        
+                        # Add to our collection of all page results
+                        all_page_results.append(extracted_info_with_page)
+                        
+                    except Exception as e:
+                        error_msg = f"Error processing page {page_num+1} of {filename}: {e}"
+                        st.warning(error_msg)
+                        all_page_results.append({
+                            "page": page_num + 1,
+                            "data": {"error": str(e)}
+                        })
+                
+                # Create a result object that contains all pages' data
+                final_result = {
+                    "filename": filename,
+                    "total_pages": page_count,
+                    "pages": all_page_results
+                }
+                
+                # Add to our collection of all PDF results
+                all_pdf_results.append(final_result)
+            
+        except Exception as e:
+            st.error(f"Error processing blob {blob_name}: {e}")
+            all_pdf_results.append({
+                "filename": blob_name.split('/')[-1],
+                "error": str(e),
+                "total_pages": 0,
+                "pages": []
+            })
+        finally:
+            # Clean up the temporary file
+            if tmp_path and os.path.exists(tmp_path):
+                try:
+                    os.unlink(tmp_path)
+                except Exception as cleanup_error:
+                    st.warning(f"Could not remove temporary file {tmp_path}: {cleanup_error}")
+            
+            # Update overall progress
+            progress_bar.progress((i + 1) / len(pdf_blobs))
+    
+    progress_text.text("Processing complete!")
+    progress_bar.progress(1.0)
+    
+    return all_pdf_results
+
+def create_results_dataframe(all_pdf_results):
+    """
+    Create a pandas DataFrame from the extracted results for easy viewing.
+    """
+    rows = []
+    
+    # Define the fields we're extracting
+    fields = [
+        "VendorName", "InvoiceNumber", "InvoiceDate", "CustomerName", 
+        "PurchaseOrder", "StockCode", "UnitPrice", "InvoiceAmount", 
+        "Freight", "Salestax", "Total"
+    ]
+    
+    for pdf_result in all_pdf_results:
+        filename = pdf_result["filename"]
+        
+        for page in pdf_result["pages"]:
+            page_num = page["page"]
+            data = page["data"]
+            
+            # Check for errors
+            if "error" in data:
+                row_data = {
+                    "Filename": filename,
+                    "Page": page_num
+                }
+                
+                # Add placeholders for all fields and confidence values
+                for field in fields:
+                    row_data[field] = "N/A"
+                    row_data[f"{field} Confidence"] = 0
+                
+                rows.append(row_data)
+                continue
+            
+            # Initialize row data
+            row_data = {
+                "Filename": filename,
+                "Page": page_num
+            }
+            
+            # Process each field
+            for field in fields:
+                field_data = data.get(field, {})
+                
+                if isinstance(field_data, dict):
+                    value = field_data.get("value", "N/A")
+                    confidence = field_data.get("confidence", 0)
+                    # Check for manually verified flag
+                    manually_verified = field_data.get("manually_verified", False)
+                else:
+                    value = field_data if field_data else "N/A"
+                    confidence = 0
+                    manually_verified = False
+                
+                # Ensure values are strings to avoid PyArrow errors
+                if isinstance(value, (list, dict)):
+                    value = str(value)
+                
+                # Add to row data
+                row_data[field] = value
+                row_data[f"{field} Confidence"] = round(confidence * 100, 2)
+                if manually_verified:
+                    row_data[f"{field} Verified"] = "Yes"
+            
+            # Add completed row to rows
+            rows.append(row_data)
+    
+    try:
+        # First method: Try creating a DataFrame with string type
+        # This avoids PyArrow conversion issues for mixed types
+        return pd.DataFrame(rows, dtype=str)
+    except Exception as e:
+        st.warning(f"Error creating DataFrame: {e}. Trying alternative method...")
+        
+        try:
+            # Second method: Try with pandas default types but disable PyArrow
+            with pd.option_context('mode.dtype_backend', 'numpy'):  # Use NumPy instead of PyArrow
+                return pd.DataFrame(rows)
+        except Exception as e:
+            st.warning(f"Second method failed: {e}. Using final fallback method...")
+            
+            try:
+                # Third method: Convert all values to strings explicitly before creating DataFrame
+                string_rows = []
+                for row in rows:
+                    string_row = {}
+                    for key, value in row.items():
+                        string_row[key] = str(value)
+                    string_rows.append(string_row)
+                return pd.DataFrame(string_rows)
+            except Exception as e:
+                st.error(f"All DataFrame creation methods failed: {e}")
+                # Return empty DataFrame as absolute last resort
+                return pd.DataFrame()
+
+def create_text_files_zip(all_pdf_results):
+    """
+    Create a zip file containing text files for each PDF.
+    """
+    # Create a BytesIO object to store the zip file
+    zip_buffer = io.BytesIO()
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    
+    # Create a ZipFile object
+    with zipfile.ZipFile(zip_buffer, 'a', zipfile.ZIP_DEFLATED, False) as zip_file:
+        for pdf_result in all_pdf_results:
+            filename = pdf_result["filename"]
+            base_filename = os.path.splitext(filename)[0]
+            
+            # Create the text content for this PDF (only key-value pairs)
+            page_results_text = create_page_results_text(pdf_result)
+            
+            # Add structured data as a text file with timestamp
+            zip_file.writestr(f"{base_filename}_{timestamp}.txt", page_results_text)
+    
+    # Seek to the beginning of the BytesIO object
+    zip_buffer.seek(0)
+    return zip_buffer
+
+def create_page_results_text(pdf_result):
+    """
+    Create a text file containing only the key-value pairs from each page.
+    Returns a string with the formatted key-value pairs.
+    """
+    # Define the fields we're extracting
+    fields = [
+        "VendorName", "InvoiceNumber", "InvoiceDate", "CustomerName", 
+        "PurchaseOrder", "StockCode", "UnitPrice", "InvoiceAmount", 
+        "Freight", "Salestax", "Total"
+    ]
+    
+    result_text = ""
+    
+    for page in pdf_result["pages"]:
+        page_num = page["page"]
+        data = page["data"]
+        
+        result_text += f"--- PAGE {page_num} ---\n"
+        
+        if "error" in data:
+            result_text += f"error: {data['error']}\n\n"
+            continue
+            
+        # Process fields with confidence scores
+        for field in fields:
+            display_field = ''.join(' ' + char if char.isupper() else char for char in field).strip().lower()
+            
+            field_data = data.get(field, {})
+            if isinstance(field_data, dict):
+                value = field_data.get("value", "N/A")
+                confidence = field_data.get("confidence", 0)
+                manually_verified = field_data.get("manually_verified", False)
+                
+                result_text += f"{display_field}: {value}\n"
+                result_text += f"{display_field} confidence: {round(confidence * 100, 2)}%\n"
+                if manually_verified:
+                    result_text += f"{display_field} manually verified: Yes\n"
+            else:
+                result_text += f"{display_field}: {field_data}\n"
+        
+        result_text += "\n"
+        
+    return result_text
+
+def display_manual_verification(all_pdf_results, confidence_by_document):
+    """
+    Display fields with low confidence for manual verification and correction.
+    Returns the updated PDF results with manually verified data.
+    """
+    st.subheader("Manual Verification for Low Confidence Fields")
+
+    # Define the fields we're extracting
+    fields = [
+        "VendorName", "InvoiceNumber", "InvoiceDate", "CustomerName", 
+        "PurchaseOrder", "StockCode", "UnitPrice", "InvoiceAmount", 
+        "Freight", "Salestax", "Total"
+    ]
+
+    # Get documents that need verification (any with low confidence fields)
+    docs_to_verify = []
+    for filename, counts in confidence_by_document.items():
+        if counts["low"] > 0:
+            docs_to_verify.append(filename)
+
+    if not docs_to_verify:
+        st.success("✅ No documents need manual verification (all fields above 90% confidence)")
+        return all_pdf_results
+
+    # Let user select which document to verify
+    selected_doc = st.selectbox(
+        "Select document to verify:",
+        docs_to_verify,
+        help="Choose a document with low confidence fields to manually verify"
+    )
+
+    # Find the corresponding PDF result
+    selected_pdf_result = next((pdf for pdf in all_pdf_results if pdf["filename"] == selected_doc), None)
+    
+    if not selected_pdf_result:
+        st.error(f"Could not find {selected_doc} in results")
+        return all_pdf_results
+
+    # Organize data by page
+    st.write(f"### Verifying {selected_doc}")
+    st.write(f"This document has {selected_pdf_result['total_pages']} pages")
+
+    # Create tabs for each page
+    page_tabs = st.tabs([f"Page {page['page']}" for page in selected_pdf_result["pages"]])
+    
+    # Keep track of changes for updating the results later
+    verification_changes = {}
+    
+    for i, tab in enumerate(page_tabs):
+        with tab:
+            page_data = selected_pdf_result["pages"][i]["data"]
+            page_num = selected_pdf_result["pages"][i]["page"]
+            verification_changes[page_num] = {}
+            
+            # If there was an error, show special message
+            if "error" in page_data:
+                st.error(f"Error processing this page: {page_data['error']}")
+                st.write("Please enter all field values manually:")
+                
+                # Allow user to input all fields
+                for field in fields:
+                    display_field = ''.join(' ' + char if char.isupper() else char for char in field).strip().lower()
+                    user_value = st.text_input(f"{display_field}", key=f"err_{field}_{page_num}")
+                    verification_changes[page_num][field] = {
+                        "value": user_value,
+                        "confidence": 1.0,  # Max confidence since manually verified
+                        "manually_verified": True
+                    }
+                continue
+            
+            # Show form for manual verification
+            st.write("Verify and correct the extracted information below:")
+            
+            for field in fields:
+                display_field = ''.join(' ' + char if char.isupper() else char for char in field).strip().lower()
+                
+                # Get current field data
+                field_data = page_data.get(field, {})
+                
+                # Extract current value and confidence
+                if isinstance(field_data, dict):
+                    current_value = field_data.get("value", "")
+                    confidence = field_data.get("confidence", 0)
+                else:
+                    current_value = field_data if field_data else ""
+                    confidence = 0
+                
+                # Highlight fields with low confidence
+                if confidence < 0.9:
+                    st.markdown(f"**{display_field}** (Confidence: **{round(confidence * 100, 2)}%** ⚠️)")
+                else:
+                    st.markdown(f"**{display_field}** (Confidence: {round(confidence * 100, 2)}%)")
+                
+                # Let user verify or correct the value
+                user_value = st.text_input(
+                    f"Verify {display_field}", 
+                    value=current_value,
+                    key=f"{field}_{page_num}"
+                )
+                
+                # If the user changed the value, update it
+                if user_value != current_value or confidence < 0.9:
+                    verification_changes[page_num][field] = {
+                        "value": user_value,
+                        "confidence": 1.0,  # Max confidence since manually verified
+                        "manually_verified": True
+                    }
+    
+    # Add a button to submit all changes
+    if st.button("Submit Manual Verification", type="primary"):
+        # Update the PDF results with verified data
+        updated_pdf_results = []
+        
+        for pdf_result in all_pdf_results:
+            # If this is not the selected document, keep it as is
+            if pdf_result["filename"] != selected_doc:
+                updated_pdf_results.append(pdf_result)
+                continue
+            
+            # Create a deep copy to update
+            updated_pdf = pdf_result.copy()
+            updated_pages = []
+            
+            for page in pdf_result["pages"]:
+                page_num = page["page"]
+                updated_page = page.copy()
+                
+                # If this page has changes, apply them
+                if page_num in verification_changes and verification_changes[page_num]:
+                    # If there was an error, replace the entire data object
+                    if "error" in page["data"]:
+                        updated_page["data"] = verification_changes[page_num].copy()
+                    else:
+                        # Otherwise, update individual fields
+                        updated_data = page["data"].copy()
+                        for field, new_value in verification_changes[page_num].items():
+                            updated_data[field] = new_value
+                        updated_page["data"] = updated_data
+                
+                updated_pages.append(updated_page)
+            
+            updated_pdf["pages"] = updated_pages
+            updated_pdf_results.append(updated_pdf)
+        
+        st.success(f"✅ Manual verification for {selected_doc} submitted successfully!")
+        
+        # Return the updated PDF results
+        return updated_pdf_results
+    
+    # If no changes submitted, return the original results
+    return all_pdf_results
+
+def update_extracted_files(all_pdf_results, blob_service_client=None, manually_verified=False):
+    """
+    Re-create the text files and CSV with manually verified data
+    """
+    # Create a timestamp for the updated files
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    
+    # Create a DataFrame for the verified data
+    verified_df = create_results_dataframe(all_pdf_results)
+    
+    # Create text files for verified data
+    verified_text_zip = create_text_files_zip(all_pdf_results)
+    
+    # Add download buttons for updated files
+    st.subheader("Download Verified Data")
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        # Download verified text files
+        st.download_button(
+            label="Download Verified Text Files (ZIP)",
+            data=verified_text_zip,
+            file_name=f"verified_data_{timestamp}.zip",
+            mime="application/zip"
+        )
+    
+    with col2:
+        if not verified_df.empty:
+            verified_csv = verified_df.to_csv(index=False)
+            st.download_button(
+                label="Download Verified CSV",
+                data=verified_csv,
+                file_name=f"verified_financial_data_{timestamp}.csv",
+                mime="text/csv"
+            )
+    
+    # Upload verified files to Azure Blob Storage if credentials are available
+    if blob_service_client and azure_storage_connection_string:
+        st.subheader("Upload Verified Data to Azure Blob Storage")
+        
+        upload_container = st.text_input(
+            "Container for Verified Data",
+            value=f"{azure_storage_container_name}-verified",
+            help="Container where verified results will be uploaded"
+        )
+        
+        if st.button("Upload Verified Data to Azure", type="primary"):
+            with st.spinner("Uploading verified data..."):
+                upload_results = []
+                
+                for pdf_result in all_pdf_results:
+                    filename = pdf_result["filename"]
+                    base_filename = os.path.splitext(filename)[0]
+                    
+                    # Create verified text content
+                    verified_text = create_page_results_text(pdf_result)
+                    
+                    # Create timestamp filename
+                    timestamp_filename = f"{base_filename}_verified_{timestamp}"
+                    
+                    # Upload verified text file
+                    text_blob_name = f"{timestamp_filename}.txt"
+                    text_success, text_url = upload_to_blob_storage(
+                        blob_service_client,
+                        upload_container,
+                        text_blob_name,
+                        verified_text,
+                        "text/plain"
+                    )
+                    
+                    # Upload verified JSON
+                    json_blob_name = f"{timestamp_filename}.json"
+                    verified_json = json.dumps(pdf_result, ensure_ascii=False, indent=2)
+                    json_success, json_url = upload_to_blob_storage(
+                        blob_service_client,
+                        upload_container,
+                        json_blob_name,
+                        verified_json,
+                        "application/json"
+                    )
+                    
+                    # Store upload results
+                    upload_results.append({
+                        "filename": filename,
+                        "text_uploaded": text_success,
+                        "json_uploaded": json_success
+                    })
+                
+                # Show upload results
+                upload_df = pd.DataFrame(upload_results)
+                st.dataframe(upload_df)
+                st.success("✅ Verified data uploaded successfully!")
+
+def evaluate_extraction_results(all_pdf_results):
+    """
+    Evaluate the quality and completeness of extraction results using the
+    confidence scores provided by Azure AI Vision.
+    """
+    # Define the fields we're extracting
+    fields = [
+        "VendorName", "InvoiceNumber", "InvoiceDate", "CustomerName", 
+        "PurchaseOrder", "StockCode", "UnitPrice", "InvoiceAmount", 
+        "Freight", "Salestax", "Total"
+    ]
+    
+    evaluation_results = {
+        "total_documents": len(all_pdf_results),
+        "total_pages": 0,
+        "successful_pages": 0,
+        "failed_pages": 0,
+        "field_confidence": {},
+        "documents_with_errors": []
+    }
+    
+    # Initialize field confidence data structure
+    for field in fields:
+        evaluation_results["field_confidence"][field] = {
+            "total": 0,
+            "average_confidence": 0,
+            "pages_above_threshold": 0,
+            "percent_above_threshold": 0
+        }
+    
+    confidence_threshold = 0.9  # 90% confidence threshold
+    
+    # Collect all confidence scores by field
+    all_confidences = {}
+    for field in fields:
+        all_confidences[field] = []
+    
+    for pdf_result in all_pdf_results:
+        filename = pdf_result["filename"]
+        document_has_error = False
+        
+        for page in pdf_result["pages"]:
+            evaluation_results["total_pages"] += 1
+            data = page["data"]
+            
+            if "error" in data:
+                evaluation_results["failed_pages"] += 1
+                document_has_error = True
+                continue
+                
+            page_successful = True
+            
+            # Check each field for confidence scores
+            for field in fields:
+                field_data = data.get(field, {})
+                
+                if isinstance(field_data, dict) and "confidence" in field_data:
+                    confidence = field_data.get("confidence", 0)
+                    evaluation_results["field_confidence"][field]["total"] += 1
+                    all_confidences[field].append(confidence)
+                    
+                    # Count pages above threshold
+                    if confidence >= confidence_threshold:
+                        evaluation_results["field_confidence"][field]["pages_above_threshold"] += 1
+                    else:
+                        page_successful = False
+                else:
+                    page_successful = False
+            
+            if page_successful:
+                evaluation_results["successful_pages"] += 1
+            else:
+                evaluation_results["failed_pages"] += 1
+                document_has_error = True
+        
+        if document_has_error:
+            evaluation_results["documents_with_errors"].append(filename)
+    
+    # Calculate average confidence for each field
+    for field in all_confidences:
+        confidences = all_confidences[field]
+        if confidences:
+            avg_confidence = sum(confidences) / len(confidences)
+            evaluation_results["field_confidence"][field]["average_confidence"] = round(avg_confidence * 100, 2)
+            
+            # Calculate percentage of pages above threshold
+            total = evaluation_results["field_confidence"][field]["total"]
+            if total > 0:
+                above_threshold = evaluation_results["field_confidence"][field]["pages_above_threshold"]
+                evaluation_results["field_confidence"][field]["percent_above_threshold"] = round((above_threshold / total) * 100, 2)
+    
+    # Calculate overall success rate
+    if evaluation_results["total_pages"] > 0:
+        evaluation_results["success_rate"] = round((evaluation_results["successful_pages"] / evaluation_results["total_pages"]) * 100, 2)
+    
+    # Calculate overall confidence score (average of field confidence)
+    field_scores = [field_data["average_confidence"] for field_data in evaluation_results["field_confidence"].values() if "average_confidence" in field_data]
+    if field_scores:
+        evaluation_results["overall_confidence_score"] = round(sum(field_scores) / len(field_scores), 2)
+    
+    return evaluation_results
