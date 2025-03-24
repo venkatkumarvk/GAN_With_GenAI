@@ -978,85 +978,109 @@ def display_edit_form(results_df, pdf_results, current_pdf_index, current_page_i
     
     # Try to get the PDF file for display
     pdf_file = None
-    # Find the file in the list of files to process
-    if isinstance(st.session_state.files_to_process[0], str):  # Blob storage
-        blob_name = next((f for f in st.session_state.files_to_process if f.split('/')[-1] == selected_pdf), None)
-        if blob_name:
-            blob_content = download_blob_to_memory(st.session_state.blob_service_client, st.session_state.selected_container, blob_name)
-            if blob_content:
-                # Create temporary PDF file with just the selected page
-                tmp_path = None
-                try:
-                    # Create a temporary file for the full PDF
-                    with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp_file:
-                        tmp_file.write(blob_content)
-                        tmp_path = tmp_file.name
-                    
-                    # Open the PDF and extract the specific page
-                    with fitz.open(tmp_path) as doc:
-                        if 0 <= int(selected_page) - 1 < len(doc):
-                            page_index = int(selected_page) - 1
-                            # Extract the page
-                            page = doc.load_page(page_index)
-                            
-                            # Render the page to an image
-                            zoom = 2.0  # zoom factor
-                            mat = fitz.Matrix(zoom, zoom)
-                            pix = page.get_pixmap(matrix=mat)
-                            
-                            # Convert to an image and display
-                            img_bytes = pix.tobytes()
-                            st.image(img_bytes, caption=f"Page {selected_page} of {selected_pdf}", use_column_width=True)
-                        else:
-                            st.warning(f"Page {selected_page} not found in the PDF")
-                finally:
-                    # Clean up temporary file
-                    if tmp_path and os.path.exists(tmp_path):
+    
+    # Check if files_to_process exists and is not empty
+    if 'files_to_process' not in st.session_state or not st.session_state.files_to_process:
+        st.warning("No files available for preview. Please process documents first.")
+    else:
+        try:
+            # Find the file in the list of files to process
+            if st.session_state.files_to_process and isinstance(st.session_state.files_to_process[0], str):  # Blob storage
+                # Make sure the blob_service_client and selected_container are available
+                if not st.session_state.blob_service_client or not st.session_state.selected_container:
+                    st.warning("Blob storage client or container not available")
+                else:
+                    blob_name = next((f for f in st.session_state.files_to_process if f.split('/')[-1] == selected_pdf), None)
+                    if blob_name:
+                        blob_content = download_blob_to_memory(st.session_state.blob_service_client, st.session_state.selected_container, blob_name)
+                        if blob_content:
+                            # Create temporary PDF file with just the selected page
+                            tmp_path = None
+                            try:
+                                # Create a temporary file for the full PDF
+                                with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp_file:
+                                    tmp_file.write(blob_content)
+                                    tmp_path = tmp_file.name
+                                
+                                # Open the PDF and extract the specific page
+                                with fitz.open(tmp_path) as doc:
+                                    if 0 <= int(selected_page) - 1 < len(doc):
+                                        page_index = int(selected_page) - 1
+                                        # Extract the page
+                                        page = doc.load_page(page_index)
+                                        
+                                        # Render the page to an image
+                                        zoom = 2.0  # zoom factor
+                                        mat = fitz.Matrix(zoom, zoom)
+                                        pix = page.get_pixmap(matrix=mat)
+                                        
+                                        # Convert to an image and display
+                                        img_bytes = pix.tobytes()
+                                        st.image(img_bytes, caption=f"Page {selected_page} of {selected_pdf}", use_column_width=True)
+                                    else:
+                                        st.warning(f"Page {selected_page} not found in the PDF")
+                            finally:
+                                # Clean up temporary file
+                                if tmp_path and os.path.exists(tmp_path):
+                                    try:
+                                        os.unlink(tmp_path)
+                                    except Exception as cleanup_error:
+                                        st.warning(f"Could not remove temporary file: {cleanup_error}")
+            elif st.session_state.files_to_process:  # Uploaded files
+                file_obj = next((f for f in st.session_state.files_to_process if f.name == selected_pdf), None)
+                if file_obj:
+                    # Check if the file object is valid and has the getvalue method
+                    if hasattr(file_obj, 'getvalue'):
                         try:
-                            os.unlink(tmp_path)
-                        except Exception as cleanup_error:
-                            st.warning(f"Could not remove temporary file: {cleanup_error}")
-    else:  # Uploaded files
-        file_obj = next((f for f in st.session_state.files_to_process if f.name == selected_pdf), None)
-        if file_obj:
-            # Get file position
-            pos = file_obj.tell()
-            
-            # Create temporary PDF file with just the selected page
-            tmp_path = None
-            try:
-                # Create a temporary file for the full PDF
-                with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp_file:
-                    tmp_file.write(file_obj.getvalue())
-                    tmp_path = tmp_file.name
-                
-                # Open the PDF and extract the specific page
-                with fitz.open(tmp_path) as doc:
-                    if 0 <= int(selected_page) - 1 < len(doc):
-                        page_index = int(selected_page) - 1
-                        # Extract the page
-                        page = doc.load_page(page_index)
-                        
-                        # Render the page to an image
-                        zoom = 2.0  # zoom factor
-                        mat = fitz.Matrix(zoom, zoom)
-                        pix = page.get_pixmap(matrix=mat)
-                        
-                        # Convert to an image and display
-                        img_bytes = pix.tobytes()
-                        st.image(img_bytes, caption=f"Page {selected_page} of {selected_pdf}", use_column_width=True)
+                            # Get file position if possible
+                            if hasattr(file_obj, 'tell'):
+                                pos = file_obj.tell()
+                            
+                            # Create temporary PDF file with just the selected page
+                            tmp_path = None
+                            try:
+                                # Create a temporary file for the full PDF
+                                with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp_file:
+                                    tmp_file.write(file_obj.getvalue())
+                                    tmp_path = tmp_file.name
+                                
+                                # Open the PDF and extract the specific page
+                                with fitz.open(tmp_path) as doc:
+                                    if 0 <= int(selected_page) - 1 < len(doc):
+                                        page_index = int(selected_page) - 1
+                                        # Extract the page
+                                        page = doc.load_page(page_index)
+                                        
+                                        # Render the page to an image
+                                        zoom = 2.0  # zoom factor
+                                        mat = fitz.Matrix(zoom, zoom)
+                                        pix = page.get_pixmap(matrix=mat)
+                                        
+                                        # Convert to an image and display
+                                        img_bytes = pix.tobytes()
+                                        st.image(img_bytes, caption=f"Page {selected_page} of {selected_pdf}", use_column_width=True)
+                                    else:
+                                        st.warning(f"Page {selected_page} not found in the PDF")
+                            finally:
+                                # Clean up temporary file
+                                if tmp_path and os.path.exists(tmp_path):
+                                    try:
+                                        os.unlink(tmp_path)
+                                    except Exception as cleanup_error:
+                                        st.warning(f"Could not remove temporary file: {cleanup_error}")
+                                
+                                # Reset file position if possible
+                                if hasattr(file_obj, 'seek'):
+                                    file_obj.seek(pos)
+                        except Exception as e:
+                            st.error(f"Error displaying PDF preview: {e}")
                     else:
-                        st.warning(f"Page {selected_page} not found in the PDF")
-            finally:
-                # Clean up temporary file
-                if tmp_path and os.path.exists(tmp_path):
-                    try:
-                        os.unlink(tmp_path)
-                    except Exception as cleanup_error:
-                        st.warning(f"Could not remove temporary file: {cleanup_error}")
-                
-                # Reset file position
-                file_obj.seek(pos)
+                        st.warning("The file object doesn't support the required operations")
+                else:
+                    st.info(f"Could not find the file '{selected_pdf}' in the uploaded files")
+        except Exception as e:
+            st.error(f"Error displaying PDF preview: {e}")
+            st.info("You can still edit the extraction results without the preview")
     
     # Create a form for editing values
     with st.form(key=f"edit_form_{selected_pdf}_{selected_page}"):
