@@ -1,18 +1,8 @@
 from openai import AzureOpenAI
-from pydantic import BaseModel, Field
-from typing import Literal
 import base64
 import fitz  # PyMuPDF
 from PyPDF2 import PdfReader, PdfWriter
 import os
-
-# Define the classification schema
-class DocumentClassification(BaseModel):
-    document_type: Literal["Terms & Conditions", "General Terms and Conditions", 
-                          "Sale Order", "Delivery", "Price and Payment", 
-                          "Warranty", "Other"] = Field(
-        description="The type of document based on its content and structure"
-    )
 
 # Initialize Azure OpenAI client
 openai_client = AzureOpenAI(
@@ -32,7 +22,7 @@ You are a document classification expert. Analyze the provided document image an
 - Warranty
 - Other
 
-Only return one of these exact category names.
+Return only the exact category name with no additional text.
 """
 
 # Function to convert PDF page to image and get base64
@@ -48,38 +38,41 @@ def get_page_image_base64(pdf_path, page_num):
 def classify_document_page(pdf_path, page_num):
     base64_image = get_page_image_base64(pdf_path, page_num)
     
-    user_content = [
+    # Create the messages list directly - no Pydantic models
+    messages = [
         {
-            "type": "text",
-            "text": "Classify this document page according to the schema."
+            "role": "system",
+            "content": system_prompt
         },
         {
-            "type": "image_url",
-            "image_url": {
-                "url": f"data:image/png;base64,{base64_image}"
-            }
+            "role": "user",
+            "content": [
+                {
+                    "type": "text",
+                    "text": "What type of document is shown in this image? Respond only with the exact category name."
+                },
+                {
+                    "type": "image_url",
+                    "image_url": {
+                        "url": f"data:image/png;base64,{base64_image}"
+                    }
+                }
+            ]
         }
     ]
     
-    completion = openai_client.beta.chat.completions.parse(
+    # Call the completions API with the messages list
+    response = openai_client.chat.completions.create(
         model="YOUR_GPT4V_DEPLOYMENT_NAME",
-        messages=[
-            {
-                "role": "system",
-                "content": system_prompt,
-            },
-            {
-                "role": "user",
-                "content": user_content
-            }
-        ],
-        response_format=DocumentClassification,
-        max_tokens=256,
+        messages=messages,
+        max_tokens=50,
         temperature=0.1,
         top_p=0.1
     )
     
-    return completion.document_type
+    # Extract the classification from the response
+    doc_type = response.choices[0].message.content.strip()
+    return doc_type
 
 # Function to save page with classified name
 def save_classified_page(pdf_path, page_num, doc_type):
