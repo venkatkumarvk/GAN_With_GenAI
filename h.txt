@@ -1,0 +1,135 @@
+# Optional: Upload to Azure Blob Storage 
+if 'all_pdf_results' in st.session_state and st.session_state.all_pdf_results and blob_service_client:
+    with st.expander("Upload Results to Azure Blob Storage"):
+        result_upload_container = st.text_input(
+            "Output Container Name",
+            value=azure_storage_container_name,
+            help="Container where results will be uploaded (will be created if doesn't exist)"
+        )
+        
+        if st.button("Upload Results to Blob Storage"):
+            with st.spinner("Uploading results..."):
+                all_pdf_results = st.session_state.all_pdf_results
+                timestamp = st.session_state.last_processing_timestamp or datetime.now().strftime("%Y%m%d_%H%M%S")
+                
+                blob_upload_results = []
+                
+                for pdf_result in all_pdf_results:
+                    filename = pdf_result["filename"]
+                    base_filename = os.path.splitext(filename)[0]
+                    
+                    # Create the text content with key-value pairs
+                    page_results_text = create_page_results_text(pdf_result)
+                    
+                    # Create timestamp filename
+                    timestamp_filename = f"{base_filename}_{timestamp}"
+                    
+                    # Upload text file to blob storage
+                    text_blob_name = f"{timestamp_filename}.txt"
+                    text_success, text_url = upload_to_blob_storage(
+                        blob_service_client,
+                        result_upload_container,
+                        text_blob_name,
+                        page_results_text,
+                        "text/plain"
+                    )
+                    
+                    # Upload JSON to blob storage
+                    json_blob_name = f"{timestamp_filename}.json"
+                    pdf_json = json.dumps(pdf_result, ensure_ascii=False, indent=2)
+                    json_success, json_url = upload_to_blob_storage(
+                        blob_service_client,
+                        result_upload_container,
+                        json_blob_name,
+                        pdf_json,
+                        "application/json"
+                    )
+                    
+                    # Upload CSV to blob storage
+                    try:
+                        # Create a DataFrame for just this PDF
+                        pdf_rows = []
+                        for page in pdf_result["pages"]:
+                            page_num = page["page"]
+                            data = page["data"]
+                            
+                            # Check for errors
+                            if "error" in data:
+                                row_data = {"Page": page_num}
+                                for field in ["VendorName", "InvoiceNumber", "InvoiceDate", "CustomerName", 
+                                            "PurchaseOrder", "StockCode", "UnitPrice", "InvoiceAmount", 
+                                            "Freight", "Salestax", "Total"]:
+                                    row_data[field] = "N/A"
+                                    row_data[f"{field} Confidence"] = 0
+                                pdf_rows.append(row_data)
+                                continue
+                            
+                            # Initialize row data
+                            row_data = {"Page": page_num}
+                            
+                            # Process each field
+                            for field in ["VendorName", "InvoiceNumber", "InvoiceDate", "CustomerName", 
+                                        "PurchaseOrder", "StockCode", "UnitPrice", "InvoiceAmount", 
+                                        "Freight", "Salestax", "Total"]:
+                                field_data = data.get(field, {})
+                                
+                                if isinstance(field_data, dict):
+                                    value = field_data.get("value", "N/A")
+                                    confidence = field_data.get("confidence", 0)
+                                else:
+                                    value = field_data if field_data else "N/A"
+                                    confidence = 0
+                                
+                                # Add to row data
+                                row_data[field] = value
+                                row_data[f"{field} Confidence"] = round(confidence * 100, 2)
+                            
+                            # Add completed row to rows
+                            pdf_rows.append(row_data)
+                        
+                        # Create DataFrame and CSV for this PDF
+                        if pdf_rows:
+                            pdf_df = pd.DataFrame(pdf_rows, dtype=str)
+                            pdf_csv = pdf_df.to_csv(index=False)
+                            
+                            # Upload CSV to blob storage
+                            csv_blob_name = f"{timestamp_filename}.csv"
+                            csv_success, csv_url = upload_to_blob_storage(
+                                blob_service_client,
+                                result_upload_container,
+                                csv_blob_name,
+                                pdf_csv,
+                                "text/csv"
+                            )
+                        else:
+                            csv_success, csv_url = False, None
+                    except Exception as e:
+                        st.warning(f"Could not create CSV for {filename}: {e}")
+                        csv_success, csv_url = False, None
+                    
+                    # Store results
+                    blob_upload_results.append({
+                        "filename": filename,
+                        "text_success": text_success,
+                        "text_url": text_url if text_success else None,
+                        "json_success": json_success,
+                        "json_url": json_url if json_success else None,
+                        "csv_success": csv_success,
+                        "csv_url": csv_url if csv_success else None
+                    })
+                
+                # Display upload results
+                st.subheader("Azure Blob Storage Upload Results")
+                
+                # Create a table to show upload results
+                upload_rows = []
+                for result in blob_upload_results:
+                    upload_rows.append({
+                        "Filename": result["filename"],
+                        "Text File": "✅ Uploaded" if result["text_success"] else "❌ Failed",
+                        "JSON File": "✅ Uploaded" if result["json_success"] else "❌ Failed",
+                        "CSV File": "✅ Uploaded" if result["csv_success"] else "❌ Failed"
+                    })
+                
+                upload_df = pd.DataFrame(upload_rows)
+                st.dataframe(upload_df, use_container_width=True)
