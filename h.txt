@@ -1,0 +1,59 @@
+# create and activate
+
+@echo off
+REM This batch file creates and activates a Python virtual environment
+
+REM Set the name of your virtual environment
+set VENV_NAME=venv
+
+echo Creating virtual environment named %VENV_NAME%...
+
+REM Check if virtual environment already exists
+if exist %VENV_NAME% (
+    echo Virtual environment already exists.
+) else (
+    python -m venv %VENV_NAME%
+    echo Virtual environment created successfully!
+)
+
+echo.
+echo Activating virtual environment...
+call %VENV_NAME%\Scripts\activate.bat
+
+echo.
+echo Virtual environment %VENV_NAME% is now active!
+echo To deactivate, type 'deactivate'
+echo.
+
+REM Keep the command window open
+cmd /k
+
+#Launch
+
+  @echo off
+REM This batch file activates the Python virtual environment and runs a Streamlit app
+
+REM Set the name of your virtual environment
+set VENV_NAME=venv
+
+echo Activating virtual environment %VENV_NAME%...
+
+REM Activate the virtual environment
+call %VENV_NAME%\Scripts\activate.bat
+
+echo.
+echo Running Streamlit application...
+echo.
+
+REM Run the Streamlit application
+streamlit run app.py
+
+REM If Streamlit exits, deactivate the virtual environment
+echo.
+echo Streamlit has stopped. Deactivating virtual environment...
+call deactivate
+
+echo.
+echo Done.
+
+pause
