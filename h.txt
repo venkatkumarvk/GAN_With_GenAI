@@ -1,0 +1,77 @@
+#first
+
+# Add a sidebar menu for navigation
+st.sidebar.title("Navigation")
+
+# Initialize app_mode in session state if not already present
+if 'app_mode' not in st.session_state:
+    st.session_state.app_mode = "Extract Data"
+
+# Create a callback function to update the app mode
+def change_app_mode():
+    st.session_state.app_mode = st.session_state.sidebar_radio
+
+# Use radio with the on_change parameter
+app_mode = st.sidebar.radio(
+    "Choose a mode",
+    ["Extract Data", "Manual Edit", "View Results"],
+    key="sidebar_radio",
+    on_change=change_app_mode,
+    index=["Extract Data", "Manual Edit", "View Results"].index(st.session_state.app_mode)
+)
+
+# Use the session state app_mode for the logic
+current_mode = st.session_state.app_mode
+
+
+#second
+
+  # In the Extract Data mode section
+if current_mode == "Extract Data":
+    # ... your existing code for file upload, etc ...
+
+    # Add a processing flag in session state
+    if 'processing_triggered' not in st.session_state:
+        st.session_state.processing_triggered = False
+
+    # Define callback function for the button
+    def trigger_processing():
+        st.session_state.processing_triggered = True
+
+    # Process button with callback
+    process_button = st.button(
+        "Process Documents", 
+        type="primary",
+        on_click=trigger_processing
+    )
+
+    # Check if processing should be done
+    files_to_process = None
+    if st.session_state.processing_triggered:
+        if uploaded_files:  # Make sure files exist
+            files_to_process = uploaded_files
+            # Reset the flag after processing
+            st.session_state.processing_triggered = False
+        else:
+            st.warning("Please upload at least one PDF file.")
+            st.session_state.processing_triggered = False
+
+  #third
+
+  # Process button for blob storage
+process_button = st.button(
+    "Process Blob Documents", 
+    type="primary",
+    on_click=trigger_processing
+)
+
+# Check if processing should be done
+files_to_process = None
+if st.session_state.processing_triggered:
+    if pdf_blobs:  # Make sure blobs exist
+        files_to_process = pdf_blobs
+        # Reset the flag after processing
+        st.session_state.processing_triggered = False
+    else:
+        st.warning("No PDF files found in the selected location.")
+        st.session_state.processing_triggered = False
