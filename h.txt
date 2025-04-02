@@ -79,6 +79,23 @@ def display_pdf_preview_tab(all_pdf_results, files, input_method, blob_service_c
       if st.button("Show PDF Preview"):
     # Get the original input method
     input_method = st.session_state.input_method if "input_method" in st.session_state else "Upload Files"
+
+# PDF Preview tab
+st.subheader("PDF Previews")
+
+# Allow selection of files to preview to reduce memory usage
+if 'all_pdf_results' in st.session_state and st.session_state.all_pdf_results:
+    pdf_filenames = [pdf_result["filename"] for pdf_result in st.session_state.all_pdf_results]
+    
+    # Define selected_pdf_to_preview here
+    selected_pdf_to_preview = st.selectbox(
+        "Select PDF to preview",
+        pdf_filenames,
+        key="preview_pdf_select"
+    )
+    
+    if st.button("Show PDF Preview"):
+        # Rest of your preview code...
     
     # Filter to just the selected PDF
     selected_pdf_results = [pdf for pdf in all_pdf_results if pdf["filename"] == selected_pdf_to_preview]
