@@ -46,7 +46,7 @@ try:
             row_data[f"{field} Confidence"] = round(confidence * 100, 2)
         
         # Add edit tracking columns
-        edited_fields = []
+        edited_fields_with_values = []
         edit_timestamps = []
         original_values = []
         
@@ -60,11 +60,14 @@ try:
             
             for field, info in edit_info.items():
                 if info.get("edited", False):
-                    edited_fields.append(field)
+                    # Get the current (edited) value for this field
+                    current_value = row_data.get(field, "N/A")
+                    # Add field name and its value
+                    edited_fields_with_values.append(f"{field}: {current_value}")
                     edit_timestamps.append(f"{field}: {info.get('edit_timestamp', 'N/A')}")
                     original_values.append(f"{field}: {info.get('previous_value', 'N/A')}")
         
-        row_data["Manually_Edited_Fields"] = ", ".join(edited_fields) if edited_fields else ""
+        row_data["Manually_Edited_Fields"] = "; ".join(edited_fields_with_values) if edited_fields_with_values else ""
         row_data["Edit_Timestamp"] = "; ".join(edit_timestamps) if edit_timestamps else ""
         row_data["Original_Values"] = "; ".join(original_values) if original_values else ""
         
@@ -90,3 +93,35 @@ try:
 except Exception as e:
     st.warning(f"Could not create CSV for {filename}: {e}")
     csv_success, csv_url = False, None
+
+
+#create result dataframe
+
+# In the create_results_dataframe function, modify the edit tracking section:
+
+if include_edit_info:
+    # Add columns for edit tracking
+    edited_fields_with_values = []
+    edit_timestamps = []
+    original_values = []
+    
+    # Check manual edit tracking info
+    if ('manual_edit_tracking' in st.session_state and 
+        filename in st.session_state.manual_edit_tracking and 
+        str(page_num) in st.session_state.manual_edit_tracking[filename]):
+        
+        # Get the edit tracking info for this page
+        edit_info = st.session_state.manual_edit_tracking[filename][str(page_num)]
+        
+        for field, info in edit_info.items():
+            if info.get("edited", False):
+                # Get the current (edited) value for this field
+                current_value = row_data.get(field, "N/A")
+                # Add field name and its value
+                edited_fields_with_values.append(f"{field}: {current_value}")
+                edit_timestamps.append(f"{field}: {info.get('edit_timestamp', 'N/A')}")
+                original_values.append(f"{field}: {info.get('previous_value', 'N/A')}")
+    
+    row_data["Manually_Edited_Fields"] = "; ".join(edited_fields_with_values) if edited_fields_with_values else ""
+    row_data["Edit_Timestamp"] = "; ".join(edit_timestamps) if edit_timestamps else ""
+    row_data["Original_Values"] = "; ".join(original_values) if original_values else ""
