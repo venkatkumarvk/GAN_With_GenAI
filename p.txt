@@ -1,0 +1,76 @@
+# In the View Results mode, PDF preview section:
+# PDF Preview tab
+st.subheader("PDF Previews")
+
+if 'all_pdf_results' in st.session_state and st.session_state.all_pdf_results:
+    pdf_filenames = [pdf_result["filename"] for pdf_result in st.session_state.all_pdf_results]
+    
+    selected_pdf_to_preview = st.selectbox(
+        "Select PDF to preview",
+        pdf_filenames,
+        key="preview_pdf_select"
+    )
+    
+    # Initialize blob client for preview
+    blob_service_client = None
+    if azure_storage_connection_string:
+        blob_service_client = get_blob_service_client()
+    
+    if st.button("Show PDF Preview"):
+        # Get the input method from session state
+        input_method = st.session_state.get("input_method", "Upload Files")
+        
+        if input_method == "Upload Files":
+            # For uploaded files
+            if 'original_files' in st.session_state:
+                original_files = st.session_state.original_files
+                matching_files = [f for f in original_files if hasattr(f, 'name') and f.name == selected_pdf_to_preview]
+                
+                if matching_files:
+                    with st.spinner(f"Loading preview for {selected_pdf_to_preview}..."):
+                        file_obj = matching_files[0]
+                        pos = file_obj.tell()
+                        base64_pdf = convert_pdf_to_base64(file_obj)
+                        file_obj.seek(pos)
+                        
+                        st.write(f"### Preview of {selected_pdf_to_preview}")
+                        display_pdf_viewer(base64_pdf)
+                else:
+                    st.warning(f"Could not find original file for {selected_pdf_to_preview}")
+            else:
+                st.warning("Original file references not available. Please reprocess the documents.")
+        
+        elif input_method == "Azure Blob Storage":
+            # For blob storage
+            if blob_service_client and 'blob_container' in st.session_state:
+                container_name = st.session_state.blob_container
+                
+                # Get the blob paths
+                original_blobs = st.session_state.get('original_files', [])
+                
+                # Try to find the exact blob path
+                blob_path = None
+                for blob in original_blobs:
+                    if isinstance(blob, str) and blob.endswith(selected_pdf_to_preview):
+                        blob_path = blob
+                        break
+                
+                # If not found, just use the filename
+                if not blob_path:
+                    blob_path = selected_pdf_to_preview
+                
+                with st.spinner(f"Downloading blob: {blob_path}"):
+                    # Try to download the blob
+                    blob_content = download_blob_to_memory(blob_service_client, container_name, blob_path)
+                    
+                    if blob_content:
+                        # Convert to base64 and display
+                        base64_pdf = convert_pdf_to_base64(blob_content)
+                        st.write(f"### Preview of {selected_pdf_to_preview}")
+                        display_pdf_viewer(base64_pdf)
+                    else:
+                        st.error(f"Could not download blob: {blob_path}")
+            else:
+                st.warning("Blob storage configuration not available.")
+else:
+    st.warning("No extraction results available. Please run extraction first.")
