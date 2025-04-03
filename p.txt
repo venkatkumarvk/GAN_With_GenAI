@@ -30,9 +30,45 @@ if 'all_pdf_results' in st.session_state and st.session_state.all_pdf_results:
             
             if input_method == "Upload Files":
                 # Handle uploaded files preview
-                # (your existing code for uploaded files)
-                pass
-            
+                if 'original_files' in st.session_state:
+                    # Find the file that matches the selected PDF
+                    matching_files = [f for f in st.session_state.original_files if hasattr(f, 'name') and f.name == selected_pdf_to_preview]
+                    
+                    if matching_files:
+                        file_obj = matching_files[0]
+                        
+                        try:
+                            # Save position and reset after use
+                            pos = file_obj.tell()
+                            
+                            # Convert to base64 for display
+                            base64_pdf = convert_pdf_to_base64(file_obj)
+                            
+                            # Reset file position
+                            file_obj.seek(pos)
+                            
+                            # Display the PDF
+                            st.write(f"### Preview of {selected_pdf_to_preview}")
+                            display_pdf_viewer(base64_pdf)
+                            
+                            # Clean up memory
+                            del base64_pdf
+                            gc.collect()
+                            
+                        except Exception as e:
+                            st.error(f"Error displaying file preview: {str(e)}")
+                    else:
+                        st.warning(f"Could not find original file for {selected_pdf_to_preview}")
+                        
+                        # Show what files are available for debugging
+                        if st.session_state.original_files:
+                            available_files = [f.name if hasattr(f, 'name') else str(f) for f in st.session_state.original_files]
+                            st.write("Available files:", available_files)
+                        else:
+                            st.warning("No files available in original_files")
+                else:
+                    st.warning("Original file references not available. Please reprocess the documents.")
+                        
             elif input_method == "Azure Blob Storage":
                 # Handle blob storage preview
                 if blob_client_available and 'blob_container' in st.session_state:
