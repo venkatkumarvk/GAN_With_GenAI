@@ -1,0 +1,399 @@
+def update_edited_data(pdf_filename, page_num, field, new_value):
+    """
+    Updates the edited data in the session state and tracks which fields were edited with timestamps.
+    """
+    # Get current timestamp
+    current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    
+    # Initialize the edited data structure if it doesn't exist
+    if 'edited_data' not in st.session_state:
+        st.session_state.edited_data = {}
+    
+    # Create the nested structure if it doesn't exist
+    if pdf_filename not in st.session_state.edited_data:
+        st.session_state.edited_data[pdf_filename] = {}
+    
+    if page_num not in st.session_state.edited_data[pdf_filename]:
+        st.session_state.edited_data[pdf_filename][page_num] = {}
+    
+    # Store the edited value
+    st.session_state.edited_data[pdf_filename][page_num][field] = new_value
+    
+    # Track which fields were manually edited with timestamps
+    if 'manual_edit_tracking' not in st.session_state:
+        st.session_state.manual_edit_tracking = {}
+        
+    if pdf_filename not in st.session_state.manual_edit_tracking:
+        st.session_state.manual_edit_tracking[pdf_filename] = {}
+        
+    if page_num not in st.session_state.manual_edit_tracking[pdf_filename]:
+        st.session_state.manual_edit_tracking[pdf_filename][page_num] = {}
+    
+    # Add or update the field edit information with timestamp
+    if field not in st.session_state.manual_edit_tracking[pdf_filename][page_num]:
+        st.session_state.manual_edit_tracking[pdf_filename][page_num][field] = {
+            "edited": True,
+            "edit_timestamp": current_time,
+            "previous_value": None  # Will be filled in the apply_edits_to_results function
+        }
+    else:
+        # Update existing entry
+        st.session_state.manual_edit_tracking[pdf_filename][page_num][field]["edit_timestamp"] = current_time
+
+#2nd
+
+# Add this in your process_pdf function right when you add data to all_page_results
+extracted_info_with_page = {
+    "page": page_num + 1,
+    "data": extracted_info,
+    "extraction_timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S")  # Add timestamp
+}
+
+#3rd
+def apply_edits_to_results(all_pdf_results, edited_data):
+    """
+    Apply manual edits to the PDF extraction results.
+    Returns a copy of the results with edits applied.
+    """
+    # Create a deep copy to avoid modifying the original
+    import copy
+    edited_results = copy.deepcopy(all_pdf_results)
+    
+    # Apply the edits
+    for pdf_filename, pages in edited_data.items():
+        # Find the PDF result that matches this filename
+        for pdf_result in edited_results:
+            if pdf_result["filename"] == pdf_filename:
+                # Apply edits for each page
+                for page_num_str, fields in pages.items():
+                    page_num = int(page_num_str)
+                    
+                    # Find the page data
+                    for page_data in pdf_result["pages"]:
+                        if page_data["page"] == page_num:
+                            # Apply edits to each field
+                            for field, new_value in fields.items():
+                                if field in page_data["data"]:
+                                    # Store the previous value before updating
+                                    previous_value = None
+                                    if isinstance(page_data["data"][field], dict):
+                                        previous_value = page_data["data"][field].get("value")
+                                    else:
+                                        previous_value = page_data["data"][field]
+                                    
+                                    # Store the previous value in the manual edit tracking
+                                    if ('manual_edit_tracking' in st.session_state and 
+                                        pdf_filename in st.session_state.manual_edit_tracking and 
+                                        page_num_str in st.session_state.manual_edit_tracking[pdf_filename] and 
+                                        field in st.session_state.manual_edit_tracking[pdf_filename][page_num_str]):
+                                        st.session_state.manual_edit_tracking[pdf_filename][page_num_str][field]["previous_value"] = previous_value
+                                    
+                                    # Update value while keeping confidence
+                                    if isinstance(page_data["data"][field], dict):
+                                        page_data["data"][field]["value"] = new_value
+                                        # Flag as manually edited with timestamp
+                                        page_data["data"][field]["manually_edited"] = True
+                                        page_data["data"][field]["edit_timestamp"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                                        # Store the original value if not already present
+                                        if "original_value" not in page_data["data"][field]:
+                                            page_data["data"][field]["original_value"] = previous_value
+                                    else:
+                                        # If it's not a dict, just replace the value
+                                        page_data["data"][field] = new_value
+                
+                # Break once we've found and edited the PDF
+                break
+    
+    return edited_results
+
+#4th
+def create_results_dataframe(all_pdf_results, filter_category=None, include_edit_info=True):
+    """
+    Create a pandas DataFrame from the extraction results for easy viewing.
+    Includes information about manually edited fields with timestamps.
+    """
+    rows = []
+    
+    # Define the fields we're extracting
+    fields = [
+        "VendorName", "InvoiceNumber", "InvoiceDate", "CustomerName", 
+        "PurchaseOrder", "StockCode", "UnitPrice", "InvoiceAmount", 
+        "Freight", "Salestax", "Total"
+    ]
+    
+    for pdf_result in all_pdf_results:
+        filename = pdf_result["filename"]
+        
+        for page in pdf_result["pages"]:
+            page_num = page["page"]
+            data = page["data"]
+            extraction_timestamp = page.get("extraction_timestamp", "N/A")
+            
+            # Check for errors
+            if "error" in data:
+                row_data = {
+                    "Filename": filename,
+                    "Page": page_num,
+                    "Extraction_Timestamp": extraction_timestamp
+                }
+                
+                # Add placeholders for all fields and confidence values
+                for field in fields:
+                    row_data[field] = "N/A"
+                    row_data[f"{field} Confidence"] = 0
+                
+                if include_edit_info:
+                    # Add columns for edit tracking
+                    row_data["Manually_Edited_Fields"] = ""
+                    row_data["Edit_Timestamp"] = ""
+                    row_data["Original_Values"] = ""
+                
+                rows.append(row_data)
+                continue
+            
+            # Initialize row data
+            row_data = {
+                "Filename": filename,
+                "Page": page_num,
+                "Extraction_Timestamp": extraction_timestamp
+            }
+            
+            # Process each field
+            for field in fields:
+                field_data = data.get(field, {})
+                
+                if isinstance(field_data, dict):
+                    value = field_data.get("value", "N/A")
+                    confidence = field_data.get("confidence", 0)
+                else:
+                    value = field_data if field_data else "N/A"
+                    confidence = 0
+                
+                # Ensure values are strings to avoid PyArrow errors
+                if isinstance(value, (list, dict)):
+                    value = str(value)
+                
+                # Add to row data
+                row_data[field] = value
+                row_data[f"{field} Confidence"] = round(confidence * 100, 2)
+            
+            if include_edit_info:
+                # Add columns for edit tracking
+                edited_fields = []
+                edit_timestamps = []
+                original_values = []
+                
+                # Check manual edit tracking info
+                if ('manual_edit_tracking' in st.session_state and 
+                    filename in st.session_state.manual_edit_tracking and 
+                    str(page_num) in st.session_state.manual_edit_tracking[filename]):
+                    
+                    # Get the edit tracking info for this page
+                    edit_info = st.session_state.manual_edit_tracking[filename][str(page_num)]
+                    
+                    for field, info in edit_info.items():
+                        if info.get("edited", False):
+                            edited_fields.append(field)
+                            edit_timestamps.append(f"{field}: {info.get('edit_timestamp', 'N/A')}")
+                            original_values.append(f"{field}: {info.get('previous_value', 'N/A')}")
+                
+                row_data["Manually_Edited_Fields"] = ", ".join(edited_fields) if edited_fields else ""
+                row_data["Edit_Timestamp"] = "; ".join(edit_timestamps) if edit_timestamps else ""
+                row_data["Original_Values"] = "; ".join(original_values) if original_values else ""
+            
+            # Add completed row to rows
+            rows.append(row_data)
+    
+    try:
+        # Create DataFrame with string type
+        return pd.DataFrame(rows, dtype=str)
+    except Exception as e:
+        st.warning(f"Error creating DataFrame: {e}. Trying alternative method...")
+        
+        # Fallback methods...
+        # [Your existing fallback code]
+
+#5th
+def create_original_values_dataframe(all_pdf_results):
+    """
+    Create a pandas DataFrame with only the original extraction values (before any edits).
+    """
+    # Make a deep copy of the results to avoid modifying the original
+    import copy
+    original_results = copy.deepcopy(all_pdf_results)
+    
+    # Restore original values where available
+    for pdf_result in original_results:
+        for page in pdf_result["pages"]:
+            for field_name, field_data in page["data"].items():
+                if isinstance(field_data, dict) and "original_value" in field_data:
+                    # Restore the original value
+                    field_data["value"] = field_data["original_value"]
+    
+    # Generate the DataFrame without edit information
+    return create_results_dataframe(original_results, include_edit_info=False)
+
+#6th
+def create_comparison_dataframe(all_pdf_results):
+    """
+    Create a pandas DataFrame that shows both original and edited values side by side.
+    """
+    rows = []
+    
+    # Define the fields we're extracting
+    fields = [
+        "VendorName", "InvoiceNumber", "InvoiceDate", "CustomerName", 
+        "PurchaseOrder", "StockCode", "UnitPrice", "InvoiceAmount", 
+        "Freight", "Salestax", "Total"
+    ]
+    
+    for pdf_result in all_pdf_results:
+        filename = pdf_result["filename"]
+        
+        for page in pdf_result["pages"]:
+            page_num = page["page"]
+            data = page["data"]
+            extraction_timestamp = page.get("extraction_timestamp", "N/A")
+            
+            # Initialize row data
+            row_data = {
+                "Filename": filename,
+                "Page": page_num,
+                "Extraction_Timestamp": extraction_timestamp
+            }
+            
+            # Process each field
+            for field in fields:
+                if field not in data:
+                    row_data[f"{field}_Original"] = "N/A"
+                    row_data[f"{field}_Edited"] = "N/A"
+                    row_data[f"{field}_Edit_Timestamp"] = "N/A"
+                    continue
+                
+                field_data = data.get(field, {})
+                
+                if isinstance(field_data, dict):
+                    # Get current/edited value
+                    current_value = field_data.get("value", "N/A")
+                    
+                    # Get original value if available
+                    original_value = field_data.get("original_value", current_value)
+                    
+                    # Get edit timestamp if available
+                    edit_timestamp = field_data.get("edit_timestamp", "N/A")
+                    
+                    # Check if it was manually edited
+                    was_edited = field_data.get("manually_edited", False)
+                    
+                    row_data[f"{field}_Original"] = original_value
+                    row_data[f"{field}_Edited"] = current_value if was_edited else "Same as original"
+                    row_data[f"{field}_Edit_Timestamp"] = edit_timestamp if was_edited else "N/A"
+                else:
+                    # If it's not a dict, just use the value for both original and edited
+                    row_data[f"{field}_Original"] = field_data
+                    row_data[f"{field}_Edited"] = field_data
+                    row_data[f"{field}_Edit_Timestamp"] = "N/A"
+            
+            # Add completed row to rows
+            rows.append(row_data)
+    
+    try:
+        # Create DataFrame with string type
+        return pd.DataFrame(rows, dtype=str)
+    except Exception as e:
+        st.warning(f"Error creating comparison DataFrame: {e}")
+        return pd.DataFrame()  # Return empty DataFrame as fallback
+
+#7th
+# In the Download Options tab
+with view_tabs[3]:  # Download Options
+    st.subheader("Download Options")
+    
+    # Create a container for download buttons
+    download_container = st.container()
+    
+    with download_container:
+        st.write("Select the data formats you want to download:")
+        
+        col1, col2, col3, col4 = st.columns(4)
+        
+        with col1:
+            # Prepare CSV with current (edited) values
+            if st.button("Prepare Current Values CSV", on_click=reset_download_state):
+                with st.spinner("Preparing CSV with current values..."):
+                    try:
+                        # Get the DataFrame with current (possibly edited) values
+                        if 'results_df' in st.session_state and not st.session_state.results_df.empty:
+                            results_df = st.session_state.results_df
+                        else:
+                            results_df = create_results_dataframe(all_pdf_results)
+                        
+                        csv = results_df.to_csv(index=False)
+                        st.session_state.current_csv = csv
+                        st.session_state.download_completed = True
+                    except Exception as e:
+                        st.error(f"Error creating CSV: {e}")
+            
+            # Show download button when data is ready
+            if 'current_csv' in st.session_state and st.session_state.download_completed:
+                st.download_button(
+                    label="Download Current Values CSV",
+                    data=st.session_state.current_csv,
+                    file_name=f"extraction_with_edits_{timestamp}.csv",
+                    mime="text/csv",
+                    on_click=reset_download_state
+                )
+        
+        with col2:
+            # Prepare CSV with original values
+            if st.button("Prepare Original Values CSV", on_click=reset_download_state):
+                with st.spinner("Preparing CSV with original values..."):
+                    try:
+                        # Create DataFrame with original values
+                        original_df = create_original_values_dataframe(all_pdf_results)
+                        
+                        if not original_df.empty:
+                            csv = original_df.to_csv(index=False)
+                            st.session_state.original_csv = csv
+                            st.session_state.download_completed = True
+                        else:
+                            st.warning("Could not create CSV with original values")
+                    except Exception as e:
+                        st.error(f"Error creating original values CSV: {e}")
+            
+            # Show download button when data is ready
+            if 'original_csv' in st.session_state and st.session_state.download_completed:
+                st.download_button(
+                    label="Download Original Values CSV",
+                    data=st.session_state.original_csv,
+                    file_name=f"extraction_original_{timestamp}.csv",
+                    mime="text/csv",
+                    on_click=reset_download_state
+                )
+        
+        with col3:
+            # Prepare comparison CSV
+            if st.button("Prepare Comparison CSV", on_click=reset_download_state):
+                with st.spinner("Preparing comparison CSV..."):
+                    try:
+                        # Create comparison DataFrame
+                        comparison_df = create_comparison_dataframe(all_pdf_results)
+                        
+                        if not comparison_df.empty:
+                            csv = comparison_df.to_csv(index=False)
+                            st.session_state.comparison_csv = csv
+                            st.session_state.download_completed = True
+                        else:
+                            st.warning("Could not create comparison CSV")
+                    except Exception as e:
+                        st.error(f"Error creating comparison CSV: {e}")
+            
+            # Show download button when data is ready
+            if 'comparison_csv' in st.session_state and st.session_state.download_completed:
+                st.download_button(
+                    label="Download Comparison CSV",
+                    data=st.session_state.comparison_csv,
+                    file_name=f"extraction_comparison_{timestamp}.csv",
+                    mime="text/csv",
+                    on_click=reset_download_state
+                )
