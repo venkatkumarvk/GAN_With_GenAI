@@ -21,6 +21,7 @@ try:
             row_data["Manually_Edited_Fields"] = ""
             row_data["Edit_Timestamp"] = ""
             row_data["Original_Values"] = ""
+            row_data["Manual_Edit"] = "N"  # Add Y/N indicator
             
             pdf_rows.append(row_data)
             continue
@@ -47,8 +48,9 @@ try:
         
         # Add edit tracking columns
         edited_fields_with_values = []
-        edit_timestamps = []
+        latest_edit_timestamp = ""
         original_values = []
+        has_manual_edits = False
         
         # Check manual edit tracking info
         if ('manual_edit_tracking' in st.session_state and 
@@ -58,18 +60,32 @@ try:
             # Get the edit tracking info for this page
             edit_info = st.session_state.manual_edit_tracking[pdf_result["filename"]][str(page_num)]
             
+            # Get the most recent edit timestamp
+            timestamps = []
+            
             for field, info in edit_info.items():
                 if info.get("edited", False):
+                    has_manual_edits = True
+                    
                     # Get the current (edited) value for this field
                     current_value = row_data.get(field, "N/A")
                     # Add field name and its value
                     edited_fields_with_values.append(f"{field}: {current_value}")
-                    edit_timestamps.append(f"{field}: {info.get('edit_timestamp', 'N/A')}")
+                    
+                    # Add timestamp to list (for finding the most recent)
+                    if "edit_timestamp" in info:
+                        timestamps.append(info["edit_timestamp"])
+                    
                     original_values.append(f"{field}: {info.get('previous_value', 'N/A')}")
+            
+            # Use the most recent timestamp for Edit_Timestamp
+            if timestamps:
+                latest_edit_timestamp = max(timestamps)  # Get the most recent timestamp
         
         row_data["Manually_Edited_Fields"] = "; ".join(edited_fields_with_values) if edited_fields_with_values else ""
-        row_data["Edit_Timestamp"] = "; ".join(edit_timestamps) if edit_timestamps else ""
+        row_data["Edit_Timestamp"] = latest_edit_timestamp  # Just the timestamp, no field name
         row_data["Original_Values"] = "; ".join(original_values) if original_values else ""
+        row_data["Manual_Edit"] = "Y" if has_manual_edits else "N"  # Add Y/N indicator
         
         # Add completed row to rows
         pdf_rows.append(row_data)
@@ -94,16 +110,15 @@ except Exception as e:
     st.warning(f"Could not create CSV for {filename}: {e}")
     csv_success, csv_url = False, None
 
-
-#create result dataframe
-
+#create
 # In the create_results_dataframe function, modify the edit tracking section:
 
 if include_edit_info:
     # Add columns for edit tracking
     edited_fields_with_values = []
-    edit_timestamps = []
+    latest_edit_timestamp = ""
     original_values = []
+    has_manual_edits = False
     
     # Check manual edit tracking info
     if ('manual_edit_tracking' in st.session_state and 
@@ -113,15 +128,29 @@ if include_edit_info:
         # Get the edit tracking info for this page
         edit_info = st.session_state.manual_edit_tracking[filename][str(page_num)]
         
+        # Get the most recent edit timestamp
+        timestamps = []
+        
         for field, info in edit_info.items():
             if info.get("edited", False):
+                has_manual_edits = True
+                
                 # Get the current (edited) value for this field
                 current_value = row_data.get(field, "N/A")
                 # Add field name and its value
                 edited_fields_with_values.append(f"{field}: {current_value}")
-                edit_timestamps.append(f"{field}: {info.get('edit_timestamp', 'N/A')}")
+                
+                # Add timestamp to list (for finding the most recent)
+                if "edit_timestamp" in info:
+                    timestamps.append(info["edit_timestamp"])
+                
                 original_values.append(f"{field}: {info.get('previous_value', 'N/A')}")
+        
+        # Use the most recent timestamp for Edit_Timestamp
+        if timestamps:
+            latest_edit_timestamp = max(timestamps)  # Get the most recent timestamp
     
     row_data["Manually_Edited_Fields"] = "; ".join(edited_fields_with_values) if edited_fields_with_values else ""
-    row_data["Edit_Timestamp"] = "; ".join(edit_timestamps) if edit_timestamps else ""
+    row_data["Edit_Timestamp"] = latest_edit_timestamp  # Just the timestamp, no field name
     row_data["Original_Values"] = "; ".join(original_values) if original_values else ""
+    row_data["Manual_Edit"] = "Y" if has_manual_edits else "N"  # Add Y/N indicator
