@@ -1,11 +1,16 @@
 def create_blob_format_csv(all_pdf_results):
     """
     Create CSV data in the same format as what's stored in Azure Blob Storage.
+    Also returns invoice number and total for each PDF.
     """
     all_csv_data = []
     
     for pdf_result in all_pdf_results:
         filename = pdf_result["filename"]
+        
+        # Variables to store invoice number and total
+        invoice_number = "unknown"
+        total_amount = "unknown"
         
         # Create rows for this PDF
         pdf_rows = []
@@ -51,6 +56,12 @@ def create_blob_format_csv(all_pdf_results):
                 # Add to row data
                 row_data[field] = value
                 row_data[f"{field} Confidence"] = round(confidence * 100, 2)
+                
+                # Capture invoice number and total for filename
+                if field == "InvoiceNumber" and value != "N/A":
+                    invoice_number = value
+                elif field == "Total" and value != "N/A":
+                    total_amount = value
             
             # Add edit tracking columns
             edited_fields_with_values = []
@@ -83,6 +94,12 @@ def create_blob_format_csv(all_pdf_results):
                             timestamps.append(info["edit_timestamp"])
                         
                         original_values.append(f"{field}: {info.get('previous_value', 'N/A')}")
+                        
+                        # Update invoice number and total if they were edited
+                        if field == "InvoiceNumber":
+                            invoice_number = current_value
+                        elif field == "Total":
+                            total_amount = current_value
                 
                 # Use the most recent timestamp for Edit_Timestamp
                 if timestamps:
@@ -96,18 +113,23 @@ def create_blob_format_csv(all_pdf_results):
             # Add completed row to rows
             pdf_rows.append(row_data)
         
+        # Clean invoice number and total for filename use
+        # Remove any invalid filename characters
+        safe_invoice_number = ''.join(c for c in str(invoice_number) if c.isalnum() or c in '-_.')
+        safe_total_amount = ''.join(c for c in str(total_amount) if c.isalnum() or c in '-_.')
+        
         # Create DataFrame for this PDF
         if pdf_rows:
             # Add to the list of all CSV data
             all_csv_data.append({
                 "filename": filename,
+                "invoice_number": safe_invoice_number,
+                "total_amount": safe_total_amount,
                 "dataframe": pd.DataFrame(pdf_rows, dtype=str)
             })
     
     return all_csv_data
 
-
-#download
 # In the Download Options tab
 with col4:  # Add another column or use an existing one
     # Prepare per-PDF CSV files (like blob storage format)
@@ -126,13 +148,18 @@ with col4:  # Add another column or use an existing one
                         for pdf_data in pdf_csv_data:
                             filename = pdf_data["filename"]
                             base_filename = os.path.splitext(filename)[0]
+                            invoice_number = pdf_data["invoice_number"]
+                            total_amount = pdf_data["total_amount"]
                             df = pdf_data["dataframe"]
                             
                             # Convert to CSV
                             csv_data = df.to_csv(index=False)
                             
+                            # Use the requested filename format
+                            csv_filename = f"{base_filename}_{invoice_number}_{total_amount}_{timestamp}.csv"
+                            
                             # Add to zip
-                            zip_file.writestr(f"{base_filename}_{timestamp}.csv", csv_data)
+                            zip_file.writestr(csv_filename, csv_data)
                     
                     # Seek to beginning
                     zip_buffer.seek(0)
