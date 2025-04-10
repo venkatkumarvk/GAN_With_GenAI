@@ -1,0 +1,266 @@
+# PDF Financial Data Extractor: Process Flow Documentation
+
+## Overview
+
+The PDF Financial Data Extractor is an application designed to extract financial information from invoice PDFs using Azure OpenAI Vision capabilities. The system classifies pages, extracts structured data, allows for manual editing, and generates various output formats.
+
+## Detailed Process Flow
+
+### 1. PDF File Processing
+
+#### a. Converting PDF to Images
+* **Objective**: Convert each PDF page to an image for AI processing
+* **Function**: `process_pdf()` and `process_blob_pdfs()`
+* **Key Steps**: 
+  * Use PyMuPDF (fitz) to open the PDF file and access individual pages
+  * Render each page as a pixmap at 2x zoom for better resolution
+  * Convert pixmap to bytes
+* **Output**: Binary image data for each page
+
+#### b. Converting Images to Data URLs
+* **Objective**: Format the image for use with the Azure OpenAI API
+* **Function**: `image_to_data_url()`
+* **Key Steps**: 
+  * Convert binary image data to base64 encoding
+  * Format as a data URL with appropriate MIME type
+* **Output**: Data URL string following format `data:image/png;base64,{base64_encoded_image_data}`
+
+### 2. AI Processing
+
+#### a. Page Classification and Data Extraction
+* **Objective**: Classify and extract data from invoice pages in a single API call
+* **Function**: `process_and_classify_page()`
+* **Key Steps**:
+  * Send image to Azure OpenAI Vision API
+  * Use a combined prompt to both classify the page and extract data if needed
+* **Prompt Used**: 
+```
+First, classify this document into one of these categories:
+- Terms & Conditions
+- General Terms and Conditions
+- Sale Order
+- Delivery
+- Price and Payment
+- Warranty
+- Other
+
+If and ONLY if the document is in the "Other" category, extract the following information...
+```
+* **Output**: Tuple containing `(category, extracted_data)`
+
+#### b. Structured Data Extraction
+* **Objective**: Extract specific financial fields from invoice images
+* **Key Fields Extracted**:
+  * VendorName
+  * InvoiceNumber
+  * InvoiceDate
+  * CustomerName
+  * PurchaseOrder
+  * StockCode
+  * UnitPrice
+  * InvoiceAmount
+  * Freight
+  * Salestax
+  * Total
+* **Output Format**: JSON object with field values and confidence scores
+
+### 3. Results Processing
+
+#### a. Results Collection and Organization
+* **Objective**: Organize extracted data into a structured format
+* **Function**: Creates `extracted_info_with_page` dictionaries stored in `all_pdf_results`
+* **Key Steps**:
+  * Store page number, extracted data, and timestamp
+  * Only process pages classified as "Other" for data extraction
+  * Skip other document categories
+* **Output**: Structured results by PDF and page
+
+#### b. Confidence Level Analysis
+* **Objective**: Evaluate extraction quality based on confidence scores
+* **Function**: `evaluate_extraction_results()`
+* **Key Steps**:
+  * Calculate confidence scores for each field
+  * Identify documents needing manual verification (confidence < 90%)
+  * Generate statistics on extraction quality
+* **Output**: Evaluation metrics and identified documents for verification
+
+### 4. Manual Editing
+
+#### a. Editing Interface
+* **Objective**: Allow users to correct extraction errors
+* **Function**: `show_manual_editing_interface()`
+* **Key Steps**:
+  * Display editable fields for each page
+  * Highlight fields with low confidence (< 90%)
+  * Store original values and edit timestamps
+* **Output**: Updated values in session state
+
+#### b. Tracking and Applying Edits
+* **Objective**: Apply and track manual edits to extracted data
+* **Functions**: `update_edited_data()` and `apply_edits_to_results()`
+* **Key Steps**:
+  * Store changes with timestamps
+  * Track original vs. edited values
+  * Mark fields as manually edited
+* **Output**: Updated results with edit tracking metadata
+
+### 5. Output Generation
+
+#### a. CSV Generation
+* **Objective**: Convert extraction results to tabular format
+* **Function**: `create_results_dataframe()`
+* **Key Steps**:
+  * Format data from all PDFs into rows
+  * Include confidence scores
+  * Add edit tracking information
+* **Output**: Pandas DataFrame ready for CSV export
+
+#### b. Confidence-Based Storage
+* **Objective**: Separate high confidence (≥95%) and low confidence (<95%) results
+* **Function**: `has_high_confidence()`
+* **Key Steps**:
+  * Check all field confidence scores against threshold
+  * Route to appropriate storage folder based on confidence
+* **Output**: Properly categorized CSV files
+
+#### c. Azure Blob Storage
+* **Objective**: Store extraction results in cloud storage
+* **Function**: `upload_to_blob_storage()`
+* **Key Steps**:
+  * Prepare text, JSON, and CSV files
+  * Create folder structure based on confidence levels
+  * Use detailed filenames with invoice numbers and totals
+* **Output**: Stored files in Azure Blob Storage
+
+### 6. User Interface Components
+
+#### a. Navigation System
+* **Objective**: Allow switching between application modes
+* **Modes**:
+  * Extract Data: Upload and process PDFs
+  * Manual Edit: Correct extraction errors
+  * View Results: View, analyze, and download results
+
+#### b. Download Options
+* **Objective**: Provide access to extracted data in various formats
+* **Options**:
+  * Text files with key-value pairs
+  * CSV with current (edited) values
+  * CSV with original (pre-edit) values
+  * Comparative CSV showing both values
+  * Individual CSV files matching blob storage format
+
+#### c. Memory Management
+* **Objective**: Optimize memory usage for large PDF processing
+* **Strategies**:
+  * Garbage collection after processing steps
+  * Limited PDF previews
+  * Separate data preparation and download steps
+  * Clear data option to free memory
+
+## Process Flow Diagram
+
+```
+┌─────────────────────────────────────────┐
+│ PDF Source Selection                    │
+│ (Upload or Blob Storage)                │
+└───────────────────┬─────────────────────┘
+                    ▼
+┌─────────────────────────────────────────┐
+│ process_pdf() / process_blob_pdfs()     │
+│ Convert PDF Pages to Images             │
+└───────────────────┬─────────────────────┘
+                    ▼
+┌─────────────────────────────────────────┐
+│ image_to_data_url()                     │
+│ Format Image for API Consumption        │
+└───────────────────┬─────────────────────┘
+                    ▼
+┌─────────────────────────────────────────┐
+│ process_and_classify_page()             │
+│ Classify Page & Extract Data if "Other" │
+└───────────────────┬─────────────────────┘
+                    ▼
+┌─────────────────────────────────────────┐
+│ Filter Logic in process_pdf()           │
+│ Skip Non-"Other" Categories             │
+└───────────────────┬─────────────────────┘
+                    ▼
+┌─────────────────────────────────────────┐
+│ all_page_results in process_pdf()       │
+│ Store Structured Extraction Results     │
+└───────────────────┬─────────────────────┘
+                    ▼
+┌─────────────────────────────────────────┐
+│ evaluate_extraction_results()           │
+│ Analyze Confidence Scores               │
+└───────────────────┬─────────────────────┘
+                    ▼
+┌───────────────────────┐                 ┌───────────────────────────────┐
+│ create_results_       │                 │ show_manual_editing_          │
+│ dataframe()           │───────────────► │ interface()                   │
+│ Generate Results Table│                 │ Display Editing UI            │
+└───────────┬───────────┘                 └─────────────────┬─────────────┘
+            │                                               │
+            │                                               ▼
+            │                                 ┌───────────────────────────┐
+            │                                 │ update_edited_data()      │
+            │                                 │ Track Changes & Timestamps│
+            │                                 └─────────────┬─────────────┘
+            │                                               │
+            │                                               ▼
+            │                                 ┌───────────────────────────┐
+            │                                 │ apply_edits_to_results()  │
+            │                                 │ Apply Changes to Results  │
+            ▼                                 └─────────────┬─────────────┘
+┌───────────────────────┐                                   │
+│ create_text_files_zip,│◄──────────────────────────────────┘
+│ create_blob_format_csv│
+│ Generate Output Files │
+└───────────┬───────────┘
+            ▼
+┌───────────────────────┐
+│ has_high_confidence() │
+│ Sort by Confidence    │
+└───────────┬───────────┘
+            │
+            ├────────────────────┐
+            ▼                    ▼
+┌───────────────────────┐    ┌───────────────────────┐
+│ upload_to_blob_       │    │ upload_to_blob_       │
+│ storage()             │    │ storage()             │
+│ Store in High         │    │ Store in Low          │
+│ Confidence Folder     │    │ Confidence Folder     │
+└───────────────────────┘    └───────────────────────┘
+```
+
+## Key Function Details
+
+| Function | Purpose | Input | Output |
+|----------|---------|-------|--------|
+| `process_pdf()` | Process uploaded PDF files | PDF file object | Structured extraction results |
+| `process_blob_pdfs()` | Process PDFs from Azure Blob Storage | Blob references | Structured extraction results |
+| `image_to_data_url()` | Convert image bytes to data URL | Binary image data | Data URL string |
+| `process_and_classify_page()` | Classify page and extract data | Image data URL | Category and extracted data |
+| `call_azure_openai_vision()` | Make API call to Azure OpenAI | Image and prompt | JSON extraction results |
+| `evaluate_extraction_results()` | Analyze extraction quality | All PDF results | Confidence metrics |
+| `show_manual_editing_interface()` | Display edit UI | PDF results | Interactive form |
+| `update_edited_data()` | Track changes to data | Field updates | Session state updates |
+| `apply_edits_to_results()` | Apply manual edits | Original results + edits | Updated results |
+| `create_results_dataframe()` | Generate tabular data | PDF results | Pandas DataFrame |
+| `create_text_files_zip()` | Create ZIP of text files | PDF results | BytesIO ZIP buffer |
+| `create_blob_format_csv()` | Create per-PDF CSVs | PDF results | List of CSV data |
+| `has_high_confidence()` | Check confidence threshold | PDF result | Boolean |
+| `upload_to_blob_storage()` | Store file in Azure Blob | Data and path | Success status |
+| `download_blob_to_memory()` | Retrieve blob content | Blob reference | Blob content bytes |
+| `render_pdf_preview()` | Generate PDF image | PDF file/bytes | Image bytes |
+| `display_pdf_viewer()` | Show PDF in UI | Base64 PDF | Interactive viewer |
+| `create_comparison_dataframe()` | Show before/after values | PDF results | Comparison DataFrame |
+
+This documentation provides a comprehensive overview of the invoice processing pipeline, from PDF input to structured data output, including the classification, extraction, editing, and storage mechanisms employed throughout the process.
+
+Notes:
+
+The documentation currently references the Azure OpenAI Vision API, which is correct for your implementation using the GPT-4o model with vision capabilities. There's no need to add a separate Azure AI Vision model - your current implementation is appropriate.
+The GPT-4o model with vision capabilities through Azure OpenAI is handling both the document classification and data extraction in a single API call, which is an efficient approach. The documentation correctly reflects this implementation.
+If you wanted to be more specific in the documentation, you could update references from "Azure OpenAI Vision API" to "Azure OpenAI GPT-4o with vision capabilities" to be more precise about which model you're using, but this isn't strictly necessary as the functional description is accurate.
