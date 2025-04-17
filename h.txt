@@ -1,32 +1,21 @@
-def create_batch_jsonl_file(image_data_urls, prompts, filename_prefix):
+def create_batch_jsonl_file(image_data_urls, prompts):
     """
-    Create a JSONL file for batch processing and store in a designated folder with timestamp.
+    Create a temporary JSONL file for batch processing.
     
     Parameters:
     - image_data_urls: List of image data URLs
     - prompts: List of prompts matching the data URLs
-    - filename_prefix: Prefix for the filename (e.g., PDF name)
     
     Returns:
-    - Path to the created JSONL file
+    - Path to the created temporary JSONL file
     """
     import json
-    import os
-    from datetime import datetime
+    import tempfile
     
-    # Create folder for batch files if it doesn't exist
-    batch_folder = "batch_files"
-    os.makedirs(batch_folder, exist_ok=True)
-    
-    # Create a timestamp string
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    
-    # Create filename with prefix and timestamp
-    safe_prefix = ''.join(c for c in filename_prefix if c.isalnum() or c in '._- ')
-    filepath = os.path.join(batch_folder, f"{safe_prefix}_{timestamp}.jsonl")
-    
-    # Write the JSONL file
-    with open(filepath, 'w') as f:
+    # Create a temporary file to store the JSONL data
+    with tempfile.NamedTemporaryFile(mode='w', delete=False, suffix='.jsonl') as f:
+        filepath = f.name
+        
         # Write each entry as a JSON line
         for i in range(len(image_data_urls)):
             entry = {
@@ -45,18 +34,127 @@ def create_batch_jsonl_file(image_data_urls, prompts, filename_prefix):
     
     return filepath
 
-#function
-# Create JSONL file for batch processing with filename as prefix
+def process_batch_with_azure_openai(client, deployment_name, jsonl_filepath):
+    """
+    Process a batch using Azure OpenAI's batch API.
+    
+    Parameters:
+    - client: Azure OpenAI client
+    - deployment_name: Name of the deployment
+    - jsonl_filepath: Path to the temporary JSONL file
+    
+    Returns:
+    - List of results
+    """
+    import time
+    import datetime
+    import json
+    import os
+    
+    try:
+        # Upload the file
+        with open(jsonl_filepath, "rb") as f:
+            file = client.files.create(
+                file=f,
+                purpose="batch"
+            )
+        
+        file_id = file.id
+        
+        # Create the batch job
+        batch_response = client.batches.create(
+            model=deployment_name,
+            input_file_id=file_id,
+            endpoint="/chat/completions",
+            completion_window="24h"
+        )
+        
+        batch_id = batch_response.id
+        
+        # Track the batch job
+        status = "validating"
+        with st.spinner("Processing batch..."):
+            status_placeholder = st.empty()
+            while status not in ("completed", "failed", "canceled"):
+                time.sleep(10)  # Check every 10 seconds - adjust as needed
+                batch_response = client.batches.retrieve(batch_id)
+                status = batch_response.status
+                status_time = datetime.datetime.now().strftime("%H:%M:%S")
+                status_placeholder.text(f"{status_time} Batch Id: {batch_id}, Status: {status}")
+        
+        # Check for errors
+        if batch_response.status == "failed":
+            error_messages = []
+            for error in batch_response.errors.data:
+                error_messages.append(f"Error code {error.code}: {error.message}")
+            
+            error_str = "\n".join(error_messages)
+            st.error(f"Batch processing failed:\n{error_str}")
+            return []
+        
+        # Retrieve results
+        output_file_id = batch_response.output_file_id
+        
+        if not output_file_id:
+            output_file_id = batch_response.error_file_id
+            st.warning("Using error file for results as output file is not available")
+        
+        if output_file_id:
+            file_response = client.files.content(output_file_id)
+            raw_responses = file_response.text.strip().split('\n')
+            
+            results = []
+            for raw_response in raw_responses:
+                try:
+                    result = json.loads(raw_response)
+                    results.append(result)
+                except json.JSONDecodeError as e:
+                    st.warning(f"Could not parse response line: {e}")
+            
+            return results
+        
+        return []
+    
+    finally:
+        # Always clean up the temporary file
+        try:
+            os.remove(jsonl_filepath)
+        except Exception as e:
+            st.warning(f"Could not remove temporary JSONL file: {e}")
+
+#process
+# Change this:
 jsonl_filepath = create_batch_jsonl_file(
     image_data_urls, 
     prompts, 
     os.path.splitext(filename)[0]  # Use filename without extension as prefix
 )
 
-#funciton
-# Create JSONL file for batch processing with filename as prefix
+# To this:
+jsonl_filepath = create_batch_jsonl_file(image_data_urls, prompts)
+
+# Change this:
 jsonl_filepath = create_batch_jsonl_file(
     image_data_urls, 
     prompts, 
     os.path.splitext(filename)[0]  # Use filename without extension as prefix
 )
+
+# To this:
+jsonl_filepath = create_batch_jsonl_file(image_data_urls, prompts)
+
+
+# Change this:
+final_result = {
+    "filename": filename,
+    "total_pages": page_count,
+    "pages": all_page_results,
+    "batch_file": jsonl_filepath  # Store the JSONL file path for reference
+}
+
+# To this:
+final_result = {
+    "filename": filename,
+    "total_pages": page_count,
+    "pages": all_page_results
+}
