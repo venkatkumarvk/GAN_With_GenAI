@@ -1,160 +1,582 @@
-def create_batch_jsonl_file(image_data_urls, prompts):
+def prepare_batch_jsonl(image_data_urls, prompts, model_deployment_name):
     """
-    Create a temporary JSONL file for batch processing.
+    Prepares a JSONL file for batch processing.
     
     Parameters:
     - image_data_urls: List of image data URLs
-    - prompts: List of prompts matching the data URLs
+    - prompts: List of corresponding prompts
+    - model_deployment_name: The deployment name for the model
     
     Returns:
-    - Path to the created temporary JSONL file
+    - BytesIO object containing the JSONL content
     """
     import json
-    import tempfile
+    from io import BytesIO
     
-    # Create a temporary file to store the JSONL data
-    with tempfile.NamedTemporaryFile(mode='w', delete=False, suffix='.jsonl') as f:
-        filepath = f.name
-        
-        # Write each entry as a JSON line
-        for i in range(len(image_data_urls)):
-            entry = {
+    jsonl_file = BytesIO()
+    
+    for i, (image_url, prompt) in enumerate(zip(image_data_urls, prompts)):
+        # Create the request object
+        request = {
+            "custom_id": f"request-{i+1}",
+            "method": "POST",
+            "url": "/chat/completions",
+            "body": {
+                "model": model_deployment_name,
                 "messages": [
-                    {"role": "system", "content": "You are an AI assistant that classifies documents and extracts information from invoices when appropriate."},
-                    {"role": "user", "content": [
-                        {"type": "text", "text": prompts[i]},
-                        {"type": "image_url", "image_url": {"url": image_data_urls[i]}}
-                    ]}
+                    {
+                        "role": "system",
+                        "content": "You are an AI assistant that classifies documents and extracts information from invoices when appropriate."
+                    },
+                    {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "text",
+                                "text": prompt
+                            },
+                            {
+                                "type": "image_url",
+                                "image_url": {
+                                    "url": image_url
+                                }
+                            }
+                        ]
+                    }
                 ],
-                "max_tokens": 2000,
-                "temperature": 0.5,
-                "response_format": {"type": "json_object"}
+                "max_tokens": 2000
             }
-            f.write(json.dumps(entry) + '\n')
+        }
+        
+        # Write the JSON line to the file
+        jsonl_file.write((json.dumps(request) + "\n").encode('utf-8'))
     
-    return filepath
+    # Reset the file pointer to the beginning
+    jsonl_file.seek(0)
+    return jsonl_file
 
-def process_batch_with_azure_openai(client, deployment_name, jsonl_filepath):
+def submit_and_process_batch(client, jsonl_file, output_processor=None):
     """
-    Process a batch using Azure OpenAI's batch API.
+    Submits a batch job and processes the results.
     
     Parameters:
     - client: Azure OpenAI client
-    - deployment_name: Name of the deployment
-    - jsonl_filepath: Path to the temporary JSONL file
+    - jsonl_file: BytesIO object with JSONL content
+    - output_processor: Optional function to process batch output
     
     Returns:
-    - List of results
+    - List of processed results
     """
     import time
-    import datetime
     import json
-    import os
+    import datetime
     
+    # Upload the JSONL file
+    file = client.files.create(
+        file=jsonl_file,
+        purpose="batch"
+    )
+    
+    file_id = file.id
+    
+    # Submit batch job
+    batch_response = client.batches.create(
+        input_file_id=file_id,
+        endpoint="/chat/completions",
+        completion_window="24h"
+    )
+    
+    batch_id = batch_response.id
+    
+    # Track batch job status
+    status = "validating"
+    while status not in ("completed", "failed", "canceled"):
+        time.sleep(10)  # Check every 10 seconds for faster feedback
+        batch_response = client.batches.retrieve(batch_id)
+        status = batch_response.status
+        yield f"{datetime.datetime.now()} Batch Id: {batch_id}, Status: {status}"
+    
+    if batch_response.status == "failed":
+        for error in batch_response.errors.data:
+            yield f"Error code {error.code} Message {error.message}"
+        return None
+    
+    # Retrieve results
+    output_file_id = batch_response.output_file_id
+    
+    if not output_file_id:
+        output_file_id = batch_response.error_file_id
+        
+    if output_file_id:
+        file_response = client.files.content(output_file_id)
+        raw_responses = file_response.text.strip().split('\n')
+        
+        results = []
+        for raw_response in raw_responses:
+            json_response = json.loads(raw_response)
+            
+            # Process the result
+            if output_processor:
+                processed_result = output_processor(json_response)
+                results.append(processed_result)
+            else:
+                results.append(json_response)
+        
+        return results
+    
+    return None
+
+def process_pdf(pdf_file, prompt_template, client, deployment_name, progress_bar=None, progress_text=None):
+    """
+    Process a PDF file using Azure OpenAI batch API.
+    """
+    tmp_path = None
     try:
-        # Upload the file
-        with open(jsonl_filepath, "rb") as f:
-            file = client.files.create(
-                file=f,
-                purpose="batch"
-            )
+        # Create a temporary file
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp_file:
+            tmp_file.write(pdf_file.getvalue())
+            tmp_path = tmp_file.name
         
-        file_id = file.id
+        filename = pdf_file.name
         
-        # Create the batch job
-        batch_response = client.batches.create(
-            model=deployment_name,
-            input_file_id=file_id,
-            endpoint="/chat/completions",
-            completion_window="24h"
-        )
-        
-        batch_id = batch_response.id
-        
-        # Track the batch job
-        status = "validating"
-        with st.spinner("Processing batch..."):
-            status_placeholder = st.empty()
-            while status not in ("completed", "failed", "canceled"):
-                time.sleep(10)  # Check every 10 seconds - adjust as needed
-                batch_response = client.batches.retrieve(batch_id)
-                status = batch_response.status
-                status_time = datetime.datetime.now().strftime("%H:%M:%S")
-                status_placeholder.text(f"{status_time} Batch Id: {batch_id}, Status: {status}")
-        
-        # Check for errors
-        if batch_response.status == "failed":
-            error_messages = []
-            for error in batch_response.errors.data:
-                error_messages.append(f"Error code {error.code}: {error.message}")
+        # Open the PDF
+        with fitz.open(tmp_path) as doc:
+            page_count = len(doc)
             
-            error_str = "\n".join(error_messages)
-            st.error(f"Batch processing failed:\n{error_str}")
-            return []
-        
-        # Retrieve results
-        output_file_id = batch_response.output_file_id
-        
-        if not output_file_id:
-            output_file_id = batch_response.error_file_id
-            st.warning("Using error file for results as output file is not available")
-        
-        if output_file_id:
-            file_response = client.files.content(output_file_id)
-            raw_responses = file_response.text.strip().split('\n')
+            if progress_text:
+                progress_text.text(f"Processing {filename} - {page_count} pages...")
             
-            results = []
-            for raw_response in raw_responses:
+            # Prepare data for batch processing
+            image_data_urls = []
+            page_numbers = []
+            prompts = []
+            
+            # Extract all pages
+            for page_num in range(page_count):
                 try:
-                    result = json.loads(raw_response)
-                    results.append(result)
-                except json.JSONDecodeError as e:
-                    st.warning(f"Could not parse response line: {e}")
+                    # Update progress
+                    if progress_bar:
+                        progress_bar.progress((page_num + 1) / page_count)
+                    if progress_text:
+                        progress_text.text(f"Preparing {filename} - Page {page_num+1}/{page_count}")
+                    
+                    # Load page and convert to image
+                    page = doc.load_page(page_num)
+                    zoom = 2
+                    pix = page.get_pixmap(matrix=fitz.Matrix(zoom, zoom))
+                    image_bytes = pix.tobytes()
+                    image_data_url = image_to_data_url(image_bytes)
+                    
+                    # Create prompt for this page
+                    classification_prompt = """First, classify this document into one of these categories:
+- Terms & Conditions
+- General Terms and Conditions
+- Sale Order
+- Delivery
+- Price and Payment
+- Warranty
+- Other
+
+If and ONLY if the document is in the "Other" category, extract the following information:
+1) Vendor name
+2) Invoice number
+3) Invoice date
+4) Customer name
+5) Purchase order number
+6) Stock code
+7) Unit price
+8) Invoice amount
+9) Freight cost
+10) Sales tax
+11) Total amount
+
+Format your response as a JSON object with these fields:
+{
+  "category": "the category name",
+  "shouldExtract": true/false,
+  "extractedData": {
+    // Only include if shouldExtract is true
+    "VendorName": {"value": "value", "confidence": 0.95},
+    "InvoiceNumber": {"value": "value", "confidence": 0.95},
+    ...and so on for all fields
+  }
+}"""
+                    
+                    # Add to batch data
+                    image_data_urls.append(image_data_url)
+                    page_numbers.append(page_num)
+                    prompts.append(classification_prompt)
+                    
+                    # Clean memory
+                    del image_bytes
+                    
+                except Exception as e:
+                    st.warning(f"Error preparing page {page_num+1}: {e}")
             
-            return results
-        
-        return []
-    
+            # Prepare the JSONL batch file
+            jsonl_file = prepare_batch_jsonl(image_data_urls, prompts, deployment_name)
+            
+            # Define a processor for the batch results
+            def process_batch_output(json_response):
+                # Extract the request ID to identify the page
+                request_id = json_response.get("custom_id", "")
+                if request_id.startswith("request-"):
+                    idx = int(request_id.split("-")[1]) - 1
+                    if idx < len(page_numbers):
+                        page_num = page_numbers[idx]
+                    else:
+                        page_num = -1
+                else:
+                    page_num = -1
+                
+                # Process the actual content
+                if "response" in json_response and "body" in json_response["response"]:
+                    try:
+                        content = json_response["response"]["body"]
+                        if isinstance(content, str):
+                            content = json.loads(content)
+                        
+                        if "choices" in content and len(content["choices"]) > 0:
+                            message_content = content["choices"][0]["message"]["content"]
+                            result = json.loads(message_content)
+                            
+                            return {
+                                "page_num": page_num,
+                                "category": result.get("category", "Unknown"),
+                                "extracted_info": result.get("extractedData", {}) if result.get("shouldExtract", False) else None
+                            }
+                    except Exception as e:
+                        st.warning(f"Error processing batch result: {e}")
+                
+                return {"page_num": page_num, "category": "Error", "extracted_info": None}
+            
+            # Submit and process the batch
+            all_page_results = []
+            
+            with st.spinner("Submitting batch request to Azure OpenAI..."):
+                # Show progress of the batch job
+                for status_message in submit_and_process_batch(client, jsonl_file, process_batch_output):
+                    if progress_text:
+                        progress_text.text(status_message)
+                
+                # Process the results
+                batch_results = submit_and_process_batch(client, jsonl_file, process_batch_output)
+                
+                if batch_results:
+                    for result in batch_results:
+                        page_num = result.get("page_num", -1)
+                        category = result.get("category", "Unknown")
+                        extracted_info = result.get("extracted_info", None)
+                        
+                        if category == "Other" and extracted_info:
+                            # Add to results
+                            extracted_info_with_page = {
+                                "page": page_num + 1,
+                                "data": extracted_info,
+                                "extraction_timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                            }
+                            
+                            all_page_results.append(extracted_info_with_page)
+                            
+                            if progress_text:
+                                progress_text.text(f"Extracted data from {filename} - Page {page_num+1} (Category: {category})")
+                        elif progress_text:
+                            progress_text.text(f"Skipped extraction for {filename} - Page {page_num+1} (Category: {category})")
+            
+            # Create final result
+            final_result = {
+                "filename": filename,
+                "total_pages": page_count,
+                "pages": all_page_results
+            }
+            
+            return final_result
+            
+    except Exception as e:
+        st.error(f"Error processing {pdf_file.name}: {e}")
+        return {
+            "filename": pdf_file.name,
+            "error": str(e),
+            "total_pages": 0,
+            "pages": []
+        }
     finally:
-        # Always clean up the temporary file
+        # Clean up
+        if tmp_path and os.path.exists(tmp_path):
+            try:
+                os.unlink(tmp_path)
+            except Exception as e:
+                st.warning(f"Could not remove temp file: {e}")
+        
+        gc.collect()
+
+@st.cache_resource
+def get_client():
+    return AzureOpenAI(
+        api_key=os.getenv("AZURE_OPENAI_API_KEY"),
+        api_version="2025-03-01-preview",  # Use the preview version that supports batch
+        azure_endpoint=os.getenv("AZURE_OPENAI_ENDPOINT")
+    )
+
+def process_blob_pdfs(blob_service_client, container_name, pdf_blobs, prompt_template, client, deployment_name, progress_bar=None, progress_text=None):
+    """
+    Process PDF blobs from Azure Blob Storage using the Azure OpenAI batch API.
+    """
+    all_pdf_results = []
+    
+    # Create progress tracking
+    if progress_bar is None:
+        progress_bar = st.progress(0)
+    if progress_text is None:
+        progress_text = st.empty()
+    
+    for i, blob_name in enumerate(pdf_blobs):
+        progress_text.text(f"Processing file {i+1}/{len(pdf_blobs)}: {blob_name}")
+        tmp_path = None
+        
         try:
-            os.remove(jsonl_filepath)
+            # Download blob to memory
+            blob_content = download_blob_to_memory(blob_service_client, container_name, blob_name)
+            
+            if blob_content is None:
+                st.warning(f"Could not download blob: {blob_name}")
+                continue
+            
+            # Create a BytesIO object from the blob content
+            blob_file = io.BytesIO(blob_content)
+            filename = blob_name.split('/')[-1]  # Set the filename to the blob name without folder path
+            blob_file.name = filename
+            
+            # Create a temporary file for processing
+            with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp_file:
+                tmp_file.write(blob_content)
+                tmp_path = tmp_file.name
+                
+            # Open the PDF file
+            with fitz.open(tmp_path) as doc:
+                page_count = len(doc)
+                
+                progress_text.text(f"Processing {filename} - {page_count} pages...")
+                
+                # Prepare data for batch processing
+                image_data_urls = []
+                page_numbers = []
+                prompts = []
+                
+                # Extract all pages
+                for page_num in range(page_count):
+                    try:
+                        # Update progress
+                        sub_progress = (i + (page_num + 1) / page_count) / len(pdf_blobs)
+                        progress_bar.progress(sub_progress)
+                        progress_text.text(f"Preparing {filename} - Page {page_num+1}/{page_count}")
+                        
+                        # Load page and convert to image
+                        page = doc.load_page(page_num)
+                        zoom = 2
+                        pix = page.get_pixmap(matrix=fitz.Matrix(zoom, zoom))
+                        image_bytes = pix.tobytes()
+                        image_data_url = image_to_data_url(image_bytes)
+                        
+                        # Create prompt for this page
+                        classification_prompt = """First, classify this document into one of these categories:
+- Terms & Conditions
+- General Terms and Conditions
+- Sale Order
+- Delivery
+- Price and Payment
+- Warranty
+- Other
+
+If and ONLY if the document is in the "Other" category, extract the following information:
+1) Vendor name
+2) Invoice number
+3) Invoice date
+4) Customer name
+5) Purchase order number
+6) Stock code
+7) Unit price
+8) Invoice amount
+9) Freight cost
+10) Sales tax
+11) Total amount
+
+Format your response as a JSON object with these fields:
+{
+  "category": "the category name",
+  "shouldExtract": true/false,
+  "extractedData": {
+    // Only include if shouldExtract is true
+    "VendorName": {"value": "value", "confidence": 0.95},
+    "InvoiceNumber": {"value": "value", "confidence": 0.95},
+    ...and so on for all fields
+  }
+}"""
+                        
+                        # Add to batch data
+                        image_data_urls.append(image_data_url)
+                        page_numbers.append(page_num)
+                        prompts.append(classification_prompt)
+                        
+                        # Clean memory
+                        del image_bytes
+                        
+                    except Exception as e:
+                        st.warning(f"Error preparing page {page_num+1}: {e}")
+                
+                # Prepare the JSONL batch file
+                jsonl_file = prepare_batch_jsonl(image_data_urls, prompts, deployment_name)
+                
+                # Define a processor for the batch results
+                def process_batch_output(json_response):
+                    # Extract the request ID to identify the page
+                    request_id = json_response.get("custom_id", "")
+                    if request_id.startswith("request-"):
+                        idx = int(request_id.split("-")[1]) - 1
+                        if idx < len(page_numbers):
+                            page_num = page_numbers[idx]
+                        else:
+                            page_num = -1
+                    else:
+                        page_num = -1
+                    
+                    # Process the actual content
+                    if "response" in json_response and "body" in json_response["response"]:
+                        try:
+                            content = json_response["response"]["body"]
+                            if isinstance(content, str):
+                                content = json.loads(content)
+                            
+                            if "choices" in content and len(content["choices"]) > 0:
+                                message_content = content["choices"][0]["message"]["content"]
+                                result = json.loads(message_content)
+                                
+                                return {
+                                    "page_num": page_num,
+                                    "category": result.get("category", "Unknown"),
+                                    "extracted_info": result.get("extractedData", {}) if result.get("shouldExtract", False) else None
+                                }
+                        except Exception as e:
+                            st.warning(f"Error processing batch result: {e}")
+                    
+                    return {"page_num": page_num, "category": "Error", "extracted_info": None}
+                
+                # Submit and process the batch
+                all_page_results = []
+                
+                with st.spinner(f"Submitting batch request for {filename} to Azure OpenAI..."):
+                    # Using a placeholder for the generator pattern
+                    batch_status_placeholder = st.empty()
+                    
+                    # Upload the JSONL file
+                    file = client.files.create(
+                        file=jsonl_file,
+                        purpose="batch"
+                    )
+                    
+                    file_id = file.id
+                    
+                    # Submit batch job
+                    batch_response = client.batches.create(
+                        input_file_id=file_id,
+                        endpoint="/chat/completions",
+                        completion_window="24h"
+                    )
+                    
+                    batch_id = batch_response.id
+                    
+                    # Track batch job status
+                    status = "validating"
+                    import time
+                    import datetime
+                    
+                    while status not in ("completed", "failed", "canceled"):
+                        time.sleep(10)  # Check every 10 seconds for faster feedback
+                        batch_response = client.batches.retrieve(batch_id)
+                        status = batch_response.status
+                        status_message = f"{datetime.datetime.now()} Batch Id: {batch_id}, Status: {status}"
+                        batch_status_placeholder.text(status_message)
+                    
+                    if batch_response.status == "failed":
+                        error_message = "Batch processing failed:"
+                        for error in batch_response.errors.data:
+                            error_message += f"\nError code {error.code} Message {error.message}"
+                        st.error(error_message)
+                    else:
+                        # Retrieve results
+                        output_file_id = batch_response.output_file_id
+                        
+                        if not output_file_id:
+                            output_file_id = batch_response.error_file_id
+                            
+                        if output_file_id:
+                            file_response = client.files.content(output_file_id)
+                            raw_responses = file_response.text.strip().split('\n')
+                            
+                            batch_results = []
+                            for raw_response in raw_responses:
+                                json_response = json.loads(raw_response)
+                                processed_result = process_batch_output(json_response)
+                                batch_results.append(processed_result)
+                            
+                            # Process the results
+                            for result in batch_results:
+                                page_num = result.get("page_num", -1)
+                                category = result.get("category", "Unknown")
+                                extracted_info = result.get("extracted_info", None)
+                                
+                                if category == "Other" and extracted_info:
+                                    # Add to results
+                                    extracted_info_with_page = {
+                                        "page": page_num + 1,
+                                        "data": extracted_info,
+                                        "extraction_timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                                    }
+                                    
+                                    all_page_results.append(extracted_info_with_page)
+                                    
+                                    if progress_text:
+                                        progress_text.text(f"Extracted data from {filename} - Page {page_num+1} (Category: {category})")
+                                elif progress_text:
+                                    progress_text.text(f"Skipped extraction for {filename} - Page {page_num+1} (Category: {category})")
+                
+                # Create result object for this PDF
+                final_result = {
+                    "filename": filename,
+                    "total_pages": page_count,
+                    "pages": all_page_results
+                }
+                
+                # Add to our collection of all PDF results
+                all_pdf_results.append(final_result)
+            
         except Exception as e:
-            st.warning(f"Could not remove temporary JSONL file: {e}")
-
-#process
-# Change this:
-jsonl_filepath = create_batch_jsonl_file(
-    image_data_urls, 
-    prompts, 
-    os.path.splitext(filename)[0]  # Use filename without extension as prefix
-)
-
-# To this:
-jsonl_filepath = create_batch_jsonl_file(image_data_urls, prompts)
-
-# Change this:
-jsonl_filepath = create_batch_jsonl_file(
-    image_data_urls, 
-    prompts, 
-    os.path.splitext(filename)[0]  # Use filename without extension as prefix
-)
-
-# To this:
-jsonl_filepath = create_batch_jsonl_file(image_data_urls, prompts)
-
-
-# Change this:
-final_result = {
-    "filename": filename,
-    "total_pages": page_count,
-    "pages": all_page_results,
-    "batch_file": jsonl_filepath  # Store the JSONL file path for reference
-}
-
-# To this:
-final_result = {
-    "filename": filename,
-    "total_pages": page_count,
-    "pages": all_page_results
-}
+            st.error(f"Error processing blob {blob_name}: {e}")
+            all_pdf_results.append({
+                "filename": blob_name.split('/')[-1],
+                "error": str(e),
+                "total_pages": 0,
+                "pages": []
+            })
+        finally:
+            # Clean up the temporary file
+            if tmp_path and os.path.exists(tmp_path):
+                try:
+                    os.unlink(tmp_path)
+                except Exception as cleanup_error:
+                    st.warning(f"Could not remove temporary file {tmp_path}: {cleanup_error}")
+            
+            # Clean up blob content
+            if 'blob_content' in locals():
+                del blob_content
+            
+            # Update overall progress
+            progress_bar.progress((i + 1) / len(pdf_blobs))
+            
+            # Force garbage collection
+            gc.collect()
+    
+    progress_text.text("Processing complete!")
+    progress_bar.progress(1.0)
+    
+    return all_pdf_results
