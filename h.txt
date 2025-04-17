@@ -1,0 +1,447 @@
+#function
+
+def submit_batch_vision_request(client, deployment_name, data_urls, prompts, batch_size=10):
+    """
+    Submit a batch request to Azure OpenAI Vision API.
+    
+    Parameters:
+    - client: The Azure OpenAI client
+    - deployment_name: Name of the GPT-4o deployment
+    - data_urls: List of image data URLs
+    - prompts: List of prompts matching the data URLs
+    - batch_size: Size of each batch (max is 15 for Vision API)
+    
+    Returns:
+    - List of results
+    """
+    from openai.types.beta.batch import BatchJob
+    from openai.types.beta.batch import BatchSize
+    
+    # Create batch messages
+    messages = []
+    for i in range(len(data_urls)):
+        messages.append([
+            {"role": "system", "content": "You are an AI assistant that classifies documents and extracts information from invoices when appropriate."},
+            {"role": "user", "content": [
+                {"type": "text", "text": prompts[i]},
+                {"type": "image_url", "image_url": {"url": data_urls[i]}}
+            ]}
+        ])
+    
+    # Submit the batch job
+    batch_job = client.beta.batch.create(
+        model=deployment_name,
+        messages=messages,
+        size=BatchSize.small,
+        max_prompts=batch_size
+    )
+    
+    # Wait for job to complete and retrieve results
+    import time
+    
+    job_id = batch_job.id
+    status = batch_job.status
+    
+    # Poll for job completion
+    while status not in ["completed", "failed", "cancelled"]:
+        time.sleep(1)  # Check every second
+        batch_job = client.beta.batch.retrieve(job_id)
+        status = batch_job.status
+    
+    if status == "completed":
+        # Retrieve outputs
+        outputs = client.beta.batch.outputs.list(job_id)
+        return outputs
+    else:
+        raise Exception(f"Batch job failed with status: {status}")
+
+  #pdf process
+  def process_pdf(pdf_file, prompt_template, client, deployment_name, progress_bar=None, progress_text=None, batch_size=10):
+    """
+    Process a PDF file using Azure OpenAI batch API.
+    """
+    tmp_path = None
+    try:
+        # Create a temporary file
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp_file:
+            tmp_file.write(pdf_file.getvalue())
+            tmp_path = tmp_file.name
+        
+        filename = pdf_file.name
+        
+        # Open the PDF
+        with fitz.open(tmp_path) as doc:
+            page_count = len(doc)
+            
+            if progress_text:
+                progress_text.text(f"Processing {filename} - {page_count} pages...")
+            
+            # Prepare batches
+            image_data_urls = []
+            page_numbers = []
+            prompts = []
+            
+            # Extract all pages
+            for page_num in range(page_count):
+                try:
+                    # Update progress
+                    if progress_bar:
+                        progress_bar.progress((page_num + 1) / page_count)
+                    
+                    # Load page and convert to image
+                    page = doc.load_page(page_num)
+                    zoom = 2
+                    pix = page.get_pixmap(matrix=fitz.Matrix(zoom, zoom))
+                    image_bytes = pix.tobytes()
+                    image_data_url = image_to_data_url(image_bytes)
+                    
+                    # Add to batch lists
+                    image_data_urls.append(image_data_url)
+                    page_numbers.append(page_num)
+                    
+                    # Create the prompt for this page
+                    classification_prompt = f"""First, classify this document into one of these categories:
+- Terms & Conditions
+- General Terms and Conditions
+- Sale Order
+- Delivery
+- Price and Payment
+- Warranty
+- Other
+
+If and ONLY if the document is in the "Other" category, extract the following information:
+1) Vendor name
+2) Invoice number
+3) Invoice date
+4) Customer name
+5) Purchase order number
+6) Stock code
+7) Unit price
+8) Invoice amount
+9) Freight cost
+10) Sales tax
+11) Total amount
+
+Format your response as a JSON object with these fields:
+{{
+  "category": "the category name",
+  "shouldExtract": true/false,
+  "extractedData": {{
+    // Only include if shouldExtract is true
+    "VendorName": {{"value": "value", "confidence": 0.95}},
+    "InvoiceNumber": {{"value": "value", "confidence": 0.95}},
+    ...and so on for all fields
+  }}
+}}"""
+                    
+                    prompts.append(classification_prompt)
+                    
+                    # Clean memory
+                    del image_bytes
+                    
+                except Exception as e:
+                    st.warning(f"Error preparing page {page_num+1}: {e}")
+            
+            # Process in batches
+            all_page_results = []
+            
+            with st.spinner("Submitting batch request to Azure OpenAI..."):
+                for i in range(0, len(image_data_urls), batch_size):
+                    batch_urls = image_data_urls[i:i+batch_size]
+                    batch_prompts = prompts[i:i+batch_size]
+                    batch_pages = page_numbers[i:i+batch_size]
+                    
+                    if progress_text:
+                        progress_text.text(f"Processing batch {i//batch_size + 1} of {(len(image_data_urls) + batch_size - 1) // batch_size}...")
+                    
+                    try:
+                        # Submit batch request
+                        batch_results = submit_batch_vision_request(
+                            client, 
+                            deployment_name, 
+                            batch_urls, 
+                            batch_prompts,
+                            batch_size
+                        )
+                        
+                        # Process results
+                        for j, output in enumerate(batch_results):
+                            if hasattr(output, 'content') and output.content:
+                                try:
+                                    page_num = batch_pages[j]
+                                    result = json.loads(output.content)
+                                    
+                                    category = result.get("category", "Unknown")
+                                    
+                                    # Only process "Other" category for extraction
+                                    if category == "Other" and result.get("shouldExtract", False):
+                                        extracted_info = result.get("extractedData", {})
+                                        
+                                        # Add to results
+                                        extracted_info_with_page = {
+                                            "page": page_num + 1,
+                                            "data": extracted_info,
+                                            "extraction_timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                                        }
+                                        
+                                        all_page_results.append(extracted_info_with_page)
+                                        
+                                        if progress_text:
+                                            progress_text.text(f"Extracted data from {filename} - Page {page_num+1} (Category: {category})")
+                                    elif progress_text:
+                                        progress_text.text(f"Skipped extraction for {filename} - Page {page_num+1} (Category: {category})")
+                                        
+                                except Exception as e:
+                                    st.warning(f"Error processing batch result for page {batch_pages[j]+1}: {e}")
+                            else:
+                                st.warning(f"No content in batch result {j}")
+                    
+                    except Exception as e:
+                        st.error(f"Batch processing error: {e}")
+                    
+                    # Force garbage collection
+                    gc.collect()
+            
+            # Create final result
+            final_result = {
+                "filename": filename,
+                "total_pages": page_count,
+                "pages": all_page_results
+            }
+            
+            return final_result
+            
+    except Exception as e:
+        st.error(f"Error processing {pdf_file.name}: {e}")
+        return {
+            "filename": pdf_file.name,
+            "error": str(e),
+            "total_pages": 0,
+            "pages": []
+        }
+    finally:
+        # Clean up
+        if tmp_path and os.path.exists(tmp_path):
+            try:
+                os.unlink(tmp_path)
+            except Exception as e:
+                st.warning(f"Could not remove temp file: {e}")
+        
+        gc.collect()
+
+  #blob pdf process
+  def process_blob_pdfs(blob_service_client, container_name, pdf_blobs, prompt_template, client, deployment_name, progress_bar=None, progress_text=None, batch_size=10):
+    """
+    Process PDF blobs from Azure Blob Storage using the Azure OpenAI batch API.
+    Memory-optimized version.
+    """
+    all_pdf_results = []
+    
+    # Create progress tracking
+    progress_bar = st.progress(0)
+    progress_text = st.empty()
+    
+    for i, blob_name in enumerate(pdf_blobs):
+        progress_text.text(f"Processing file {i+1}/{len(pdf_blobs)}: {blob_name}")
+        tmp_path = None
+        
+        try:
+            # Download blob to memory
+            blob_content = download_blob_to_memory(blob_service_client, container_name, blob_name)
+            
+            if blob_content is None:
+                st.warning(f"Could not download blob: {blob_name}")
+                continue
+            
+            # Create a BytesIO object from the blob content
+            blob_file = io.BytesIO(blob_content)
+            filename = blob_name.split('/')[-1]  # Set the filename to the blob name without folder path
+            blob_file.name = filename
+            
+            # Create a temporary file for processing
+            with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp_file:
+                tmp_file.write(blob_content)
+                tmp_path = tmp_file.name
+                
+            # Open the PDF file
+            with fitz.open(tmp_path) as doc:
+                page_count = len(doc)
+                
+                progress_text.text(f"Processing {filename} - {page_count} pages...")
+                
+                # Prepare for batch processing
+                image_data_urls = []
+                page_numbers = []
+                prompts = []
+                
+                # Extract all pages
+                for page_num in range(page_count):
+                    try:
+                        # Update progress
+                        sub_progress = (i + (page_num + 1) / page_count) / len(pdf_blobs)
+                        progress_bar.progress(sub_progress)
+                        progress_text.text(f"Processing {filename} - Page {page_num+1}/{page_count}")
+                        
+                        # Load page and convert to image
+                        page = doc.load_page(page_num)
+                        zoom = 2
+                        pix = page.get_pixmap(matrix=fitz.Matrix(zoom, zoom))
+                        image_bytes = pix.tobytes()
+                        image_data_url = image_to_data_url(image_bytes)
+                        
+                        # Add to batch lists
+                        image_data_urls.append(image_data_url)
+                        page_numbers.append(page_num)
+                        
+                        # Create the prompt for this page
+                        classification_prompt = f"""First, classify this document into one of these categories:
+- Terms & Conditions
+- General Terms and Conditions
+- Sale Order
+- Delivery
+- Price and Payment
+- Warranty
+- Other
+
+If and ONLY if the document is in the "Other" category, extract the following information:
+1) Vendor name
+2) Invoice number
+3) Invoice date
+4) Customer name
+5) Purchase order number
+6) Stock code
+7) Unit price
+8) Invoice amount
+9) Freight cost
+10) Sales tax
+11) Total amount
+
+Format your response as a JSON object with these fields:
+{{
+  "category": "the category name",
+  "shouldExtract": true/false,
+  "extractedData": {{
+    // Only include if shouldExtract is true
+    "VendorName": {{"value": "value", "confidence": 0.95}},
+    "InvoiceNumber": {{"value": "value", "confidence": 0.95}},
+    ...and so on for all fields
+  }}
+}}"""
+                        
+                        prompts.append(classification_prompt)
+                        
+                        # Clean memory
+                        del image_bytes
+                        
+                    except Exception as e:
+                        st.warning(f"Error preparing page {page_num+1}: {e}")
+                
+                # Process in batches
+                all_page_results = []
+                
+                with st.spinner(f"Submitting batch request to Azure OpenAI for {filename}..."):
+                    for j in range(0, len(image_data_urls), batch_size):
+                        batch_urls = image_data_urls[j:j+batch_size]
+                        batch_prompts = prompts[j:j+batch_size]
+                        batch_pages = page_numbers[j:j+batch_size]
+                        
+                        if progress_text:
+                            progress_text.text(f"Processing batch {j//batch_size + 1} of {(len(image_data_urls) + batch_size - 1) // batch_size} for {filename}...")
+                        
+                        try:
+                            # Submit batch request
+                            batch_results = submit_batch_vision_request(
+                                client, 
+                                deployment_name, 
+                                batch_urls, 
+                                batch_prompts,
+                                batch_size
+                            )
+                            
+                            # Process results
+                            for k, output in enumerate(batch_results):
+                                if hasattr(output, 'content') and output.content:
+                                    try:
+                                        page_num = batch_pages[k]
+                                        result = json.loads(output.content)
+                                        
+                                        category = result.get("category", "Unknown")
+                                        
+                                        # Only process "Other" category for extraction
+                                        if category == "Other" and result.get("shouldExtract", False):
+                                            extracted_info = result.get("extractedData", {})
+                                            
+                                            # Add to results
+                                            extracted_info_with_page = {
+                                                "page": page_num + 1,
+                                                "data": extracted_info,
+                                                "extraction_timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                                            }
+                                            
+                                            all_page_results.append(extracted_info_with_page)
+                                            
+                                            if progress_text:
+                                                progress_text.text(f"Extracted data from {filename} - Page {page_num+1} (Category: {category})")
+                                        elif progress_text:
+                                            progress_text.text(f"Skipped extraction for {filename} - Page {page_num+1} (Category: {category})")
+                                            
+                                    except Exception as e:
+                                        st.warning(f"Error processing batch result for page {batch_pages[k]+1}: {e}")
+                                else:
+                                    st.warning(f"No content in batch result {k}")
+                        
+                        except Exception as e:
+                            st.error(f"Batch processing error: {e}")
+                        
+                        # Force garbage collection
+                        gc.collect()
+                
+                # Create result object for this PDF
+                final_result = {
+                    "filename": filename,
+                    "total_pages": page_count,
+                    "pages": all_page_results
+                }
+                
+                # Add to our collection of all PDF results
+                all_pdf_results.append(final_result)
+            
+        except Exception as e:
+            st.error(f"Error processing blob {blob_name}: {e}")
+            all_pdf_results.append({
+                "filename": blob_name.split('/')[-1],
+                "error": str(e),
+                "total_pages": 0,
+                "pages": []
+            })
+        finally:
+            # Clean up the temporary file
+            if tmp_path and os.path.exists(tmp_path):
+                try:
+                    os.unlink(tmp_path)
+                except Exception as cleanup_error:
+                    st.warning(f"Could not remove temporary file {tmp_path}: {cleanup_error}")
+            
+            # Clean up blob content
+            if 'blob_content' in locals():
+                del blob_content
+            
+            # Update overall progress
+            progress_bar.progress((i + 1) / len(pdf_blobs))
+            
+            # Force garbage collection
+            gc.collect()
+    
+    progress_text.text("Processing complete!")
+    progress_bar.progress(1.0)
+    
+    return all_pdf_results
+
+  #client
+  @st.cache_resource
+def get_client():
+    return AzureOpenAI(
+        azure_endpoint=aoai_endpoint,
+        api_key=aoai_api_key,
+        api_version="2024-08-01-preview"  # Make sure this is the correct version that supports batch API
+    )
