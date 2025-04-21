@@ -1,0 +1,104 @@
+import os
+from openai import AzureOpenAI
+import json
+# Install necessary libraries: pip install PyPDF2 pdfminer.six fitz
+
+# --- Configuration ---
+api_key = os.environ.get("AZURE_OPENAI_KEY")
+azure_endpoint = os.environ.get("AZURE_OPENAI_ENDPOINT")
+deployment_name = "your-text-model-batch-deployment-name" # Use a text-based model deployment
+pdf_folder = "path/to/your/pdf/folder" # Replace with the actual path
+
+client = AzureOpenAI(
+    api_version="2023-07-01-preview", # Adjust API version as needed for batch
+    api_key=api_key,
+    azure_endpoint=azure_endpoint
+)
+
+def extract_text_from_pdf(pdf_path):
+    """Replace with your preferred PDF to text extraction logic."""
+    text = ""
+    try:
+        from PyPDF2 import PdfReader
+        with open(pdf_path, 'rb') as file:
+            reader = PdfReader(file)
+            for page in reader.pages:
+                text += page.extract_text() + "\n"
+    except Exception as e:
+        print(f"Error extracting text from {pdf_path}: {e}")
+    return text
+
+# 1. Get list of PDF files
+pdf_files = [f for f in os.listdir(pdf_folder) if f.endswith(".pdf")]
+inputs_data = []
+
+# 2. Iterate through PDFs and prepare input data
+for pdf_file in pdf_files:
+    pdf_path = os.path.join(pdf_folder, pdf_file)
+    extracted_text = extract_text_from_pdf(pdf_path)
+    if extracted_text:
+        prompt = f"""Analyze the following text from a PDF and provide a summary:
+
+        Text:
+        {extracted_text}
+
+        Summary:
+        """
+        inputs_data.append(
+            {
+                "custom_id": pdf_file,
+                "body": {
+                    "prompt": prompt,
+                    "model": deployment_name,
+                    "n": 1,
+                    "temperature": 0.3 # Adjust as needed
+                }
+            }
+        )
+    else:
+        print(f"Could not extract text from {pdf_file}. Skipping.")
+
+# 3. Create the .jsonl file
+input_file_path = "pdf_processing_input.jsonl"
+with open(input_file_path, "w") as f:
+    for item in inputs_data:
+        f.write(json.dumps(item) + "\n")
+
+# 4. Upload the input file
+with open(input_file_path, "rb") as f:
+    upload_response = client.files.create(file=f, purpose="batch")
+input_file_id = upload_response.id
+print(f"Uploaded file ID: {input_file_id}")
+
+# 5. Submit the batch job (language model - /completions endpoint)
+batch_response = client.batches.create(
+    input_file_id=input_file_id,
+    endpoint="/completions",
+    # No 'outputs' specified
+    completion_window="24h"
+)
+batch_id = batch_response.id
+print(f"Batch job ID: {batch_id}")
+
+# 6. Monitor the batch job status
+import time
+status = "running"
+while status not in ("completed", "failed", "canceled"):
+    time.sleep(60)
+    retrieved_batch = client.batches.retrieve(batch_id)
+    status = retrieved_batch.status
+    print(f"Batch job status: {status}")
+    if retrieved_batch.error:
+        print(f"Batch job error: {retrieved_batch.error}")
+        break
+
+# 7. Retrieve and process results
+if status == "completed" and batch_response.output_file_id:
+    output_file = client.files.content(batch_response.output_file_id)
+    results = output_file.text.strip().split('\n')
+    for result_json in results:
+        result = json.loads(result_json)
+        print(f"Processing result: {result}")
+        # Access the generated text (e.g., result['choices'][0]['text'])
+elif status in ("failed", "canceled"):
+    print("Batch job failed or was canceled.")
