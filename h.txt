@@ -1,571 +1,82 @@
-import os
-from openai import AzureOpenAI
-import json
 import base64
 import time
-from pathlib import Path
-import logging
-from datetime import datetime, timedelta
-import requests
-import sys
+from openai import AzureOpenAI
 
-# Configure logging
-logging.basicConfig(
-    level=logging.DEBUG,  # Changed to DEBUG for more detailed logs
-    format='%(asctime)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.FileHandler("azure_batch_processing.log"),
-        logging.StreamHandler()
-    ]
+# Azure OpenAI Configuration
+api_key = "your_azure_openai_api_key"
+azure_endpoint = "https://your-resource-name.openai.azure.com"
+api_version = "2024-02-15-preview"
+deployment_name = "your-gpt4o-deployment"  # Your GPT-4o deployment name
+
+# Initialize the Azure OpenAI client
+client = AzureOpenAI(
+    api_key=api_key,
+    api_version=api_version,
+    azure_endpoint=azure_endpoint
 )
-logger = logging.getLogger(__name__)
 
-# Set your Azure OpenAI credentials
-api_key = os.environ.get("AZURE_OPENAI_KEY")
-if not api_key:
-    logger.error("AZURE_OPENAI_KEY environment variable is not set")
-    sys.exit(1)
-
-azure_endpoint = os.environ.get("AZURE_OPENAI_ENDPOINT")
-if not azure_endpoint:
-    logger.error("AZURE_OPENAI_ENDPOINT environment variable is not set")
-    sys.exit(1)
-
-deployment_name = os.environ.get("AZURE_OPENAI_DEPLOYMENT_NAME", "your-gpt-4o-vision-batch-deployment-name")
-logger.info(f"Using deployment name: {deployment_name}")
-
-# Input/output directories
-INPUT_DIR = "input"
-OUTPUT_DIR = "output"
-
-# Ensure output directory exists
-os.makedirs(OUTPUT_DIR, exist_ok=True)
-
-# Constants for batching
-MAX_FILES_PER_BATCH = 5  # Limit number of files per batch
-MAX_PDF_SIZE_MB = 20     # Max PDF size in MB
-MAX_BASE64_LENGTH = 25 * 1024 * 1024  # ~25MB max encoded length
-BATCH_TIMEOUT_MINUTES = 60  # How long to wait for batch completion
-
-# Initialize Azure OpenAI client
-try:
-    client = AzureOpenAI(
-        api_version="2024-02-15-preview",  # Or the latest API version supporting gpt-4o vision batch
-        api_key=api_key,
-        azure_endpoint=azure_endpoint
-    )
-    logger.info("Azure OpenAI client initialized successfully")
-except Exception as e:
-    logger.error(f"Failed to initialize Azure OpenAI client: {e}")
-    sys.exit(1)
-
-def check_file_suitability(file_path):
-    """
-    Check if a file is suitable for processing (size, format, etc).
-    """
-    # Check file existence
-    if not os.path.exists(file_path):
-        logger.warning(f"File does not exist: {file_path}")
-        return False, "File does not exist"
+def process_pdf(pdf_path, prompt):
+    """Process a PDF file using Azure OpenAI batch API"""
+    # Convert PDF to base64
+    with open(pdf_path, "rb") as pdf_file:
+        pdf_base64 = base64.b64encode(pdf_file.read()).decode("utf-8")
     
-    # Check file size
-    file_size_mb = os.path.getsize(file_path) / (1024 * 1024)
-    if file_size_mb > MAX_PDF_SIZE_MB:
-        logger.warning(f"File too large ({file_size_mb:.2f} MB): {file_path}")
-        return False, f"File exceeds size limit of {MAX_PDF_SIZE_MB}MB"
-    
-    # Check file extension
-    if not file_path.lower().endswith('.pdf'):
-        logger.warning(f"Not a PDF file: {file_path}")
-        return False, "Not a PDF file"
-    
-    return True, None
-
-def pdf_to_base64(pdf_path):
-    """Converts a PDF file to its Base64 encoded string with error checking."""
-    try:
-        with open(pdf_path, "rb") as pdf_file:
-            pdf_bytes = pdf_file.read()
-            
-            # Check if file is empty
-            if len(pdf_bytes) == 0:
-                logger.error(f"PDF file is empty: {pdf_path}")
-                return None, "PDF file is empty"
-                
-            # Try to encode
-            encoded_string = base64.b64encode(pdf_bytes).decode("utf-8")
-            
-            # Check encoded length
-            if len(encoded_string) > MAX_BASE64_LENGTH:
-                logger.error(f"Base64 encoded PDF too large ({len(encoded_string)/1024/1024:.2f} MB): {pdf_path}")
-                return None, f"Encoded PDF exceeds size limit of {MAX_BASE64_LENGTH/1024/1024}MB"
-                
-            return encoded_string, None
-    except PermissionError:
-        logger.error(f"Permission denied when reading PDF: {pdf_path}")
-        return None, "Permission denied when reading file"
-    except MemoryError:
-        logger.error(f"Out of memory when encoding PDF: {pdf_path}")
-        return None, "Out of memory when encoding file"
-    except Exception as e:
-        logger.error(f"Error encoding PDF {pdf_path}: {e}")
-        return None, f"Error: {str(e)}"
-
-def prepare_batch_input(max_files=MAX_FILES_PER_BATCH):
-    """Prepare batch input data from PDFs in the input directory."""
-    inputs_data = []
-    processed_files = []
-    error_files = []
-    
-    # Check if input directory exists
-    if not os.path.exists(INPUT_DIR):
-        logger.error(f"Input directory '{INPUT_DIR}' does not exist")
-        return inputs_data, processed_files, {}, "Input directory does not exist"
-    
-    # Get all PDF files in the input directory
-    pdf_files = [f for f in os.listdir(INPUT_DIR) if f.lower().endswith('.pdf')]
-    
-    if not pdf_files:
-        logger.warning(f"No PDF files found in {INPUT_DIR}")
-        return inputs_data, processed_files, {}, "No PDF files found"
-    
-    logger.info(f"Found {len(pdf_files)} PDF files to process")
-    
-    # Process only up to max_files
-    pdf_files = pdf_files[:max_files]
-    logger.info(f"Processing first {len(pdf_files)} PDF files")
-    
-    file_errors = {}
-    
-    for i, pdf_file in enumerate(pdf_files):
-        pdf_path = os.path.join(INPUT_DIR, pdf_file)
-        
-        # Check if the file is suitable for processing
-        is_suitable, error_reason = check_file_suitability(pdf_path)
-        if not is_suitable:
-            file_errors[pdf_file] = error_reason
-            error_files.append(pdf_file)
-            continue
-        
-        # Encode PDF to base64
-        base64_pdf, encode_error = pdf_to_base64(pdf_path)
-        
-        if base64_pdf:
-            try:
-                # Create a unique custom ID
-                custom_id = f"pdf_{i+1}_{pdf_file}"
-                
-                # Construct message with system instruction and user prompt
-                inputs_data.append(
-                    {
-                        "custom_id": custom_id,
-                        "body": {
-                            "messages": [
-                                {
-                                    "role": "system",
-                                    "content": "You are a helpful assistant that analyzes PDF documents in detail."
-                                },
-                                {
-                                    "role": "user",
-                                    "content": [
-                                        {"type": "image_url", "image_url": {"url": f"data:application/pdf;base64,{base64_pdf}"}},
-                                        {"type": "text", "text": "Please analyze this PDF document and extract the main points, key data, and provide a detailed summary."}
-                                    ]
-                                }
-                            ],
-                            "model": deployment_name,
-                            "temperature": 0.3,
-                            "max_tokens": 1500
+    # Create batch input
+    batch_data = [
+        {
+            "messages": [
+                {
+                    "role": "system",
+                    "content": "You are an AI assistant that can analyze PDF documents."
+                },
+                {
+                    "role": "user", 
+                    "content": [
+                        {"type": "text", "text": prompt},
+                        {
+                            "type": "image_url",
+                            "image_url": {
+                                "url": f"data:application/pdf;base64,{pdf_base64}"
+                            }
                         }
-                    }
-                )
-                processed_files.append(pdf_path)
-                logger.info(f"Added {pdf_file} to batch input (custom ID: {custom_id})")
-            except Exception as e:
-                error_msg = f"Error creating batch item: {str(e)}"
-                logger.error(f"{error_msg} for {pdf_file}")
-                file_errors[pdf_file] = error_msg
-                error_files.append(pdf_file)
-        else:
-            file_errors[pdf_file] = encode_error
-            error_files.append(pdf_file)
+                    ]
+                }
+            ]
+        }
+    ]
     
-    batch_error = None
-    if not inputs_data:
-        batch_error = "No valid PDFs could be processed"
-        logger.error(batch_error)
+    # Submit batch job
+    batch_job = client.batch.create(
+        model=deployment_name,
+        inputs=batch_data
+    )
     
-    return inputs_data, processed_files, file_errors, batch_error
-
-def validate_jsonl_input(file_path):
-    """Validate that the JSONL file is correctly formatted."""
-    try:
-        with open(file_path, "r") as f:
-            line_count = 0
-            for line in f:
-                try:
-                    json_obj = json.loads(line)
-                    # Check basic required structure
-                    if not isinstance(json_obj, dict):
-                        return False, "JSONL line is not a JSON object"
-                    if "custom_id" not in json_obj:
-                        return False, "Missing 'custom_id' field in JSONL"
-                    if "body" not in json_obj:
-                        return False, "Missing 'body' field in JSONL"
-                    # Check messages array
-                    if "messages" not in json_obj["body"]:
-                        return False, "Missing 'messages' array in body"
-                    # Validate content format
-                    for msg in json_obj["body"]["messages"]:
-                        if msg["role"] == "user":
-                            if not isinstance(msg["content"], list):
-                                return False, "User message content should be an array for vision model"
-                    line_count += 1
-                except json.JSONDecodeError:
-                    return False, f"Invalid JSON at line {line_count+1}"
-            
-            if line_count == 0:
-                return False, "JSONL file is empty"
-            
-            return True, f"Valid JSONL with {line_count} records"
-    except Exception as e:
-        return False, f"Error validating JSONL: {str(e)}"
-
-def create_jsonl_input(inputs_data, retry_count=0):
-    """Create the JSONL input file with error handling."""
-    try:
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        input_file_path = os.path.join(OUTPUT_DIR, f"gpt4o_vision_batch_input_{timestamp}_{retry_count}.jsonl")
+    print(f"Batch job submitted with ID: {batch_job.id}")
+    
+    # Poll for results
+    while True:
+        status = client.batch.retrieve(batch_id=batch_job.id)
+        print(f"Status: {status.status}")
         
-        with open(input_file_path, "w") as f:
-            for item in inputs_data:
-                f.write(json.dumps(item) + "\n")
-        
-        logger.info(f"Created input file at {input_file_path}")
-        
-        # Validate the created JSONL
-        is_valid, validation_msg = validate_jsonl_input(input_file_path)
-        if not is_valid:
-            logger.error(f"Created JSONL validation failed: {validation_msg}")
+        if status.status == "succeeded":
+            results = client.batch.retrieve_content(batch_id=batch_job.id)
+            return results
+        elif status.status == "failed":
+            print("Batch job failed")
             return None
-            
-        return input_file_path
-    except Exception as e:
-        logger.error(f"Failed to create input file: {e}")
-        return None
-
-def upload_input_file(input_file_path, retry_count=3, retry_delay=5):
-    """Upload the input file to Azure OpenAI with retries."""
-    for i in range(retry_count + 1):
-        try:
-            with open(input_file_path, "rb") as f:
-                upload_response = client.files.create(file=f, purpose="batch")
-            
-            input_file_id = upload_response.id
-            logger.info(f"Successfully uploaded file ID: {input_file_id} (attempt {i+1})")
-            return input_file_id
-        except Exception as e:
-            logger.error(f"Upload attempt {i+1} failed: {e}")
-            if i < retry_count:
-                logger.info(f"Retrying upload in {retry_delay} seconds...")
-                time.sleep(retry_delay)
-                retry_delay *= 2  # Exponential backoff
-            else:
-                logger.error("All upload attempts failed")
-                return None
-
-def submit_batch_job(input_file_id, retry_count=3, retry_delay=5):
-    """Submit the batch job with retries."""
-    for i in range(retry_count + 1):
-        try:
-            batch_response = client.batches.create(
-                input_file_id=input_file_id,
-                endpoint="/chat/completions",  # gpt-4o uses the chat completions endpoint
-                completion_window="24h"
-            )
-            
-            batch_id = batch_response.id
-            logger.info(f"Successfully submitted batch job. Batch ID: {batch_id} (attempt {i+1})")
-            return batch_response
-        except Exception as e:
-            error_msg = str(e)
-            logger.error(f"Batch submission attempt {i+1} failed: {error_msg}")
-            
-            # Check for specific error types
-            if "rate limit" in error_msg.lower():
-                logger.warning("Rate limit exceeded. Will retry with longer delay.")
-                retry_delay = max(retry_delay * 2, 60)  # Longer delay for rate limits
-            
-            if i < retry_count:
-                logger.info(f"Retrying batch submission in {retry_delay} seconds...")
-                time.sleep(retry_delay)
-                retry_delay *= 2  # Exponential backoff
-            else:
-                logger.error("All batch submission attempts failed")
-                return None
-
-def monitor_batch_job_status(batch_response, timeout_minutes=BATCH_TIMEOUT_MINUTES):
-    """Monitor the batch job status with timeout."""
-    if not batch_response or not hasattr(batch_response, 'id'):
-        logger.error("Invalid batch response")
-        return "failed", "Invalid batch response", None
-    
-    batch_id = batch_response.id
-    output_file_id = None
-    status = "running"
-    error_message = None
-    
-    # Calculate timeout
-    start_time = datetime.now()
-    timeout_time = start_time + timedelta(minutes=timeout_minutes)
-    
-    retry_count = 0
-    max_retries = 5
-    retry_delay = 10  # seconds
-    
-    logger.info(f"Monitoring batch job {batch_id} with {timeout_minutes} minute timeout")
-    
-    while status not in ("completed", "failed", "canceled"):
-        # Check for timeout
-        if datetime.now() > timeout_time:
-            logger.error(f"Batch monitoring timed out after {timeout_minutes} minutes")
-            return "timeout", f"Monitoring timed out after {timeout_minutes} minutes", None
         
-        try:
-            time.sleep(retry_delay)  # Wait before checking
-            
-            # Get batch status
-            retrieved_batch = client.batches.retrieve(batch_id)
-            status = retrieved_batch.status
-            logger.info(f"Batch job status: {status}")
-            
-            # Print progress information if available
-            if hasattr(retrieved_batch, 'usage') and retrieved_batch.usage:
-                logger.info(f"Progress: {retrieved_batch.usage}")
-            
-            if retrieved_batch.error:
-                error_message = retrieved_batch.error
-                logger.error(f"Batch job error: {error_message}")
-                if status == "failed":
-                    break
-            
-            # Get output file ID when available
-            if hasattr(retrieved_batch, 'output_file_id') and retrieved_batch.output_file_id:
-                output_file_id = retrieved_batch.output_file_id
-            
-            retry_count = 0  # Reset retry count on successful check
-            
-            # Adjust the polling frequency based on status
-            if status == "running":
-                retry_delay = 30  # Check less frequently once it's running
-        except Exception as e:
-            retry_count += 1
-            logger.warning(f"Error checking status (attempt {retry_count}/{max_retries}): {e}")
-            
-            if retry_count >= max_retries:
-                logger.error("Max retries reached. Stopping status monitoring.")
-                return "error", f"Max retries reached: {str(e)}", None
-            
-            # Exponential backoff
-            retry_delay = min(retry_delay * 2, 60)
-    
-    duration = datetime.now() - start_time
-    logger.info(f"Batch job monitoring ended with status: {status} after {duration}")
-    
-    return status, error_message, output_file_id
-
-def download_and_process_results(output_file_id, batch_id, processed_files, retry_count=3):
-    """Download and process the results."""
-    if not output_file_id:
-        logger.error("No output file ID available")
-        return False
-    
-    # Try to download the results
-    for i in range(retry_count + 1):
-        try:
-            logger.info(f"Downloading results from file ID: {output_file_id} (attempt {i+1})")
-            output_file = client.files.content(output_file_id)
-            
-            # Save raw results
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            raw_results_path = os.path.join(OUTPUT_DIR, f"batch_results_{batch_id}_{timestamp}.jsonl")
-            with open(raw_results_path, "w", encoding="utf-8") as f:
-                f.write(output_file.text)
-            logger.info(f"Raw results saved to {raw_results_path}")
-            
-            # Process individual results
-            results = output_file.text.strip().split('\n')
-            logger.info(f"Processing {len(results)} result items")
-            
-            successful_results = 0
-            
-            for result_json in results:
-                try:
-                    result = json.loads(result_json)
-                    custom_id = result.get("custom_id", "unknown")
-                    
-                    # Extract PDF filename from custom_id (if format is pdf_N_filename.pdf)
-                    pdf_filename = custom_id.split("_", 2)[2] if len(custom_id.split("_")) > 2 else f"{custom_id}.pdf"
-                    
-                    # Save the content to a separate file
-                    if "body" in result and "choices" in result["body"]:
-                        content = result["body"]["choices"][0]["message"]["content"]
-                        output_path = os.path.join(OUTPUT_DIR, f"{os.path.splitext(pdf_filename)[0]}_analysis.txt")
-                        
-                        with open(output_path, "w", encoding="utf-8") as f:
-                            f.write(content)
-                        logger.info(f"Saved analysis for {pdf_filename} to {output_path}")
-                        successful_results += 1
-                except json.JSONDecodeError:
-                    logger.error(f"Invalid JSON in results: {result_json[:100]}...")
-                except Exception as e:
-                    logger.error(f"Error processing result: {e}")
-            
-            logger.info(f"Successfully processed {successful_results} out of {len(results)} results")
-            return True
-            
-        except Exception as e:
-            logger.error(f"Error downloading/processing results (attempt {i+1}): {e}")
-            if i < retry_count:
-                logger.info(f"Retrying download in 5 seconds...")
-                time.sleep(5)
-            else:
-                logger.error("All download attempts failed")
-                return False
-
-def main():
-    try:
-        # Start timing
-        start_time = datetime.now()
-        logger.info(f"Batch processing started at: {start_time.strftime('%Y-%m-%d %H:%M:%S')}")
-        
-        retry_attempts = 0
-        max_batch_retries = 2
-        success = False
-        
-        while retry_attempts <= max_batch_retries and not success:
-            if retry_attempts > 0:
-                logger.info(f"Retrying batch process (attempt {retry_attempts+1}/{max_batch_retries+1})")
-                time.sleep(30)  # Wait before retrying
-            
-            # 1. Prepare batch input
-            logger.info("Preparing batch input data...")
-            inputs_data, processed_files, file_errors, batch_error = prepare_batch_input()
-            
-            if batch_error:
-                logger.error(f"Batch preparation error: {batch_error}")
-                if retry_attempts >= max_batch_retries:
-                    logger.error("Max batch retries reached. Exiting.")
-                    break
-                retry_attempts += 1
-                continue
-                
-            # Log any file-specific errors
-            if file_errors:
-                logger.warning(f"Encountered {len(file_errors)} file errors:")
-                for file, error in file_errors.items():
-                    logger.warning(f"- {file}: {error}")
-            
-            # 2. Create the JSONL input file
-            input_file_path = create_jsonl_input(inputs_data, retry_attempts)
-            if not input_file_path:
-                logger.error("Failed to create valid input file")
-                if retry_attempts >= max_batch_retries:
-                    logger.error("Max batch retries reached. Exiting.")
-                    break
-                retry_attempts += 1
-                continue
-            
-            # 3. Upload the input file
-            input_file_id = upload_input_file(input_file_path)
-            if not input_file_id:
-                logger.error("Failed to upload input file")
-                if retry_attempts >= max_batch_retries:
-                    logger.error("Max batch retries reached. Exiting.")
-                    break
-                retry_attempts += 1
-                continue
-            
-            # 4. Submit the batch job
-            batch_response = submit_batch_job(input_file_id)
-            if not batch_response:
-                logger.error("Failed to submit batch job")
-                if retry_attempts >= max_batch_retries:
-                    logger.error("Max batch retries reached. Exiting.")
-                    break
-                retry_attempts += 1
-                continue
-            
-            batch_id = batch_response.id
-            
-            # 5. Monitor job status
-            status, error_message, output_file_id = monitor_batch_job_status(batch_response)
-            
-            if status == "completed":
-                # 6. Download and process results
-                results_success = download_and_process_results(output_file_id, batch_id, processed_files)
-                if results_success:
-                    success = True
-                else:
-                    logger.error("Failed to process results")
-            else:
-                logger.error(f"Batch job failed with status: {status}")
-                if error_message:
-                    logger.error(f"Error details: {error_message}")
-            
-            if not success:
-                if retry_attempts >= max_batch_retries:
-                    logger.error("Max batch retries reached. Exiting.")
-                    break
-                retry_attempts += 1
-        
-        # Calculate and log the total duration
-        end_time = datetime.now()
-        duration = end_time - start_time
-        
-        logger.info(f"Batch processing completed at: {end_time.strftime('%Y-%m-%d %H:%M:%S')}")
-        logger.info(f"Total processing time: {duration}")
-        
-        # Format duration in a more readable way
-        days = duration.days
-        hours, remainder = divmod(duration.seconds, 3600)
-        minutes, seconds = divmod(remainder, 60)
-        duration_str = f"{days} days, {hours} hours, {minutes} minutes, {seconds} seconds" if days else f"{hours} hours, {minutes} minutes, {seconds} seconds"
-        
-        # Process status for summary
-        final_status = "Success" if success else "Failed"
-        
-        # Log the summary
-        logger.info("=== PROCESSING SUMMARY ===")
-        logger.info(f"Status: {final_status}")
-        logger.info(f"Files processed: {len(processed_files) if processed_files else 0}")
-        logger.info(f"Total duration: {duration_str}")
-        logger.info(f"Retry attempts: {retry_attempts}")
-        logger.info("=========================")
-        
-        # Save summary to a file
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        summary_path = os.path.join(OUTPUT_DIR, f"batch_summary_{timestamp}.txt")
-        with open(summary_path, "w", encoding="utf-8") as f:
-            f.write("=== AZURE GPT-4o VISION BATCH PROCESSING SUMMARY ===\n")
-            if 'batch_id' in locals():
-                f.write(f"Batch ID: {batch_id}\n")
-            f.write(f"Status: {final_status}\n")
-            f.write(f"Started: {start_time.strftime('%Y-%m-%d %H:%M:%S')}\n")
-            f.write(f"Completed: {end_time.strftime('%Y-%m-%d %H:%M:%S')}\n")
-            f.write(f"Duration: {duration_str}\n")
-            f.write(f"Files processed: {len(processed_files) if processed_files else 0}\n")
-            f.write(f"Retry attempts: {retry_attempts}\n")
-            
-            if file_errors:
-                f.write("\n=== FILE ERRORS ===\n")
-                for file, error in file_errors.items():
-                    f.write(f"- {file}: {error}\n")
-        
-        logger.info(f"Processing summary saved to {summary_path}")
-        
-    except Exception as e:
-        logger.error(f"Unexpected error in main process: {e}", exc_info=True)
+        time.sleep(5)  # Check every 5 seconds
 
 if __name__ == "__main__":
-    main()
+    pdf_path = "your_document.pdf"  # Replace with your PDF file path
+    prompt = "Please analyze this PDF and provide a summary"
+    
+    results = process_pdf(pdf_path, prompt)
+    
+    if results:
+        print("\nResults:")
+        for result in results:
+            if hasattr(result, 'choices') and result.choices:
+                print(result.choices[0].message.content)
+            else:
+                print(result)
