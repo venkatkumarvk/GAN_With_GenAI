@@ -1,82 +1,378 @@
+import os
+import io
+import gc
+import json
 import base64
-import time
+import tempfile
+import fitz  # PyMuPDF
+from datetime import datetime
 from openai import AzureOpenAI
+from tqdm import tqdm
 
-# Azure OpenAI Configuration
-api_key = "your_azure_openai_api_key"
-azure_endpoint = "https://your-resource-name.openai.azure.com"
-api_version = "2024-02-15-preview"
-deployment_name = "your-gpt4o-deployment"  # Your GPT-4o deployment name
 
-# Initialize the Azure OpenAI client
-client = AzureOpenAI(
-    api_key=api_key,
-    api_version=api_version,
-    azure_endpoint=azure_endpoint
-)
+def image_to_data_url(image_bytes, mime_type='image/png'):
+    """
+    Convert image bytes to a base64 string (without data URL prefix for batch API).
+    """
+    base64_encoded_data = base64.b64encode(image_bytes).decode('utf-8')
+    # Return just the base64 data without the prefix
+    return base64_encoded_data
 
-def process_pdf(pdf_path, prompt):
-    """Process a PDF file using Azure OpenAI batch API"""
-    # Convert PDF to base64
-    with open(pdf_path, "rb") as pdf_file:
-        pdf_base64 = base64.b64encode(pdf_file.read()).decode("utf-8")
+
+def prepare_batch_jsonl(image_base64_strings, prompts, model_deployment_name):
+    """
+    Prepares a JSONL file for batch processing.
     
-    # Create batch input
-    batch_data = [
-        {
-            "messages": [
-                {
-                    "role": "system",
-                    "content": "You are an AI assistant that can analyze PDF documents."
-                },
-                {
-                    "role": "user", 
-                    "content": [
-                        {"type": "text", "text": prompt},
-                        {
-                            "type": "image_url",
-                            "image_url": {
-                                "url": f"data:application/pdf;base64,{pdf_base64}"
+    Parameters:
+    - image_base64_strings: List of base64-encoded image strings
+    - prompts: List of corresponding prompts
+    - model_deployment_name: The deployment name for the model
+    
+    Returns:
+    - BytesIO object containing the JSONL content
+    """
+    import json
+    from io import BytesIO
+    
+    jsonl_file = BytesIO()
+    
+    for i, (base64_img, prompt) in enumerate(zip(image_base64_strings, prompts)):
+        # Create the request object with proper data URL format
+        request = {
+            "custom_id": f"request-{i+1}",
+            "method": "POST",
+            "url": "/chat/completions",
+            "body": {
+                "model": model_deployment_name,
+                "messages": [
+                    {
+                        "role": "system",
+                        "content": "You are an AI assistant that classifies documents and extracts information from invoices when appropriate."
+                    },
+                    {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "text",
+                                "text": prompt
+                            },
+                            {
+                                "type": "image_url",
+                                "image_url": {
+                                    "url": f"data:image/png;base64,{base64_img}"
+                                }
                             }
-                        }
-                    ]
-                }
-            ]
+                        ]
+                    }
+                ],
+                "max_tokens": 2000
+            }
         }
-    ]
+        
+        # Write the JSON line to the file
+        jsonl_file.write((json.dumps(request) + "\n").encode('utf-8'))
     
-    # Submit batch job
-    batch_job = client.batch.create(
-        model=deployment_name,
-        inputs=batch_data
+    # Reset the file pointer to the beginning
+    jsonl_file.seek(0)
+    return jsonl_file
+
+
+def process_pdf_file(pdf_path, client, deployment_name):
+    """
+    Process a PDF file using Azure OpenAI batch API.
+    Optimized to minimize temporary file usage.
+    """
+    try:
+        # Get PDF content from file
+        filename = os.path.basename(pdf_path)
+        
+        print(f"Processing {filename}...")
+        
+        # Open the PDF directly from the file
+        doc = fitz.open(pdf_path)
+        page_count = len(doc)
+        
+        print(f"PDF has {page_count} pages")
+        
+        # Prepare data for batch processing
+        image_base64_strings = []
+        page_numbers = []
+        prompts = []
+        
+        # Extract all pages with a progress bar
+        for page_num in tqdm(range(page_count), desc="Preparing pages"):
+            try:
+                # Load page and convert to image
+                page = doc.load_page(page_num)
+                zoom = 1.5  # Reduced zoom to save memory
+                pix = page.get_pixmap(matrix=fitz.Matrix(zoom, zoom))
+                
+                # Convert directly to base64
+                image_bytes = pix.tobytes()
+                base64_string = base64.b64encode(image_bytes).decode('utf-8')
+                
+                # Create prompt for this page
+                classification_prompt = """First, classify this document into one of these categories:
+- Terms & Conditions
+- General Terms and Conditions
+- Sale Order
+- Delivery
+- Price and Payment
+- Warranty
+- Other
+
+If and ONLY if the document is in the "Other" category, extract the following information:
+1) Vendor name
+2) Invoice number
+3) Invoice date
+4) Customer name
+5) Purchase order number
+6) Stock code
+7) Unit price
+8) Invoice amount
+9) Freight cost
+10) Sales tax
+11) Total amount
+
+Format your response as a JSON object with these fields:
+{
+  "category": "the category name",
+  "shouldExtract": true/false,
+  "extractedData": {
+    // Only include if shouldExtract is true
+    "VendorName": {"value": "value", "confidence": 0.95},
+    "InvoiceNumber": {"value": "value", "confidence": 0.95},
+    ...and so on for all fields
+  }
+}"""
+                
+                # Add to batch data
+                image_base64_strings.append(base64_string)
+                page_numbers.append(page_num)
+                prompts.append(classification_prompt)
+                
+                # Clean memory immediately
+                del image_bytes
+                del pix
+                del base64_string
+                
+            except Exception as e:
+                print(f"Error preparing page {page_num+1}: {e}")
+        
+        # Close the document to free memory
+        doc.close()
+        del doc
+        
+        # Prepare the JSONL batch file
+        print("Preparing batch file...")
+        jsonl_file = prepare_batch_jsonl(image_base64_strings, prompts, deployment_name)
+        
+        # Clear these large lists to free memory
+        del image_base64_strings
+        
+        # Process the batch
+        all_page_results = []
+        
+        # We need to create a temporary JSONL file as the API might have issues with direct BytesIO
+        tmp_jsonl_path = None
+        
+        try:
+            # Create a temporary file for the JSONL content
+            with tempfile.NamedTemporaryFile(suffix='.jsonl', delete=False) as tmp_jsonl:
+                tmp_jsonl.write(jsonl_file.getvalue())
+                tmp_jsonl_path = tmp_jsonl.name
+            
+            # Upload with explicit file open
+            print("Uploading batch file to Azure...")
+            with open(tmp_jsonl_path, 'rb') as f:
+                file = client.files.create(
+                    file=f,
+                    purpose="batch"
+                )
+            
+            # We can delete the temp file immediately after upload
+            if tmp_jsonl_path:
+                os.unlink(tmp_jsonl_path)
+                tmp_jsonl_path = None
+            
+            file_id = file.id
+            print(f"File uploaded (ID: {file_id}). Creating batch job...")
+            
+            # Submit batch job
+            batch_response = client.batches.create(
+                input_file_id=file_id,
+                endpoint="/chat/completions",
+                completion_window="24h"
+            )
+            
+            batch_id = batch_response.id
+            print(f"Batch job created (ID: {batch_id}). Waiting for processing...")
+            
+            # Track batch job status
+            status = "validating"
+            import time
+            import datetime
+            
+            while status not in ("completed", "failed", "canceled"):
+                time.sleep(10)  # Check every 10 seconds for faster feedback
+                batch_response = client.batches.retrieve(batch_id)
+                status = batch_response.status
+                status_message = f"{datetime.datetime.now()} Batch Id: {batch_id}, Status: {status}"
+                print(status_message)
+            
+            if batch_response.status == "failed":
+                error_message = "Batch processing failed:"
+                if hasattr(batch_response, 'errors') and hasattr(batch_response.errors, 'data'):
+                    for error in batch_response.errors.data:
+                        error_message += f"\nError code {error.code} Message {error.message}"
+                else:
+                    error_message += " Unknown error occurred"
+                print(error_message)
+                raise Exception(error_message)
+            
+            # Retrieve results
+            output_file_id = batch_response.output_file_id
+            
+            if not output_file_id:
+                output_file_id = batch_response.error_file_id
+                if not output_file_id:
+                    print("No output or error file was produced by the batch job.")
+                    raise Exception("No output file produced")
+            
+            print(f"Batch completed. Retrieving results...")
+            file_response = client.files.content(output_file_id)
+            raw_responses = file_response.text.strip().split('\n')
+            
+            # Process the batch results
+            for raw_response in raw_responses:
+                try:
+                    json_response = json.loads(raw_response)
+                    
+                    # Extract the request ID to identify the page
+                    request_id = json_response.get("custom_id", "")
+                    if request_id.startswith("request-"):
+                        idx = int(request_id.split("-")[1]) - 1
+                        if idx < len(page_numbers):
+                            page_num = page_numbers[idx]
+                        else:
+                            page_num = -1
+                    else:
+                        page_num = -1
+                    
+                    # Process the actual content
+                    if "response" in json_response and "body" in json_response["response"]:
+                        content = json_response["response"]["body"]
+                        if isinstance(content, str):
+                            content = json.loads(content)
+                        
+                        if "choices" in content and len(content["choices"]) > 0:
+                            message_content = content["choices"][0]["message"]["content"]
+                            result = json.loads(message_content)
+                            
+                            category = result.get("category", "Unknown")
+                            
+                            if category == "Other" and result.get("shouldExtract", False):
+                                extracted_info = result.get("extractedData", {})
+                                
+                                # Add to results
+                                extracted_info_with_page = {
+                                    "page": page_num + 1,
+                                    "data": extracted_info,
+                                    "extraction_timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                                }
+                                
+                                all_page_results.append(extracted_info_with_page)
+                                print(f"Extracted data from {filename} - Page {page_num+1} (Category: {category})")
+                            else:
+                                print(f"Skipped extraction for {filename} - Page {page_num+1} (Category: {category})")
+                except Exception as e:
+                    print(f"Error processing result: {str(e)}")
+        
+        except Exception as e:
+            print(f"Error during batch processing: {str(e)}")
+            raise  # Re-raise to be caught by the outer exception handler
+        finally:
+            # Ensure temporary file is deleted if it exists
+            if tmp_jsonl_path and os.path.exists(tmp_jsonl_path):
+                os.unlink(tmp_jsonl_path)
+        
+        # Create final result
+        final_result = {
+            "filename": filename,
+            "total_pages": page_count,
+            "pages": all_page_results
+        }
+        
+        return final_result
+            
+    except Exception as e:
+        print(f"Error processing {pdf_path}: {str(e)}")
+        return {
+            "filename": os.path.basename(pdf_path),
+            "error": str(e),
+            "total_pages": 0,
+            "pages": []
+        }
+    finally:
+        # Clean up resources
+        if 'jsonl_file' in locals():
+            del jsonl_file
+        
+        # Force garbage collection
+        gc.collect()
+
+
+def main():
+    # Configuration - CHANGE THESE VALUES
+    pdf_dir = "./pdf_files"  # Directory containing PDF files
+    output_dir = "./results"  # Directory to save results
+    api_key = "YOUR_AZURE_API_KEY"  # Your Azure OpenAI API key
+    api_endpoint = "https://your-resource-name.openai.azure.com"  # Your Azure endpoint
+    deployment_name = "YOUR_DEPLOYMENT_NAME"  # Your model deployment name
+    
+    # Create the output directory if it doesn't exist
+    os.makedirs(output_dir, exist_ok=True)
+    
+    # Initialize the Azure OpenAI client
+    client = AzureOpenAI(
+        api_key=api_key,
+        api_version="2024-02-01",
+        azure_endpoint=api_endpoint
     )
     
-    print(f"Batch job submitted with ID: {batch_job.id}")
+    # Process each PDF file in the directory
+    all_results = []
+    pdf_files = [f for f in os.listdir(pdf_dir) if f.lower().endswith('.pdf')]
     
-    # Poll for results
-    while True:
-        status = client.batch.retrieve(batch_id=batch_job.id)
-        print(f"Status: {status.status}")
+    if not pdf_files:
+        print(f"No PDF files found in {pdf_dir}")
+        return
         
-        if status.status == "succeeded":
-            results = client.batch.retrieve_content(batch_id=batch_job.id)
-            return results
-        elif status.status == "failed":
-            print("Batch job failed")
-            return None
+    print(f"Found {len(pdf_files)} PDF files to process")
+    
+    for pdf_file in pdf_files:
+        pdf_path = os.path.join(pdf_dir, pdf_file)
+        print(f"\n{'='*50}")
+        print(f"Processing {pdf_file}")
+        print(f"{'='*50}")
         
-        time.sleep(5)  # Check every 5 seconds
+        result = process_pdf_file(pdf_path, client, deployment_name)
+        all_results.append(result)
+        
+        # Save individual result
+        output_file = os.path.join(output_dir, f"{os.path.splitext(pdf_file)[0]}_result.json")
+        with open(output_file, 'w') as f:
+            json.dump(result, f, indent=2)
+        
+        print(f"Results saved to {output_file}")
+    
+    # Save combined results
+    combined_output = os.path.join(output_dir, "combined_results.json")
+    with open(combined_output, 'w') as f:
+        json.dump(all_results, f, indent=2)
+    
+    print(f"\nAll processing completed. Combined results saved to {combined_output}")
+
 
 if __name__ == "__main__":
-    pdf_path = "your_document.pdf"  # Replace with your PDF file path
-    prompt = "Please analyze this PDF and provide a summary"
-    
-    results = process_pdf(pdf_path, prompt)
-    
-    if results:
-        print("\nResults:")
-        for result in results:
-            if hasattr(result, 'choices') and result.choices:
-                print(result.choices[0].message.content)
-            else:
-                print(result)
+    main()
