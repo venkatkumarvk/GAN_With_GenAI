@@ -1,0 +1,34 @@
+# In the View Results mode:
+view_tabs = st.tabs(["Results Table", "Data by Document", "Classifications", "Confidence Analysis", "Download Options"])
+
+# ... existing code for other tabs ...
+
+with view_tabs[2]:  # Classifications tab
+    st.subheader("Page Classifications")
+    
+    classification_data = []
+    
+    for pdf_result in all_pdf_results:
+        filename = pdf_result["filename"]
+        
+        if "classifications" in pdf_result:
+            for classification in pdf_result["classifications"]:
+                classification_data.append({
+                    "Filename": filename,
+                    "Page": classification["page"],
+                    "Category": classification["category"],
+                    "Extracted": "Yes" if classification["category"] == "Other" else "No"
+                })
+    
+    if classification_data:
+        classification_df = pd.DataFrame(classification_data)
+        st.dataframe(classification_df, use_container_width=True)
+        
+        # Show summary chart
+        st.subheader("Classification Summary")
+        category_counts = classification_df["Category"].value_counts().reset_index()
+        category_counts.columns = ["Category", "Count"]
+        
+        st.bar_chart(category_counts, x="Category", y="Count")
+    else:
+        st.info("No classification data available. Please process documents first.")
