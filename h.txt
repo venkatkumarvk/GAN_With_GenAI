@@ -1,0 +1,41 @@
+{
+  "azure": {
+    "api_key": "YOUR_AZURE_API_KEY",
+    "api_endpoint": "https://your-resource-name.openai.azure.com",
+    "api_version": "2024-02-01",
+    "deployment_name": "YOUR_DEPLOYMENT_NAME"
+  },
+  "paths": {
+    "pdf_dir": "./pdf_files",
+    "output_dir": "./results"
+  },
+  "processing": {
+    "zoom_factor": 1.5,
+    "batch_completion_window": "24h",
+    "max_tokens": 2000
+  },
+  "prompt": {
+    "system_message": "You are an AI assistant that classifies documents and extracts information from invoices when appropriate.",
+    "user_message": "First, classify this document into one of these categories:\n- Terms & Conditions\n- General Terms and Conditions\n- Sale Order\n- Delivery\n- Price and Payment\n- Warranty\n- Other\n\nIf and ONLY if the document is in the \"Other\" category, extract the following information:\n1) Vendor name\n2) Invoice number\n3) Invoice date\n4) Customer name\n5) Purchase order number\n6) Stock code\n7) Unit price\n8) Invoice amount\n9) Freight cost\n10) Sales tax\n11) Total amount\n\nFormat your response as a JSON object with these fields:\n{\n  \"category\": \"the category name\",\n  \"shouldExtract\": true/false,\n  \"extractedData\": {\n    // Only include if shouldExtract is true\n    \"VendorName\": {\"value\": \"value\", \"confidence\": 0.95},\n    \"InvoiceNumber\": {\"value\": \"value\", \"confidence\": 0.95},\n    ...and so on for all fields\n  }\n}"
+  }
+}
+
+def load_config(config_path="config.json"):
+    """
+    Load configuration from JSON file
+    """
+    try:
+        with open(config_path, 'r') as f:
+            config = json.load(f)
+        return config
+    except Exception as e:
+        print(f"Error loading config: {e}")
+        exit(1)
+
+   # Load configuration
+    config = load_config()
+    
+    # Get paths from config
+    pdf_dir = config["paths"]["pdf_dir"]
+    output_dir = config["paths"]["output_dir"]
+    prompt = config["prompt"]["user_message"]
