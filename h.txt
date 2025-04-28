@@ -1,32 +1,4 @@
-def list_pdf_blobs_with_details(blob_service_client, container_name, folder_prefix=""):
-    """
-    List all PDF blobs in the specified container and folder prefix with details.
-    """
-    try:
-        container_client = blob_service_client.get_container_client(container_name)
-        
-        # Get blobs with the folder prefix that are PDFs
-        pdf_blobs = []
-        for blob in container_client.list_blobs(name_starts_with=folder_prefix):
-            if blob.name.lower().endswith('.pdf'):
-                # Get file size
-                size_kb = blob.size / 1024
-                # Get last modified time
-                last_modified = blob.last_modified
-                # Add to the list
-                pdf_blobs.append({
-                    "name": blob.name,
-                    "filename": blob.name.split('/')[-1],
-                    "size_kb": round(size_kb, 2),
-                    "last_modified": last_modified
-                })
-                
-        return pdf_blobs
-    except Exception as e:
-        st.error(f"Error listing PDF blobs: {e}")
-        return []
-
-
+# In the "Extract Data" mode where you handle blob storage input
 else:  # Azure Blob Storage
     if not blob_service_client:
         st.error("Azure Blob Storage connection is required for this option. Please set AZURE_STORAGE_CONNECTION_STRING environment variable.")
@@ -57,29 +29,50 @@ else:  # Azure Blob Storage
         help="Choose a folder within the container"
     )
     
-    # List available PDFs
-    pdf_blobs = list_pdf_blobs(blob_service_client, selected_container, selected_folder)
+    # List available PDFs with details
+    pdf_blobs_details = list_pdf_blobs_with_details(blob_service_client, selected_container, selected_folder)
     
-    if not pdf_blobs:
+    if not pdf_blobs_details:
         st.warning(f"No PDF files found in the selected location. Please choose another container or folder.")
         return
     
-    # Show available PDFs
-    st.write(f"Found {len(pdf_blobs)} PDF files:")
+    # Show available PDFs in a table
+    st.write(f"Found {len(pdf_blobs_details)} PDF files:")
     
-    # Create columns for better display
-    pdf_cols = st.columns(3)
-    for i, pdf in enumerate(pdf_blobs):
-        display_name = pdf.split('/')[-1]  # Remove folder path for display
-        pdf_cols[i % 3].write(f"- {display_name}")
-        if i >= 11:  # Limit display to avoid cluttering
-            pdf_cols[(i + 1) % 3].write("...")
-            break
+    # Create a DataFrame for better display
+    pdf_files_df = pd.DataFrame(pdf_blobs_details)
+    pdf_files_df = pdf_files_df[['filename', 'size_kb', 'last_modified']]
+    pdf_files_df.columns = ['Filename', 'Size (KB)', 'Last Modified']
     
-    # Display previews in sidebar
-    display_pdf_previews_sidebar(pdf_blobs, blob_service_client, selected_container)
+    # Show the table
+    st.dataframe(pdf_files_df, use_container_width=True)
     
-    # Process button
-    process_button = st.button("Process Blob Documents", type="primary")
+    # Multi-select files
+    file_options = [blob["filename"] for blob in pdf_blobs_details]
     
-    files_to_process = pdf_blobs if process_button else None
+    # Default to selecting all files
+    default_selection = file_options.copy()
+    
+    selected_files = st.multiselect(
+        "Select Files to Process",
+        options=file_options,
+        default=default_selection,
+        help="Select one or more files to process"
+    )
+    
+    if not selected_files:
+        st.warning("Please select at least one file to process")
+        files_to_process = None
+    else:
+        # Get full blob names for selected files
+        pdf_blobs = [blob["name"] for blob in pdf_blobs_details if blob["filename"] in selected_files]
+        
+        st.info(f"Selected {len(pdf_blobs)} files for processing")
+        
+        # Display previews in sidebar
+        display_pdf_previews_sidebar(pdf_blobs, blob_service_client, selected_container)
+        
+        # Process button
+        process_button = st.button("Process Blob Documents", type="primary")
+        
+        files_to_process = pdf_blobs if process_button else None
