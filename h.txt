@@ -1,0 +1,25 @@
+✅ System Configuration for PDF Parsing POC using Azure OpenAI
+
+This document outlines the high-level system architecture and resource requirements for the deployment of a PDF parsing POC project using Azure OpenAI, with integration into a CI/CD pipeline via Azure DevOps and deployment on Azure Web App.
+🔹 1. Compute & Deployment Environment
+Component	Specification
+Service	Azure App Service (Web App for Linux)
+Tier	Premium P1v3
+CPU	2 vCPUs
+RAM	8 GB
+Scaling	Manual or Auto-scaling (configurable)
+Purpose	Hosts the PDF parsing and OpenAI integration backend
+🔹 2. CI/CD Pipeline
+Component	Specification
+Service	Azure DevOps (Premium Tier)
+Pipelines	YAML-based Continuous Integration & Deployment
+Repo	Azure Repos (Git)
+Users	5 Basic users free; Premium users at $6/user/month
+Features	Advanced security, parallel jobs, deployment gates
+Purpose	Automates build, test, and deploy cycles
+🔹 3. Azure OpenAI Integration
+Component	Specification
+Service	Azure OpenAI (GPT-3.5-turbo)
+Usage Estimate	~15 million tokens/month (~3000 tokens per PDF)
+Model Tasks	PDF content extraction, summarization, and structuring
+Cost Estimate	~$25–$30/month
