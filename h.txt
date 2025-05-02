@@ -1,3 +1,23 @@
+def identify_vendor(filename):
+    """
+    Identify vendor from filename.
+    Returns the vendor folder name based on keywords in the filename.
+    """
+    filename = filename.lower()
+    
+    if "cadwell" in filename:
+        return "Cadwell"
+    elif "rhythmlink" in filename:
+        return "Rhythmlink"
+    elif "ives" in filename or "egg" in filename:
+        return "Ives_egg"
+    elif "neurovision" in filename:
+        return "Neurovision"
+    elif "medronics" in filename or "medtronic" in filename:
+        return "Medronics"
+    else:
+        return "Other"  # Default folder for unrecognized vendors
+
 # In the Azure Blob Storage upload section (Part 11)
 # After creating the confidence folder structure
 
