@@ -1,0 +1,581 @@
+with view_tabs[4]:  # Bulk Management tab
+    st.subheader("Bulk Document Management")
+    
+    # Initialize session state for document tracking
+    if 'validated_docs' not in st.session_state:
+        st.session_state.validated_docs = {}
+    if 'processed_docs' not in st.session_state:
+        st.session_state.processed_docs = {}
+    
+    # Create two columns for High and Low confidence
+    high_col, low_col = st.columns(2)
+    
+    with high_col:
+        st.subheader("High Confidence Documents (≥95%)")
+        
+        # Get high confidence documents
+        high_conf_docs = []
+        for pdf_result in all_pdf_results:
+            if has_high_confidence(pdf_result, threshold=95.0):
+                high_conf_docs.append(pdf_result)
+        
+        if high_conf_docs:
+            # Create a dataframe for tracking
+            high_conf_tracking = []
+            
+            for doc in high_conf_docs:
+                # Check if document is validated
+                is_validated = st.session_state.validated_docs.get(doc["filename"], False)
+                # Check if document is processed
+                is_processed = st.session_state.processed_docs.get(doc["filename"], False)
+                
+                high_conf_tracking.append({
+                    "Filename": doc["filename"],
+                    "Pages": doc["total_pages"],
+                    "Extracted Fields": len(doc["pages"]),
+                    "Validated": "✅" if is_validated else "❌",
+                    "Processed": "✅" if is_processed else "❌"
+                })
+            
+            # Show the tracking table
+            high_df = pd.DataFrame(high_conf_tracking)
+            
+            # Use data editor to allow checkbox editing
+            edited_high_df = st.data_editor(
+                high_df,
+                column_config={
+                    "Validated": st.column_config.CheckboxColumn(
+                        "Validated",
+                        help="Check to mark as validated",
+                        default=False
+                    ),
+                    "Processed": st.column_config.CheckboxColumn(
+                        "Processed",
+                        help="Uploaded to blob storage",
+                        default=False,
+                        disabled=True
+                    )
+                },
+                disabled=["Filename", "Pages", "Extracted Fields", "Processed"],
+                key="high_conf_editor"
+            )
+            
+            # Update validation status based on checkbox changes
+            for i, row in edited_high_df.iterrows():
+                filename = row["Filename"]
+                is_validated = row["Validated"] == "✅" or row["Validated"] == True
+                st.session_state.validated_docs[filename] = is_validated
+            
+            # Count validated documents
+            validated_count = sum(1 for doc in high_conf_docs 
+                               if st.session_state.validated_docs.get(doc["filename"], False))
+            
+            st.info(f"{validated_count} of {len(high_conf_docs)} high confidence documents are validated")
+            
+            # Show the bulk upload section for high confidence
+            st.subheader("Bulk Upload High Confidence Documents")
+            
+            # Input fields for blob container details
+            high_container = st.text_input("Blob Container for High Confidence", key="high_container")
+            high_result_folder = st.text_input("Results Folder Path", value="processed_results/high_confidence/", key="high_results_folder")
+            high_source_folder = st.text_input("Source Documents Folder Path", value="source_documents/high_confidence/", key="high_source_folder")
+            
+            # Get list of validated docs that haven't been processed yet
+            validated_high_docs = [doc for doc in high_conf_docs 
+                                  if st.session_state.validated_docs.get(doc["filename"], False) 
+                                  and not st.session_state.processed_docs.get(doc["filename"], False)]
+            
+            # Bulk upload button
+            if validated_high_docs:
+                if st.button(f"Upload {len(validated_high_docs)} Validated High Confidence Documents", key="upload_high", type="primary"):
+                    if not high_container:
+                        st.error("Please specify a blob container for high confidence documents.")
+                    else:
+                        with st.spinner("Uploading validated high confidence documents..."):
+                            upload_results = []
+                            
+                            for doc in validated_high_docs:
+                                try:
+                                    filename = doc["filename"]
+                                    
+                                    # Create CSV for this document
+                                    pdf_rows = []
+                                    for page in doc["pages"]:
+                                        page_num = page["page"]
+                                        data = page["data"]
+                                        extraction_timestamp = page.get("extraction_timestamp", datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+                                        
+                                        # Initialize row data
+                                        row_data = {"Page": page_num, "Extraction_Timestamp": extraction_timestamp}
+                                        
+                                        # Process each field
+                                        for field in ["VendorName", "InvoiceNumber", "InvoiceDate", "CustomerName", 
+                                                    "PurchaseOrder", "StockCode", "UnitPrice", "InvoiceAmount", 
+                                                    "Freight", "Salestax", "Total"]:
+                                            field_data = data.get(field, {})
+                                            
+                                            if isinstance(field_data, dict):
+                                                value = field_data.get("value", "N/A")
+                                                confidence = field_data.get("confidence", 0)
+                                            else:
+                                                value = field_data if field_data else "N/A"
+                                                confidence = 0
+                                            
+                                            # Add to row data
+                                            row_data[field] = value
+                                            row_data[f"{field} Confidence"] = round(confidence * 100, 2)
+                                        
+                                        # Check if field was manually edited
+                                        edited_fields_with_values = []
+                                        if ('manual_edit_tracking' in st.session_state and 
+                                            filename in st.session_state.manual_edit_tracking and 
+                                            str(page_num) in st.session_state.manual_edit_tracking[filename]):
+                                            
+                                            edit_info = st.session_state.manual_edit_tracking[filename][str(page_num)]
+                                            for field, info in edit_info.items():
+                                                if info.get("edited", False):
+                                                    current_value = row_data.get(field, "N/A")
+                                                    edited_fields_with_values.append(f"{field}: {current_value}")
+                                        
+                                        row_data["Manually_Edited_Fields"] = "; ".join(edited_fields_with_values) if edited_fields_with_values else ""
+                                        row_data["Manual_Edit"] = "Y" if edited_fields_with_values else "N"
+                                        
+                                        pdf_rows.append(row_data)
+                                    
+                                    # Create DataFrame and CSV for this PDF
+                                    if pdf_rows:
+                                        pdf_df = pd.DataFrame(pdf_rows, dtype=str)
+                                        pdf_csv = pdf_df.to_csv(index=False)
+                                        
+                                        # Prepare filename with InvoiceNumber and Total if available
+                                        invoice_number = "unknown"
+                                        total_amount = "unknown"
+                                        
+                                        # Look through the data to find invoice number and total
+                                        for page in doc["pages"]:
+                                            data = page["data"]
+                                            if not isinstance(data, dict) or "error" in data:
+                                                continue
+                                                
+                                            for field, field_data in data.items():
+                                                if field == "InvoiceNumber":
+                                                    if isinstance(field_data, dict):
+                                                        invoice_number = field_data.get("value", "unknown")
+                                                    else:
+                                                        invoice_number = field_data if field_data else "unknown"
+                                                elif field == "Total":
+                                                    if isinstance(field_data, dict):
+                                                        total_amount = field_data.get("value", "unknown")
+                                                    else:
+                                                        total_amount = field_data if field_data else "unknown"
+                                        
+                                        # Clean values for filename use
+                                        safe_invoice_number = ''.join(c for c in str(invoice_number) if c.isalnum() or c in '-_.')
+                                        safe_total_amount = ''.join(c for c in str(total_amount) if c.isalnum() or c in '-_.')
+                                        
+                                        base_filename = os.path.splitext(filename)[0]
+                                        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                                        
+                                        # Upload CSV to blob storage
+                                        csv_blob_name = f"{high_result_folder}{base_filename}_{safe_invoice_number}_{safe_total_amount}_{timestamp}.csv"
+                                        csv_success, csv_url = upload_to_blob_storage(
+                                            blob_service_client,
+                                            high_container,
+                                            csv_blob_name,
+                                            pdf_csv,
+                                            "text/csv"
+                                        )
+                                        
+                                        # Upload source document
+                                        source_success = False
+                                        source_url = None
+                                        
+                                        # Handle based on input method
+                                        input_method = st.session_state.get("input_method", "Unknown")
+                                        
+                                        if input_method == "Upload Files" and 'original_files' in st.session_state:
+                                            # Find original file
+                                            original_file = next((f for f in st.session_state.original_files 
+                                                                if hasattr(f, 'name') and f.name == filename), None)
+                                            
+                                            if original_file:
+                                                # Reset position and read content
+                                                original_file.seek(0)
+                                                file_content = original_file.read()
+                                                
+                                                # Upload to source folder
+                                                source_blob_name = f"{high_source_folder}{filename}"
+                                                source_success, source_url = upload_to_blob_storage(
+                                                    blob_service_client,
+                                                    high_container,
+                                                    source_blob_name,
+                                                    file_content,
+                                                    "application/pdf"
+                                                )
+                                        
+                                        elif input_method == "Azure Blob Storage" and 'original_files' in st.session_state:
+                                            try:
+                                                # For blob storage, find the original blob
+                                                blob_name = next((b for b in st.session_state.original_files 
+                                                                if isinstance(b, str) and b.endswith(filename)), None)
+                                                
+                                                if blob_name and 'blob_container' in st.session_state:
+                                                    source_container = st.session_state.blob_container
+                                                    
+                                                    # Download blob content
+                                                    blob_content = download_blob_to_memory(
+                                                        blob_service_client, 
+                                                        source_container, 
+                                                        blob_name
+                                                    )
+                                                    
+                                                    if blob_content:
+                                                        # Upload to destination
+                                                        source_blob_name = f"{high_source_folder}{filename}"
+                                                        source_success, source_url = upload_to_blob_storage(
+                                                            blob_service_client,
+                                                            high_container,
+                                                            source_blob_name,
+                                                            blob_content,
+                                                            "application/pdf"
+                                                        )
+                                            except Exception as e:
+                                                st.warning(f"Error copying source document: {str(e)}")
+                                        
+                                        # Mark as processed
+                                        st.session_state.processed_docs[filename] = True
+                                        
+                                        # Add to results
+                                        upload_results.append({
+                                            "filename": filename,
+                                            "csv_success": csv_success,
+                                            "csv_url": csv_url if csv_success else None,
+                                            "source_success": source_success,
+                                            "source_url": source_url if source_success else None
+                                        })
+                                
+                                except Exception as e:
+                                    st.error(f"Error processing {filename}: {str(e)}")
+                                    upload_results.append({
+                                        "filename": filename,
+                                        "error": str(e)
+                                    })
+                            
+                            # Display upload results
+                            if upload_results:
+                                st.subheader("Upload Results")
+                                
+                                upload_rows = []
+                                for result in upload_results:
+                                    if "error" in result:
+                                        upload_rows.append({
+                                            "Filename": result["filename"],
+                                            "Status": "❌ Error",
+                                            "CSV": "❌",
+                                            "Source Document": "❌",
+                                            "Error": result["error"]
+                                        })
+                                    else:
+                                        upload_rows.append({
+                                            "Filename": result["filename"],
+                                            "Status": "✅ Uploaded",
+                                            "CSV": "✅" if result["csv_success"] else "❌",
+                                            "Source Document": "✅" if result["source_success"] else "❌",
+                                            "Error": ""
+                                        })
+                                
+                                upload_df = pd.DataFrame(upload_rows)
+                                st.dataframe(upload_df, use_container_width=True)
+                                
+                                # Success message
+                                success_count = sum(1 for r in upload_results if "error" not in r)
+                                st.success(f"Successfully uploaded {success_count} of {len(upload_results)} documents")
+            else:
+                st.info("No validated high confidence documents available for upload")
+        else:
+            st.info("No high confidence documents found.")
+    
+    with low_col:
+        st.subheader("Low Confidence Documents (<95%)")
+        
+        # Get low confidence documents
+        low_conf_docs = []
+        for pdf_result in all_pdf_results:
+            if not has_high_confidence(pdf_result, threshold=95.0):
+                low_conf_docs.append(pdf_result)
+        
+        if low_conf_docs:
+            # Create a dataframe for tracking
+            low_conf_tracking = []
+            
+            for doc in low_conf_docs:
+                # Check if document is validated
+                is_validated = st.session_state.validated_docs.get(doc["filename"], False)
+                # Check if document is processed
+                is_processed = st.session_state.processed_docs.get(doc["filename"], False)
+                
+                low_conf_tracking.append({
+                    "Filename": doc["filename"],
+                    "Pages": doc["total_pages"],
+                    "Extracted Fields": len(doc["pages"]),
+                    "Validated": "✅" if is_validated else "❌",
+                    "Processed": "✅" if is_processed else "❌"
+                })
+            
+            # Show the tracking table
+            low_df = pd.DataFrame(low_conf_tracking)
+            
+            # Use data editor to allow checkbox editing
+            edited_low_df = st.data_editor(
+                low_df,
+                column_config={
+                    "Validated": st.column_config.CheckboxColumn(
+                        "Validated",
+                        help="Check to mark as validated",
+                        default=False
+                    ),
+                    "Processed": st.column_config.CheckboxColumn(
+                        "Processed", 
+                        help="Uploaded to blob storage",
+                        default=False,
+                        disabled=True
+                    )
+                },
+                disabled=["Filename", "Pages", "Extracted Fields", "Processed"],
+                key="low_conf_editor"
+            )
+            
+            # Update validation status based on checkbox changes
+            for i, row in edited_low_df.iterrows():
+                filename = row["Filename"]
+                is_validated = row["Validated"] == "✅" or row["Validated"] == True
+                st.session_state.validated_docs[filename] = is_validated
+            
+            # Count validated documents
+            validated_count = sum(1 for doc in low_conf_docs 
+                               if st.session_state.validated_docs.get(doc["filename"], False))
+            
+            st.info(f"{validated_count} of {len(low_conf_docs)} low confidence documents are validated")
+            
+            # Show the bulk upload section for low confidence
+            st.subheader("Bulk Upload Low Confidence Documents")
+            
+            # Input fields for blob container details
+            low_container = st.text_input("Blob Container for Low Confidence", key="low_container")
+            low_result_folder = st.text_input("Results Folder Path", value="processed_results/low_confidence/", key="low_results_folder")
+            low_source_folder = st.text_input("Source Documents Folder Path", value="source_documents/low_confidence/", key="low_source_folder")
+            
+            # Get list of validated docs that haven't been processed yet
+            validated_low_docs = [doc for doc in low_conf_docs 
+                                 if st.session_state.validated_docs.get(doc["filename"], False) 
+                                 and not st.session_state.processed_docs.get(doc["filename"], False)]
+            
+            # Bulk upload button
+            if validated_low_docs:
+                if st.button(f"Upload {len(validated_low_docs)} Validated Low Confidence Documents", key="upload_low", type="primary"):
+                    if not low_container:
+                        st.error("Please specify a blob container for low confidence documents.")
+                    else:
+                        with st.spinner("Uploading validated low confidence documents..."):
+                            upload_results = []
+                            
+                            for doc in validated_low_docs:
+                                try:
+                                    filename = doc["filename"]
+                                    
+                                    # Create CSV for this document
+                                    pdf_rows = []
+                                    for page in doc["pages"]:
+                                        page_num = page["page"]
+                                        data = page["data"]
+                                        extraction_timestamp = page.get("extraction_timestamp", datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+                                        
+                                        # Initialize row data
+                                        row_data = {"Page": page_num, "Extraction_Timestamp": extraction_timestamp}
+                                        
+                                        # Process each field
+                                        for field in ["VendorName", "InvoiceNumber", "InvoiceDate", "CustomerName", 
+                                                    "PurchaseOrder", "StockCode", "UnitPrice", "InvoiceAmount", 
+                                                    "Freight", "Salestax", "Total"]:
+                                            field_data = data.get(field, {})
+                                            
+                                            if isinstance(field_data, dict):
+                                                value = field_data.get("value", "N/A")
+                                                confidence = field_data.get("confidence", 0)
+                                            else:
+                                                value = field_data if field_data else "N/A"
+                                                confidence = 0
+                                            
+                                            # Add to row data
+                                            row_data[field] = value
+                                            row_data[f"{field} Confidence"] = round(confidence * 100, 2)
+                                        
+                                        # Check if field was manually edited
+                                        edited_fields_with_values = []
+                                        if ('manual_edit_tracking' in st.session_state and 
+                                            filename in st.session_state.manual_edit_tracking and 
+                                            str(page_num) in st.session_state.manual_edit_tracking[filename]):
+                                            
+                                            edit_info = st.session_state.manual_edit_tracking[filename][str(page_num)]
+                                            for field, info in edit_info.items():
+                                                if info.get("edited", False):
+                                                    current_value = row_data.get(field, "N/A")
+                                                    edited_fields_with_values.append(f"{field}: {current_value}")
+                                        
+                                        row_data["Manually_Edited_Fields"] = "; ".join(edited_fields_with_values) if edited_fields_with_values else ""
+                                        row_data["Manual_Edit"] = "Y" if edited_fields_with_values else "N"
+                                        
+                                        pdf_rows.append(row_data)
+                                    
+                                    # Create DataFrame and CSV for this PDF
+                                    if pdf_rows:
+                                        pdf_df = pd.DataFrame(pdf_rows, dtype=str)
+                                        pdf_csv = pdf_df.to_csv(index=False)
+                                        
+                                        # Prepare filename with InvoiceNumber and Total if available
+                                        invoice_number = "unknown"
+                                        total_amount = "unknown"
+                                        
+                                        # Look through the data to find invoice number and total
+                                        for page in doc["pages"]:
+                                            data = page["data"]
+                                            if not isinstance(data, dict) or "error" in data:
+                                                continue
+                                                
+                                            for field, field_data in data.items():
+                                                if field == "InvoiceNumber":
+                                                    if isinstance(field_data, dict):
+                                                        invoice_number = field_data.get("value", "unknown")
+                                                    else:
+                                                        invoice_number = field_data if field_data else "unknown"
+                                                elif field == "Total":
+                                                    if isinstance(field_data, dict):
+                                                        total_amount = field_data.get("value", "unknown")
+                                                    else:
+                                                        total_amount = field_data if field_data else "unknown"
+                                        
+                                        # Clean values for filename use
+                                        safe_invoice_number = ''.join(c for c in str(invoice_number) if c.isalnum() or c in '-_.')
+                                        safe_total_amount = ''.join(c for c in str(total_amount) if c.isalnum() or c in '-_.')
+                                        
+                                        base_filename = os.path.splitext(filename)[0]
+                                        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                                        
+                                        # Upload CSV to blob storage
+                                        csv_blob_name = f"{low_result_folder}{base_filename}_{safe_invoice_number}_{safe_total_amount}_{timestamp}.csv"
+                                        csv_success, csv_url = upload_to_blob_storage(
+                                            blob_service_client,
+                                            low_container,
+                                            csv_blob_name,
+                                            pdf_csv,
+                                            "text/csv"
+                                        )
+                                        
+                                        # Upload source document
+                                        source_success = False
+                                        source_url = None
+                                        
+                                        # Handle based on input method
+                                        input_method = st.session_state.get("input_method", "Unknown")
+                                        
+                                        if input_method == "Upload Files" and 'original_files' in st.session_state:
+                                            # Find original file
+                                            original_file = next((f for f in st.session_state.original_files 
+                                                                if hasattr(f, 'name') and f.name == filename), None)
+                                            
+                                            if original_file:
+                                                # Reset position and read content
+                                                original_file.seek(0)
+                                                file_content = original_file.read()
+                                                
+                                                # Upload to source folder
+                                                source_blob_name = f"{low_source_folder}{filename}"
+                                                source_success, source_url = upload_to_blob_storage(
+                                                    blob_service_client,
+                                                    low_container,
+                                                    source_blob_name,
+                                                    file_content,
+                                                    "application/pdf"
+                                                )
+                                        
+                                        elif input_method == "Azure Blob Storage" and 'original_files' in st.session_state:
+                                            try:
+                                                # For blob storage, find the original blob
+                                                blob_name = next((b for b in st.session_state.original_files 
+                                                                if isinstance(b, str) and b.endswith(filename)), None)
+                                                
+                                                if blob_name and 'blob_container' in st.session_state:
+                                                    source_container = st.session_state.blob_container
+                                                    
+                                                    # Download blob content
+                                                    blob_content = download_blob_to_memory(
+                                                        blob_service_client, 
+                                                        source_container, 
+                                                        blob_name
+                                                    )
+                                                    
+                                                    if blob_content:
+                                                        # Upload to destination
+                                                        source_blob_name = f"{low_source_folder}{filename}"
+                                                        source_success, source_url = upload_to_blob_storage(
+                                                            blob_service_client,
+                                                            low_container,
+                                                            source_blob_name,
+                                                            blob_content,
+                                                            "application/pdf"
+                                                        )
+                                            except Exception as e:
+                                                st.warning(f"Error copying source document: {str(e)}")
+                                        
+                                        # Mark as processed
+                                        st.session_state.processed_docs[filename] = True
+                                        
+                                        # Add to results
+                                        upload_results.append({
+                                            "filename": filename,
+                                            "csv_success": csv_success,
+                                            "csv_url": csv_url if csv_success else None,
+                                            "source_success": source_success,
+                                            "source_url": source_url if source_success else None
+                                        })
+                                
+                                except Exception as e:
+                                    st.error(f"Error processing {filename}: {str(e)}")
+                                    upload_results.append({
+                                        "filename": filename,
+                                        "error": str(e)
+                                    })
+                            
+                            # Display upload results
+                            if upload_results:
+                                st.subheader("Upload Results")
+                                
+                                upload_rows = []
+                                for result in upload_results:
+                                    if "error" in result:
+                                        upload_rows.append({
+                                            "Filename": result["filename"],
+                                            "Status": "❌ Error",
+                                            "CSV": "❌",
+                                            "Source Document": "❌",
+                                            "Error": result["error"]
+                                        })
+                                    else:
+                                        upload_rows.append({
+                                            "Filename": result["filename"],
+                                            "Status": "✅ Uploaded",
+                                            "CSV": "✅" if result["csv_success"] else "❌",
+                                            "Source Document": "✅" if result["source_success"] else "❌",
+                                            "Error": ""
+                                        })
+                                
+                                upload_df = pd.DataFrame(upload_rows)
+                                st.dataframe(upload_df, use_container_width=True)
+                                
+                                # Success message
+                                success_count = sum(1 for r in upload_results if "error" not in r)
+                                st.success(f"Successfully uploaded {success_count} of {len(upload_results)} documents")
+            else:
+                st.info("No validated low confidence documents available for upload")
+        else:
+            st.info("No low confidence documents found.")
