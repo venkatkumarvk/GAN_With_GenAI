@@ -1,0 +1,303 @@
+# Optional: Upload to Azure Blob Storage 
+if 'all_pdf_results' in st.session_state and st.session_state.all_pdf_results and blob_service_client:
+    with st.expander("Upload Results to Azure Blob Storage"):
+        result_upload_container = st.text_input(
+            "Output Container Name",
+            value=azure_storage_container_name,
+            help="Container where results will be uploaded (will be created if doesn't exist)"
+        )
+        
+        if st.button("Upload Results to Blob Storage"):
+            with st.spinner("Uploading results..."):
+                all_pdf_results = st.session_state.all_pdf_results
+                timestamp = st.session_state.last_processing_timestamp or datetime.now().strftime("%Y%m%d_%H%M%S")
+                
+                blob_upload_results = []
+                
+                # Create container if it doesn't exist
+                container_client = blob_service_client.get_container_client(result_upload_container)
+                if not container_client.exists():
+                    container_client.create_container()
+                
+                # Define vendor list for matching
+                vendor_keywords = {
+                    "Cadwell": ["cadwell"],
+                    "Rhythmlink": ["rhythmlink", "rhythm"],
+                    "Ives": ["ives", "egg"],
+                    "Neurovision": ["neurovision", "neuro"],
+                    "Medronics": ["medronics", "medtronic", "mdt"]
+                }
+                
+                # Process each PDF result
+                for pdf_result in all_pdf_results:
+                    filename = pdf_result["filename"]
+                    base_filename = os.path.splitext(filename)[0]
+                    
+                    # Determine vendor from filename
+                    detected_vendor = "Other"  # Default folder
+                    filename_lower = filename.lower()
+                    
+                    for vendor, keywords in vendor_keywords.items():
+                        if any(keyword in filename_lower for keyword in keywords):
+                            detected_vendor = vendor
+                            break
+                    
+                    # Create the text content with key-value pairs
+                    page_results_text = create_page_results_text(pdf_result)
+                    
+                    # Create timestamp filename
+                    timestamp_filename = f"{base_filename}_{timestamp}"
+                    
+                    # Determine confidence level for this PDF
+                    is_high_confidence = has_high_confidence(pdf_result, threshold=95.0)
+                    confidence_subfolder = "high_confidence" if is_high_confidence else "low_confidence"
+                    
+                    # Extract invoice number and total for filename
+                    invoice_number = "unknown"
+                    total_amount = "unknown"
+                    
+                    # Look through the data to find invoice number and total
+                    for page in pdf_result["pages"]:
+                        data = page["data"]
+                        if not isinstance(data, dict) or "error" in data:
+                            continue
+                            
+                        for field, field_data in data.items():
+                            if field == "InvoiceNumber":
+                                if isinstance(field_data, dict):
+                                    invoice_number = field_data.get("value", "unknown")
+                                else:
+                                    invoice_number = field_data if field_data else "unknown"
+                            elif field == "Total":
+                                if isinstance(field_data, dict):
+                                    total_amount = field_data.get("value", "unknown")
+                                else:
+                                    total_amount = field_data if field_data else "unknown"
+                    
+                    # Clean values for filename use
+                    safe_invoice_number = ''.join(c for c in str(invoice_number) if c.isalnum() or c in '-_.')
+                    safe_total_amount = ''.join(c for c in str(total_amount) if c.isalnum() or c in '-_.')
+                    
+                    # Create the blob paths with proper folder structure
+                    processed_result_path = f"ProcessedResult/{detected_vendor}/{confidence_subfolder}"
+                    source_document_path = "SourceDocument"
+                    
+                    # Set the filenames
+                    txt_blob_name = f"{processed_result_path}/{base_filename}_{safe_invoice_number}_{safe_total_amount}_{timestamp}.txt"
+                    csv_blob_name = f"{processed_result_path}/{base_filename}_{safe_invoice_number}_{safe_total_amount}_{timestamp}.csv"
+                    json_blob_name = f"{processed_result_path}/{base_filename}_{safe_invoice_number}_{safe_total_amount}_{timestamp}.json"
+                    pdf_copy_blob_name = f"{source_document_path}/{filename}_{timestamp}.pdf"
+                    
+                    # Upload text file to blob storage
+                    text_success, text_url = upload_to_blob_storage(
+                        blob_service_client,
+                        result_upload_container,
+                        txt_blob_name,
+                        page_results_text,
+                        "text/plain"
+                    )
+                    
+                    # Upload JSON to blob storage
+                    pdf_json = json.dumps(pdf_result, ensure_ascii=False, indent=2)
+                    json_success, json_url = upload_to_blob_storage(
+                        blob_service_client,
+                        result_upload_container,
+                        json_blob_name,
+                        pdf_json,
+                        "application/json"
+                    )
+                    
+                    # Upload CSV with extracted data
+                    try:
+                        # Create a DataFrame for just this PDF
+                        pdf_rows = []
+                        for page in pdf_result["pages"]:
+                            page_num = page["page"]
+                            data = page["data"]
+                            
+                            # Check for errors
+                            if "error" in data:
+                                row_data = {"Page": page_num, "Extraction_Timestamp": timestamp}
+                                for field in ["VendorName", "InvoiceNumber", "InvoiceDate", "CustomerName", 
+                                            "PurchaseOrder", "StockCode", "UnitPrice", "InvoiceAmount", 
+                                            "Freight", "Salestax", "Total"]:
+                                    row_data[field] = "N/A"
+                                    row_data[f"{field} Confidence"] = 0
+                                
+                                # Add edit tracking columns
+                                row_data["Manually_Edited_Fields"] = ""
+                                row_data["Edit_Timestamp"] = ""
+                                row_data["Original_Values"] = ""
+                                row_data["Manual_Edit"] = "N"
+                                
+                                pdf_rows.append(row_data)
+                                continue
+                            
+                            # Initialize row data
+                            row_data = {"Page": page_num, "Extraction_Timestamp": timestamp}
+                            
+                            # Process each field
+                            for field in ["VendorName", "InvoiceNumber", "InvoiceDate", "CustomerName", 
+                                        "PurchaseOrder", "StockCode", "UnitPrice", "InvoiceAmount", 
+                                        "Freight", "Salestax", "Total"]:
+                                field_data = data.get(field, {})
+                                
+                                if isinstance(field_data, dict):
+                                    value = field_data.get("value", "N/A")
+                                    confidence = field_data.get("confidence", 0)
+                                else:
+                                    value = field_data if field_data else "N/A"
+                                    confidence = 0
+                                
+                                # Add to row data
+                                row_data[field] = value
+                                row_data[f"{field} Confidence"] = round(confidence * 100, 2)
+                            
+                            # Add edit tracking columns
+                            edited_fields_with_values = []
+                            latest_edit_timestamp = ""
+                            original_values = []
+                            has_manual_edits = False
+                            
+                            # Check manual edit tracking info
+                            if ('manual_edit_tracking' in st.session_state and 
+                                filename in st.session_state.manual_edit_tracking and 
+                                str(page_num) in st.session_state.manual_edit_tracking[filename]):
+                                
+                                # Get the edit tracking info for this page
+                                edit_info = st.session_state.manual_edit_tracking[filename][str(page_num)]
+                                
+                                # Get the most recent edit timestamp
+                                timestamps = []
+                                
+                                for field, info in edit_info.items():
+                                    if info.get("edited", False):
+                                        has_manual_edits = True
+                                        
+                                        # Get the current (edited) value for this field
+                                        current_value = row_data.get(field, "N/A")
+                                        # Add field name and its value
+                                        edited_fields_with_values.append(f"{field}: {current_value}")
+                                        
+                                        # Add timestamp to list (for finding the most recent)
+                                        if "edit_timestamp" in info:
+                                            timestamps.append(info["edit_timestamp"])
+                                        
+                                        original_values.append(f"{field}: {info.get('previous_value', 'N/A')}")
+                                
+                                # Use the most recent timestamp for Edit_Timestamp
+                                if timestamps:
+                                    latest_edit_timestamp = max(timestamps)  # Get the most recent timestamp
+                            
+                            row_data["Manually_Edited_Fields"] = "; ".join(edited_fields_with_values) if edited_fields_with_values else ""
+                            row_data["Edit_Timestamp"] = latest_edit_timestamp  # Just the timestamp, no field name
+                            row_data["Original_Values"] = "; ".join(original_values) if original_values else ""
+                            row_data["Manual_Edit"] = "Y" if has_manual_edits else "N"
+                            
+                            # Add vendor
+                            row_data["Vendor"] = detected_vendor
+                            row_data["Confidence_Level"] = "High (≥95%)" if is_high_confidence else "Low (<95%)"
+                            
+                            # Add completed row to rows
+                            pdf_rows.append(row_data)
+                        
+                        # Create DataFrame and CSV for this PDF
+                        if pdf_rows:
+                            pdf_df = pd.DataFrame(pdf_rows, dtype=str)
+                            pdf_csv = pdf_df.to_csv(index=False)
+                            
+                            # Upload CSV to blob storage
+                            csv_success, csv_url = upload_to_blob_storage(
+                                blob_service_client,
+                                result_upload_container,
+                                csv_blob_name,
+                                pdf_csv,
+                                "text/csv"
+                            )
+                        else:
+                            csv_success, csv_url = False, None
+                    except Exception as e:
+                        st.warning(f"Could not create CSV for {filename}: {e}")
+                        csv_success, csv_url = False, None
+                    
+                    # Copy the source PDF if it's available
+                    pdf_copy_success = False
+                    pdf_copy_url = None
+                    
+                    # Check if we can find the original PDF file
+                    if input_method == "Upload Files" and 'original_files' in st.session_state:
+                        # For uploaded files
+                        file_obj = next((f for f in st.session_state.original_files if hasattr(f, 'name') and f.name == filename), None)
+                        
+                        if file_obj:
+                            try:
+                                # Get position and content
+                                pos = file_obj.tell()
+                                pdf_content = file_obj.getvalue()
+                                file_obj.seek(pos)  # Reset position
+                                
+                                # Upload to blob storage
+                                pdf_copy_success, pdf_copy_url = upload_to_blob_storage(
+                                    blob_service_client,
+                                    result_upload_container,
+                                    pdf_copy_blob_name,
+                                    pdf_content,
+                                    "application/pdf"
+                                )
+                            except Exception as e:
+                                st.warning(f"Could not copy PDF file {filename}: {e}")
+                    elif input_method == "Azure Blob Storage" and blob_service_client and 'blob_container' in st.session_state:
+                        try:
+                            # Find the original blob
+                            source_container = st.session_state.blob_container
+                            source_blob_name = next((b for b in st.session_state.original_files if b.split('/')[-1] == filename), None)
+                            
+                            if source_blob_name:
+                                # Download from source container
+                                pdf_content = download_blob_to_memory(blob_service_client, source_container, source_blob_name)
+                                
+                                if pdf_content:
+                                    # Upload to destination container
+                                    pdf_copy_success, pdf_copy_url = upload_to_blob_storage(
+                                        blob_service_client,
+                                        result_upload_container,
+                                        pdf_copy_blob_name,
+                                        pdf_content,
+                                        "application/pdf"
+                                    )
+                        except Exception as e:
+                            st.warning(f"Could not copy PDF blob {filename}: {e}")
+                    
+                    # Store results including PDF copy status
+                    blob_upload_results.append({
+                        "filename": filename,
+                        "vendor": detected_vendor,
+                        "confidence_level": "High (≥95%)" if is_high_confidence else "Low (<95%)",
+                        "text_success": text_success,
+                        "text_url": text_url if text_success else None,
+                        "json_success": json_success,
+                        "json_url": json_url if json_success else None,
+                        "csv_success": csv_success,
+                        "csv_url": csv_url if csv_success else None,
+                        "pdf_copy_success": pdf_copy_success,
+                        "pdf_copy_url": pdf_copy_url if pdf_copy_success else None
+                    })
+                
+                # Display upload results
+                st.subheader("Azure Blob Storage Upload Results")
+                
+                # Create a table to show upload results
+                upload_rows = []
+                for result in blob_upload_results:
+                    upload_rows.append({
+                        "Filename": result["filename"],
+                        "Vendor": result["vendor"],
+                        "Confidence": result["confidence_level"],
+                        "Text File": "✅ Uploaded" if result["text_success"] else "❌ Failed",
+                        "JSON File": "✅ Uploaded" if result["json_success"] else "❌ Failed",
+                        "CSV File": "✅ Uploaded" if result["csv_success"] else "❌ Failed",
+                        "PDF Copy": "✅ Uploaded" if result["pdf_copy_success"] else "❌ Failed"
+                    })
+                
+                upload_df = pd.DataFrame(upload_rows)
+                st.dataframe(upload_df, use_container_width=True)
