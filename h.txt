@@ -1,3 +1,60 @@
+def identify_vendor_from_filename(filename):
+    """
+    Identify vendor name from PDF filename.
+    
+    Parameters:
+    - filename: PDF filename
+    
+    Returns:
+    - Vendor name or "Unknown" if not identifiable
+    """
+    # List of known vendors
+    vendors = ["Cadwell", "Rhythmlink", "Ives", "Neurovision", "Medronics"]
+    
+    # Check if any vendor name is in the filename
+    filename_lower = filename.lower()
+    for vendor in vendors:
+        if vendor.lower() in filename_lower:
+            return vendor
+    
+    # If no match found, return Unknown
+    return "Unknown"
+
+def copy_to_source_documents(blob_service_client, container_name, file_content, filename):
+    """
+    Copy a file to the SourceDocument folder in the Azure Blob Storage.
+    
+    Parameters:
+    - blob_service_client: Azure Blob Service client
+    - container_name: Container name
+    - file_content: File content as bytes
+    - filename: Original filename
+    
+    Returns:
+    - (success, url) tuple
+    """
+    try:
+        # Generate timestamp
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        
+        # Create blob name with timestamp
+        blob_name = f"SourceDocument/{filename}_{timestamp}.pdf"
+        
+        # Upload blob
+        container_client = blob_service_client.get_container_client(container_name)
+        blob_client = container_client.get_blob_client(blob_name)
+        
+        # Set content settings
+        content_settings = ContentSettings(content_type="application/pdf")
+        
+        # Upload file
+        blob_client.upload_blob(file_content, overwrite=True, content_settings=content_settings)
+        
+        return True, blob_client.url
+    except Exception as e:
+        st.error(f"Error copying to SourceDocument: {str(e)}")
+        return False, None
+
 # In the "Upload Results to Azure Blob Storage" section
 if st.button("Upload Results to Blob Storage"):
     with st.spinner("Uploading results..."):
