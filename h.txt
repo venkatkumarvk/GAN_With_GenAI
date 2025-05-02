@@ -1,45 +1,7 @@
-def detect_vendor_from_filename(filename):
-    """
-    Detect vendor from filename based on keywords.
-    Returns the appropriate vendor folder name.
-    """
-    filename_lower = filename.lower()
-    
-    # Define vendor mappings
-    vendor_keywords = {
-        "cadwell": "Cadwell",
-        "rhythmlink": "Rhythmlink",
-        "ives": "Ives_EEG",  # Assuming "Ives egg" means "Ives_EEG"
-        "egg": "Ives_EEG",
-        "neurovision": "Neurovision",
-        "medtronics": "Medronics",
-        "medtronic": "Medronics"
-    }
-    
-    # Check for vendor keywords in the filename
-    for keyword, vendor_folder in vendor_keywords.items():
-        if keyword in filename_lower:
-            return vendor_folder
-    
-    # Default to "Other" if no vendor is detected
-    return "Other"
+# In the Azure Blob Storage upload section (Part 11)
+# After creating the confidence folder structure
 
-###Main function
-# Optional: Upload to Azure Blob Storage 
-if 'all_pdf_results' in st.session_state and st.session_state.all_pdf_results and blob_service_client:
-    with st.expander("Upload Results to Azure Blob Storage"):
-        result_upload_container = st.text_input(
-            "Output Container Name",
-            value=azure_storage_container_name,
-            help="Container where results will be uploaded (will be created if doesn't exist)"
-        )
-        
-        if st.button("Upload Results to Blob Storage"):
-            with st.spinner("Uploading results..."):
-                # Your existing upload code
-
-#replace portion
-# Optional: Upload to Azure Blob Storage 
+# Modified blob storage upload code
 if 'all_pdf_results' in st.session_state and st.session_state.all_pdf_results and blob_service_client:
     with st.expander("Upload Results to Azure Blob Storage"):
         result_upload_container = st.text_input(
@@ -51,7 +13,7 @@ if 'all_pdf_results' in st.session_state and st.session_state.all_pdf_results an
         if st.button("Upload Results to Blob Storage"):
             with st.spinner("Uploading results..."):
                 all_pdf_results = st.session_state.all_pdf_results
-                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                timestamp = st.session_state.last_processing_timestamp or datetime.now().strftime("%Y%m%d_%H%M%S")
                 
                 blob_upload_results = []
                 
@@ -59,85 +21,74 @@ if 'all_pdf_results' in st.session_state and st.session_state.all_pdf_results an
                     filename = pdf_result["filename"]
                     base_filename = os.path.splitext(filename)[0]
                     
-                    # Determine confidence level
-                    is_high_confidence = has_high_confidence(pdf_result, threshold=95.0)
-                    confidence_folder = "high_confidence/" if is_high_confidence else "low_confidence/"
-                    
-                    # Detect vendor from filename
-                    vendor_folder = detect_vendor_from_filename(filename)
-                    
-                    # Extract invoice number and total for filename
-                    invoice_number = "unknown"
-                    total_amount = "unknown"
-                    
-                    # Look through the data to find invoice number and total
-                    for page in pdf_result["pages"]:
-                        data = page["data"]
-                        if not isinstance(data, dict) or "error" in data:
-                            continue
-                            
-                        for field, field_data in data.items():
-                            if field == "InvoiceNumber":
-                                if isinstance(field_data, dict):
-                                    invoice_number = field_data.get("value", "unknown")
-                                else:
-                                    invoice_number = field_data if field_data else "unknown"
-                            elif field == "Total":
-                                if isinstance(field_data, dict):
-                                    total_amount = field_data.get("value", "unknown")
-                                else:
-                                    total_amount = field_data if field_data else "unknown"
-                    
-                    # Clean values for filename use
-                    safe_invoice_number = ''.join(c for c in str(invoice_number) if c.isalnum() or c in '-_.')
-                    safe_total_amount = ''.join(c for c in str(total_amount) if c.isalnum() or c in '-_.')
+                    # Identify vendor for folder organization
+                    vendor_folder = identify_vendor(filename)
                     
                     # Create the text content with key-value pairs
                     page_results_text = create_page_results_text(pdf_result)
                     
                     # Create timestamp filename
-                    timestamp_filename = f"{base_filename}_{safe_invoice_number}_{safe_total_amount}_{timestamp}"
+                    timestamp_filename = f"{base_filename}_{timestamp}"
+                    
+                    # Determine confidence level
+                    is_high_confidence = has_high_confidence(pdf_result, threshold=95.0)
+                    confidence_folder = "high_confidence" if is_high_confidence else "low_confidence"
                     
                     # Copy source document to SourceDocument folder
-                    source_success = False
-                    source_url = None
-                    
-                    # Get original PDF content
-                    if 'original_files' in st.session_state and isinstance(st.session_state.original_files, list):
-                        for orig_file in st.session_state.original_files:
-                            if isinstance(orig_file, str) and orig_file.endswith(filename):
-                                # It's a blob path, download it
-                                source_content = download_blob_to_memory(blob_service_client, result_upload_container, orig_file)
-                                if source_content:
+                    if input_method == "Upload Files":
+                        # For uploaded files, find the original file
+                        file_obj = next((f for f in st.session_state.original_files if hasattr(f, 'name') and f.name == filename), None)
+                        
+                        if file_obj:
+                            # Get file position and reset after use
+                            pos = file_obj.tell()
+                            pdf_content = file_obj.read()
+                            file_obj.seek(pos)
+                            
+                            # Upload to SourceDocument folder
+                            source_blob_name = f"SourceDocument/{base_filename}_{timestamp}.pdf"
+                            source_success, source_url = upload_to_blob_storage(
+                                blob_service_client,
+                                result_upload_container,
+                                source_blob_name,
+                                pdf_content,
+                                "application/pdf"
+                            )
+                        else:
+                            source_success, source_url = False, None
+                    else:
+                        # For blob storage, copy blob to SourceDocument folder
+                        try:
+                            # Find original blob path
+                            original_blob = next((b for b in st.session_state.original_files if b.split('/')[-1] == filename), None)
+                            
+                            if original_blob:
+                                # Download blob content
+                                blob_content = download_blob_to_memory(blob_service_client, selected_container, original_blob)
+                                
+                                if blob_content:
                                     # Upload to SourceDocument folder
                                     source_blob_name = f"SourceDocument/{base_filename}_{timestamp}.pdf"
                                     source_success, source_url = upload_to_blob_storage(
                                         blob_service_client,
                                         result_upload_container,
                                         source_blob_name,
-                                        source_content,
+                                        blob_content,
                                         "application/pdf"
                                     )
-                                break
-                            elif hasattr(orig_file, 'name') and orig_file.name == filename:
-                                # It's an uploaded file
-                                pos = orig_file.tell()
-                                source_content = orig_file.read()
-                                orig_file.seek(pos)  # Reset file position
-                                
-                                # Upload to SourceDocument folder
-                                source_blob_name = f"SourceDocument/{base_filename}_{timestamp}.pdf"
-                                source_success, source_url = upload_to_blob_storage(
-                                    blob_service_client,
-                                    result_upload_container,
-                                    source_blob_name,
-                                    source_content,
-                                    "application/pdf"
-                                )
-                                break
+                                else:
+                                    source_success, source_url = False, None
+                            else:
+                                source_success, source_url = False, None
+                        except Exception as e:
+                            st.warning(f"Could not copy source document: {str(e)}")
+                            source_success, source_url = False, None
                     
-                    # Upload text file to ProcessedResult folder
-                    text_blob_name = f"ProcessedResult/{vendor_folder}/{confidence_folder}{timestamp_filename}.txt"
+                    # Store results in ProcessedResult folder with vendor subfolder
+                    processed_folder = f"ProcessedResult/{vendor_folder}/{confidence_folder}"
+                    
+                    # Upload text file to blob storage
+                    text_blob_name = f"{processed_folder}/{timestamp_filename}.txt"
                     text_success, text_url = upload_to_blob_storage(
                         blob_service_client,
                         result_upload_container,
@@ -146,8 +97,8 @@ if 'all_pdf_results' in st.session_state and st.session_state.all_pdf_results an
                         "text/plain"
                     )
                     
-                    # Upload JSON to ProcessedResult folder
-                    json_blob_name = f"ProcessedResult/{vendor_folder}/{confidence_folder}{timestamp_filename}.json"
+                    # Upload JSON to blob storage
+                    json_blob_name = f"{processed_folder}/{timestamp_filename}.json"
                     pdf_json = json.dumps(pdf_result, ensure_ascii=False, indent=2)
                     json_success, json_url = upload_to_blob_storage(
                         blob_service_client,
@@ -157,7 +108,7 @@ if 'all_pdf_results' in st.session_state and st.session_state.all_pdf_results an
                         "application/json"
                     )
                     
-                    # Upload CSV to ProcessedResult folder
+                    # Upload CSV to blob storage
                     try:
                         # Create a DataFrame for just this PDF
                         pdf_rows = []
@@ -173,18 +124,11 @@ if 'all_pdf_results' in st.session_state and st.session_state.all_pdf_results an
                                             "Freight", "Salestax", "Total"]:
                                     row_data[field] = "N/A"
                                     row_data[f"{field} Confidence"] = 0
-                                
-                                # Add edit tracking columns
-                                row_data["Manually_Edited_Fields"] = ""
-                                row_data["Edit_Timestamp"] = ""
-                                row_data["Original_Values"] = ""
-                                row_data["Manual_Edit"] = "N"
-                                
                                 pdf_rows.append(row_data)
                                 continue
                             
                             # Initialize row data
-                            row_data = {"Page": page_num, "Extraction_Timestamp": page.get("extraction_timestamp", "")}
+                            row_data = {"Page": page_num}
                             
                             # Process each field
                             for field in ["VendorName", "InvoiceNumber", "InvoiceDate", "CustomerName", 
@@ -203,47 +147,6 @@ if 'all_pdf_results' in st.session_state and st.session_state.all_pdf_results an
                                 row_data[field] = value
                                 row_data[f"{field} Confidence"] = round(confidence * 100, 2)
                             
-                            # Add edit tracking columns
-                            edited_fields_with_values = []
-                            latest_edit_timestamp = ""
-                            original_values = []
-                            has_manual_edits = False
-                            
-                            # Check manual edit tracking info
-                            if ('manual_edit_tracking' in st.session_state and 
-                                filename in st.session_state.manual_edit_tracking and 
-                                str(page_num) in st.session_state.manual_edit_tracking[filename]):
-                                
-                                # Get the edit tracking info for this page
-                                edit_info = st.session_state.manual_edit_tracking[filename][str(page_num)]
-                                
-                                # Get the most recent edit timestamp
-                                timestamps = []
-                                
-                                for field, info in edit_info.items():
-                                    if info.get("edited", False):
-                                        has_manual_edits = True
-                                        
-                                        # Get the current (edited) value for this field
-                                        current_value = row_data.get(field, "N/A")
-                                        # Add field name and its value
-                                        edited_fields_with_values.append(f"{field}: {current_value}")
-                                        
-                                        # Add timestamp to list (for finding the most recent)
-                                        if "edit_timestamp" in info:
-                                            timestamps.append(info["edit_timestamp"])
-                                        
-                                        original_values.append(f"{field}: {info.get('previous_value', 'N/A')}")
-                                
-                                # Use the most recent timestamp for Edit_Timestamp
-                                if timestamps:
-                                    latest_edit_timestamp = max(timestamps)
-                            
-                            row_data["Manually_Edited_Fields"] = "; ".join(edited_fields_with_values) if edited_fields_with_values else ""
-                            row_data["Edit_Timestamp"] = latest_edit_timestamp
-                            row_data["Original_Values"] = "; ".join(original_values) if original_values else ""
-                            row_data["Manual_Edit"] = "Y" if has_manual_edits else "N"
-                            
                             # Add completed row to rows
                             pdf_rows.append(row_data)
                         
@@ -253,7 +156,7 @@ if 'all_pdf_results' in st.session_state and st.session_state.all_pdf_results an
                             pdf_csv = pdf_df.to_csv(index=False)
                             
                             # Upload CSV to blob storage
-                            csv_blob_name = f"ProcessedResult/{vendor_folder}/{confidence_folder}{timestamp_filename}.csv"
+                            csv_blob_name = f"{processed_folder}/{timestamp_filename}.csv"
                             csv_success, csv_url = upload_to_blob_storage(
                                 blob_service_client,
                                 result_upload_container,
@@ -273,13 +176,9 @@ if 'all_pdf_results' in st.session_state and st.session_state.all_pdf_results an
                         "vendor": vendor_folder,
                         "confidence": "High" if is_high_confidence else "Low",
                         "source_success": source_success,
-                        "source_url": source_url if source_success else None,
                         "text_success": text_success,
-                        "text_url": text_url if text_success else None,
                         "json_success": json_success,
-                        "json_url": json_url if json_success else None,
-                        "csv_success": csv_success,
-                        "csv_url": csv_url if csv_success else None
+                        "csv_success": csv_success
                     })
                 
                 # Display upload results
@@ -292,10 +191,10 @@ if 'all_pdf_results' in st.session_state and st.session_state.all_pdf_results an
                         "Filename": result["filename"],
                         "Vendor": result["vendor"],
                         "Confidence": result["confidence"],
-                        "Source File": "✅ Uploaded" if result["source_success"] else "❌ Failed",
+                        "Source PDF": "✅ Copied" if result.get("source_success", False) else "❌ Failed",
                         "Text File": "✅ Uploaded" if result["text_success"] else "❌ Failed",
                         "JSON File": "✅ Uploaded" if result["json_success"] else "❌ Failed",
-                        "CSV File": "✅ Uploaded" if result["csv_success"] else "❌ Failed"
+                        "CSV File": "✅ Uploaded" if result.get("csv_success", False) else "❌ Failed"
                     })
                 
                 upload_df = pd.DataFrame(upload_rows)
