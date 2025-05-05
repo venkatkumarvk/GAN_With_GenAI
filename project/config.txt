@@ -1,0 +1,34 @@
+{
+  "azure_openai": {
+    "api_key": "YOUR_AZURE_OPENAI_API_KEY",
+    "api_version": "2025-03-01-preview",
+    "azure_endpoint": "YOUR_AZURE_OPENAI_ENDPOINT",
+    "deployment_name": "YOUR_DEPLOYMENT_NAME"
+  },
+  "azure_storage": {
+    "connection_string": "YOUR_AZURE_STORAGE_CONNECTION_STRING",
+    "input_container": "pdf-input",
+    "output_container": "pdf-extraction-results",
+    "high_confidence_folder": "high_confidence/",
+    "low_confidence_folder": "low_confidence/"
+  },
+  "processing": {
+    "confidence_threshold": 95.0,
+    "batch_size": 10,
+    "zoom_factor": 1.5,
+    "timeout_seconds": 600,
+    "extraction_fields": [
+      "VendorName", 
+      "InvoiceNumber", 
+      "InvoiceDate", 
+      "CustomerName", 
+      "PurchaseOrder", 
+      "StockCode", 
+      "UnitPrice", 
+      "InvoiceAmount", 
+      "Freight", 
+      "Salestax", 
+      "Total"
+    ]
+  }
+}
