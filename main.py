@@ -1,3 +1,4 @@
+# main.py
 import streamlit as st
 import pandas as pd
 import os
@@ -19,7 +20,7 @@ from helper_functions import (
     get_filename_from_blob_path,
     match_source_and_processed_files,
     apply_edits_to_csv,
-    render_pdf_preview
+    get_pdf_page_count
 )
 
 # App title and configuration
@@ -50,10 +51,16 @@ if 'confidence_selection' not in st.session_state:
     st.session_state.confidence_selection = "high_confidence"
 if 'validation_results' not in st.session_state:
     st.session_state.validation_results = {}
-if 'selected_pdf_blob' not in st.session_state:
-    st.session_state.selected_pdf_blob = None
+if 'selected_file_idx' not in st.session_state:
+    st.session_state.selected_file_idx = 0
 if 'pdf_content' not in st.session_state:
     st.session_state.pdf_content = None
+if 'pdf_page_count' not in st.session_state:
+    st.session_state.pdf_page_count = 0
+if 'current_page' not in st.session_state:
+    st.session_state.current_page = 1
+if 'csv_df' not in st.session_state:
+    st.session_state.csv_df = None
 
 # Add sidebar with confidence selection
 st.sidebar.title("Options")
@@ -69,9 +76,10 @@ if confidence_selection != st.session_state.confidence_selection:
     st.session_state.confidence_selection = confidence_selection
     st.session_state.current_file_index = 0  # Reset file index when changing confidence level
     st.session_state.edited_data = {}  # Clear edits
-    st.session_state.validation_results = {}  # Clear validation
-    st.session_state.selected_pdf_blob = None  # Clear selected PDF
-    st.session_state.pdf_content = None  # Clear PDF content
+    st.session_state.validation_results = {} # Clear validation
+    st.session_state.pdf_content = None
+    st.session_state.csv_df = None
+    st.session_state.selected_file_idx = 0
 
 # Set paths based on config and confidence selection
 container_name = config["container_name"]
@@ -89,34 +97,61 @@ processed_blobs = list_blobs_with_prefix(blob_service_client, container_name, pr
 # Match source PDFs with their processed CSV results
 matched_files = match_source_and_processed_files(source_blobs, processed_blobs)
 
-# PDF Preview Sidebar
-st.sidebar.header("PDF Preview")
-if matched_files:
-    # Create a selectbox for PDF selection in the sidebar
-    pdf_options = [match["base_name"] for match in matched_files]
-    selected_pdf_idx = st.sidebar.selectbox(
-        "Select PDF to preview",
-        range(len(pdf_options)),
-        format_func=lambda i: pdf_options[i],
-        key="sidebar_pdf_selector"
-    )
-    
-    # Load the selected PDF for preview
-    if selected_pdf_idx is not None:
-        selected_pdf_blob = matched_files[selected_pdf_idx]["source_blob"]
-        
-        # Only reload the PDF if it's different from the currently selected one
-        if selected_pdf_blob != st.session_state.selected_pdf_blob:
-            st.session_state.selected_pdf_blob = selected_pdf_blob
-            st.session_state.pdf_content = download_blob_to_memory(
-                blob_service_client, container_name, selected_pdf_blob
-            )
-        
-        # Display the PDF preview in the sidebar
-        if st.session_state.pdf_content:
-            render_pdf_preview(st.session_state.pdf_content, height=400)
+# PDF Selector in Sidebar
+st.sidebar.markdown("---")
+st.sidebar.subheader("File Selection")
+
+if not matched_files:
+    st.sidebar.warning("No matched files found.")
 else:
-    st.sidebar.info("No PDF files available for preview")
+    # File selector dropdown in sidebar
+    selected_file_idx = st.sidebar.selectbox(
+        "Select a file",
+        range(len(matched_files)),
+        format_func=lambda x: matched_files[x]["base_name"],
+        index=st.session_state.selected_file_idx
+    )
+
+    # Update the selected file in session state
+    if selected_file_idx != st.session_state.selected_file_idx:
+        st.session_state.selected_file_idx = selected_file_idx
+        st.session_state.pdf_content = None  # Reset PDF content when changing files
+        st.session_state.csv_df = None
+        st.session_state.current_page = 1
+
+    # Load PDF and CSV for selected file
+    if st.session_state.pdf_content is None:
+        source_blob = matched_files[selected_file_idx]["source_blob"]
+        st.session_state.pdf_content = download_blob_to_memory(blob_service_client, container_name, source_blob)
+        if st.session_state.pdf_content:
+            st.session_state.pdf_page_count = get_pdf_page_count(st.session_state.pdf_content)
+
+    if st.session_state.csv_df is None:
+        processed_blob = matched_files[selected_file_idx]["processed_blob"]
+        st.session_state.csv_df = load_csv_from_blob(blob_service_client, container_name, processed_blob)
+
+    # Display PDF preview in sidebar
+    if st.session_state.pdf_content:
+        st.sidebar.markdown("---")
+        st.sidebar.subheader("PDF Preview")
+        
+        # Page navigation if multiple pages
+        if st.session_state.pdf_page_count > 1:
+            col1, col2 = st.sidebar.columns([3, 1])
+            
+            with col1:
+                st.session_state.current_page = st.slider(
+                    "Page", 
+                    min_value=1, 
+                    max_value=st.session_state.pdf_page_count,
+                    value=st.session_state.current_page
+                )
+            
+            with col2:
+                st.write(f"of {st.session_state.pdf_page_count}")
+        
+        base64_pdf = convert_pdf_to_base64(st.session_state.pdf_content)
+        display_pdf_viewer(base64_pdf, height=400)
 
 # Create tabs
 tabs = st.tabs(["Results View", "Manual Edit", "Bulk Operations"])
@@ -133,53 +168,33 @@ with tabs[0]:
         st.write(f"Found {len(matched_files)} matched files")
         st.dataframe(matched_df[["base_name", "source_blob", "processed_blob"]], use_container_width=True)
 
-        # Button to view file details
-        selected_file_idx = st.selectbox("Select file to view",
-                                        range(len(matched_files)),
-                                        format_func=lambda x: matched_files[x]["base_name"])
+        # Use already selected file from sidebar
+        st.write(f"Selected file: {matched_files[st.session_state.selected_file_idx]['base_name']}")
 
-        if st.button("View Selected File"):
-            source_blob = matched_files[selected_file_idx]["source_blob"]
-            processed_blob = matched_files[selected_file_idx]["processed_blob"]
-
-            # Display side by side: PDF and CSV results
-            col1, col2 = st.columns(2)
-
-            with col1:
-                st.subheader("PDF Document")
-                pdf_content = download_blob_to_memory(blob_service_client, container_name, source_blob)
-                if pdf_content:
-                    base64_pdf = convert_pdf_to_base64(pdf_content)
-                    display_pdf_viewer(base64_pdf)
-                else:
-                    st.error("Failed to load PDF")
-
-            with col2:
-                st.subheader("Extraction Results")
-                csv_df = load_csv_from_blob(blob_service_client, container_name, processed_blob)
-                if csv_df is not None:
-                    st.dataframe(csv_df, use_container_width=True)
-                else:
-                    st.error("Failed to load CSV results")
+        # Display the CSV results
+        if st.session_state.csv_df is not None:
+            st.subheader("Extraction Results")
+            st.dataframe(st.session_state.csv_df, use_container_width=True)
 
             # Evaluation metrics
-            if csv_df is not None:
-                st.subheader("Confidence Metrics")
+            st.subheader("Confidence Metrics")
 
-                # Calculate average confidence for all fields
-                confidence_cols = [col for col in csv_df.columns if col.endswith("Confidence")]
-                if confidence_cols:
-                    avg_confidence = csv_df[confidence_cols].mean().mean()
+            # Calculate average confidence for all fields
+            confidence_cols = [col for col in st.session_state.csv_df.columns if col.endswith("Confidence")]
+            if confidence_cols:
+                avg_confidence = st.session_state.csv_df[confidence_cols].mean().mean()
 
-                    # Display metrics
-                    metrics_cols = st.columns(3)
-                    metrics_cols[0].metric("Average Confidence", f"{avg_confidence:.2f}%")
-                    metrics_cols[1].metric("Fields Below 90%", sum((csv_df[confidence_cols] < 90).any(axis=1)))
-                    metrics_cols[2].metric("Fields Below 80%", sum((csv_df[confidence_cols] < 80).any(axis=1)))
+                # Display metrics
+                metrics_cols = st.columns(3)
+                metrics_cols[0].metric("Average Confidence", f"{avg_confidence:.2f}%")
+                metrics_cols[1].metric("Fields Below 95%", sum((st.session_state.csv_df[confidence_cols] < 95).any(axis=1)))
+                metrics_cols[2].metric("Fields Below 80%", sum((st.session_state.csv_df[confidence_cols] < 80).any(axis=1)))
 
-                    # Display confidence distribution
-                    st.subheader("Confidence Distribution")
-                    st.bar_chart(csv_df[confidence_cols].mean())
+                # Display confidence distribution
+                st.subheader("Confidence Distribution")
+                st.bar_chart(st.session_state.csv_df[confidence_cols].mean())
+        else:
+            st.error("Failed to load CSV results")
 
 # Tab 2: Manual Edit
 with tabs[1]:
@@ -188,179 +203,163 @@ with tabs[1]:
     if not matched_files:
         st.warning("No matched files found to edit.")
     else:
-        # File selection for editing
-        edit_file_idx = st.selectbox("Select file to edit",
-                                     range(len(matched_files)),
-                                     format_func=lambda x: matched_files[x]["base_name"],
-                                     key="edit_file_selector")
+        # Use already selected file from sidebar
+        selected_file = matched_files[st.session_state.selected_file_idx]
+        st.write(f"Editing file: {selected_file['base_name']}")
 
-        # Load the CSV for editing
-        source_blob = matched_files[edit_file_idx]["source_blob"]
-        processed_blob = matched_files[edit_file_idx]["processed_blob"]
+        # Load the CSV for editing if not already loaded
+        if st.session_state.csv_df is None:
+            processed_blob = selected_file["processed_blob"]
+            st.session_state.csv_df = load_csv_from_blob(blob_service_client, container_name, processed_blob)
 
-        # Load the CSV data
-        csv_df = load_csv_from_blob(blob_service_client, container_name, processed_blob)
-
-        if csv_df is not None:
-            # Create a page selector if there are multiple pages
-            pages = csv_df["Page"].unique() if "Page" in csv_df.columns else [1]
+        if st.session_state.csv_df is not None:
+            # Create a form-based editor with expanders
+            st.subheader("Form-based Edit")
             
-            if len(pages) > 1:
-                selected_page = st.selectbox(
-                    "Select Page to Edit", 
-                    pages,
-                    key=f"page_selector_{edit_file_idx}"
-                )
-                page_df = csv_df[csv_df["Page"] == selected_page]
-            else:
-                selected_page = pages[0]
-                page_df = csv_df
-
+            # Get the data fields (excluding confidence columns)
+            data_fields = [col for col in st.session_state.csv_df.columns if not col.endswith("Confidence") and col not in ["Page"]]
+            
             # Create a form for editing
-            with st.form(key=f"edit_form_{edit_file_idx}_{selected_page}"):
-                st.subheader(f"Edit Page {selected_page}")
+            with st.form(key="edit_form"):
+                # Initialize edited_data if not present
+                if selected_file["base_name"] not in st.session_state.edited_data:
+                    st.session_state.edited_data[selected_file["base_name"]] = {}
                 
-                # Define the fields to edit
-                edit_fields = [
-                    "VendorName", "InvoiceNumber", "InvoiceDate", "CustomerName",
-                    "PurchaseOrder", "StockCode", "UnitPrice", "InvoiceAmount",
-                    "Freight", "Salestax", "Total"
-                ]
-                
-                # Find which fields exist in the DataFrame
-                available_fields = [field for field in edit_fields if field in page_df.columns]
-                
-                # Create a dictionary to store edits
-                edits = {}
-                
-                # Create form fields for each editable field
-                for field in available_fields:
-                    # Get current value from first row
-                    current_value = page_df[field].iloc[0] if not page_df.empty else ""
+                # Use expanders for each row
+                for index, row in st.session_state.csv_df.iterrows():
+                    page_num = row.get("Page", index + 1)
                     
-                    # Check if confidence column exists
-                    confidence_col = f"{field} Confidence"
-                    has_low_confidence = False
-                    
-                    if confidence_col in page_df.columns:
-                        confidence = page_df[confidence_col].iloc[0] if not page_df.empty else 100
-                        has_low_confidence = confidence < 90
-                    
-                    # Create columns for field and confidence
-                    col1, col2 = st.columns([3, 1])
-                    
-                    with col1:
-                        # Add visual indicator for low confidence
-                        field_label = f"{field} ⚠️" if has_low_confidence else field
-                        edits[field] = st.text_input(
-                            field_label,
-                            value=str(current_value) if pd.notna(current_value) else "",
-                            key=f"field_{edit_file_idx}_{selected_page}_{field}"
-                        )
-                    
-                    with col2:
-                        if confidence_col in page_df.columns:
-                            confidence_color = "red" if has_low_confidence else "green"
-                            st.markdown(
-                                f"<p style='color:{confidence_color};'>Confidence: {confidence:.1f}%</p>", 
-                                unsafe_allow_html=True
+                    # Create an expander for each page
+                    with st.expander(f"Page {page_num}", expanded=index==0):
+                        st.write(f"Edit data for page {page_num}")
+                        
+                        # Create a column for each field
+                        for field in data_fields:
+                            # Get field value and confidence
+                            field_value = row.get(field, "")
+                            confidence_field = f"{field} Confidence"
+                            confidence = row.get(confidence_field, 0)
+                            
+                            # Get current edited value if available
+                            current_value = field_value
+                            if selected_file["base_name"] in st.session_state.edited_data and \
+                               index in st.session_state.edited_data[selected_file["base_name"]] and \
+                               field in st.session_state.edited_data[selected_file["base_name"]][index]:
+                                current_value = st.session_state.edited_data[selected_file["base_name"]][index][field]
+                            
+                            # Color code based on confidence
+                            confidence_color = "green" if confidence >= 95 else "red"
+                            confidence_display = f'<span style="color:{confidence_color}">Confidence: {confidence:.2f}%</span>'
+                            st.markdown(confidence_display, unsafe_allow_html=True)
+                            
+                            # Text input for the field
+                            new_value = st.text_input(
+                                f"{field}",
+                                value=current_value,
+                                key=f"edit_{selected_file['base_name']}_{index}_{field}"
                             )
+                            
+                            # Store the edited value
+                            if new_value != field_value:
+                                if index not in st.session_state.edited_data[selected_file["base_name"]]:
+                                    st.session_state.edited_data[selected_file["base_name"]][index] = {}
+                                st.session_state.edited_data[selected_file["base_name"]][index][field] = new_value
                 
                 # Submit button
-                submit_button = st.form_submit_button("Save Edits")
+                submitted = st.form_submit_button("Save Edits")
                 
-                if submit_button:
-                    # Save edits to the DataFrame
-                    for field, value in edits.items():
-                        # Update the DataFrame for the selected page
-                        if field in page_df.columns:
-                            page_indices = page_df.index
-                            for idx in page_indices:
-                                csv_df.at[idx, field] = value
-                    
-                    # Save the edited DataFrame to blob storage
-                    output_container = config.get("final_output_container", container_name)
-                    output_prefix = config.get("final_output_prefix", "final_output/")
-                    
-                    # Create output blob name
-                    base_name = matched_files[edit_file_idx]["base_name"]
-                    pdf_output_blob_name = f"{output_prefix}pdf/{base_name}.pdf"
-                    csv_output_blob_name = f"{output_prefix}csv/{base_name}.csv"
-                    
-                    # Get PDF content if not already loaded
-                    if st.session_state.selected_pdf_blob == source_blob and st.session_state.pdf_content:
-                        pdf_content = st.session_state.pdf_content
-                    else:
-                        pdf_content = download_blob_to_memory(blob_service_client, container_name, source_blob)
-                    
-                    # Upload to blob storage
-                    csv_buffer = io.StringIO()
-                    csv_df.to_csv(csv_buffer, index=False)
-                    
-                    pdf_success, pdf_url = upload_to_blob_storage(
-                        blob_service_client,
-                        output_container,
-                        pdf_output_blob_name,
-                        pdf_content,
-                        "application/pdf"
-                    )
-                    
-                    csv_success, csv_url = upload_to_blob_storage(
-                        blob_service_client,
-                        output_container,
-                        csv_output_blob_name,
-                        csv_buffer.getvalue(),
-                        "text/csv"
-                    )
-                    
-                    if pdf_success and csv_success:
-                        st.success(f"Successfully saved edits to {output_container}")
+                if submitted:
+                    try:
+                        # Apply edits to the dataframe
+                        edited_df = st.session_state.csv_df.copy()
                         
-                        # Store edit in session state
-                        if edit_file_idx not in st.session_state.edited_data:
-                            st.session_state.edited_data[edit_file_idx] = {}
+                        if selected_file["base_name"] in st.session_state.edited_data:
+                            for idx, field_edits in st.session_state.edited_data[selected_file["base_name"]].items():
+                                for field, value in field_edits.items():
+                                    edited_df.at[idx, field] = value
                         
-                        st.session_state.edited_data[edit_file_idx][selected_page] = edits
-                    else:
-                        st.error("Failed to save edits")
-
-            # Add a Validate button outside the form
-            if st.button("Validate", key=f"validate_{edit_file_idx}_{selected_page}"):
+                        # Save to blob storage
+                        output_container = config.get("final_output_container", container_name)
+                        output_prefix = config.get("final_output_prefix", "final_output/")
+                        
+                        # Create output blob names
+                        base_name = selected_file["base_name"]
+                        pdf_output_blob_name = f"{output_prefix}pdf/{base_name}.pdf"
+                        csv_output_blob_name = f"{output_prefix}csv/{base_name}.csv"
+                        
+                        # Convert dataframe to CSV
+                        csv_buffer = io.StringIO()
+                        edited_df.to_csv(csv_buffer, index=False)
+                        
+                        # Upload to blob storage
+                        pdf_success, pdf_url = upload_to_blob_storage(
+                            blob_service_client,
+                            output_container,
+                            pdf_output_blob_name,
+                            st.session_state.pdf_content,
+                            "application/pdf"
+                        )
+                        
+                        csv_success, csv_url = upload_to_blob_storage(
+                            blob_service_client,
+                            output_container,
+                            csv_output_blob_name,
+                            csv_buffer.getvalue(),
+                            "text/csv"
+                        )
+                        
+                        if pdf_success and csv_success:
+                            st.success(f"Successfully saved edits to {output_container}")
+                            # Clear edits after successful save
+                            st.session_state.edited_data[selected_file["base_name"]] = {}
+                            # Update the CSV in session state
+                            st.session_state.csv_df = edited_df
+                        else:
+                            st.error("Failed to save edits")
+                    except Exception as e:
+                        st.error(f"Error saving edits: {str(e)}")
+            
+            # Add a Validate button
+            if st.button("Validate Edits"):
+                # Apply current edits to a temporary dataframe for validation
+                temp_df = st.session_state.csv_df.copy()
+                
+                if selected_file["base_name"] in st.session_state.edited_data:
+                    for idx, field_edits in st.session_state.edited_data[selected_file["base_name"]].items():
+                        for field, value in field_edits.items():
+                            temp_df.at[idx, field] = value
+                
                 # Perform validation logic
                 validation_errors = {}
-                
-                # For each field, check if value is empty
-                for field in available_fields:
-                    current_value = page_df[field].iloc[0] if not page_df.empty else ""
-                    if pd.isna(current_value) or str(current_value).strip() == "":
-                        if selected_page not in validation_errors:
-                            validation_errors[selected_page] = []
-                        validation_errors[selected_page].append(field)
+                for index, row in temp_df.iterrows():
+                    for col in data_fields:
+                        value = row.get(col, "")
+                        if pd.isna(value) or str(value).strip() == "":
+                            if index not in validation_errors:
+                                validation_errors[index] = []
+                            validation_errors[index].append(col)
                 
                 if validation_errors:
                     error_message = "The following fields have errors:\n"
-                    for page, error_fields in validation_errors.items():
-                        error_message += f"Page {page}: {', '.join(error_fields)}\n"
+                    for index, error_cols in validation_errors.items():
+                        page_num = temp_df.at[index, "Page"] if "Page" in temp_df.columns else index + 1
+                        error_message += f"Page {page_num}: {', '.join(error_cols)}\n"
                     st.error(error_message)
-                    
-                    # Store validation results
-                    if edit_file_idx not in st.session_state.validation_results:
-                        st.session_state.validation_results[edit_file_idx] = {}
-                    
-                    st.session_state.validation_results[edit_file_idx][selected_page] = error_fields
+                    st.session_state.validation_results[selected_file["base_name"]] = validation_errors
                 else:
                     st.success("All data is valid!")
-                    
-                    # Clear validation errors
-                    if (edit_file_idx in st.session_state.validation_results and 
-                        selected_page in st.session_state.validation_results[edit_file_idx]):
-                        del st.session_state.validation_results[edit_file_idx][selected_page]
-
-            # Display validation results if available
-            if (edit_file_idx in st.session_state.validation_results and 
-                selected_page in st.session_state.validation_results.get(edit_file_idx, {})):
-                error_fields = st.session_state.validation_results[edit_file_idx][selected_page]
-                st.warning(f"Validation Issues for Page {selected_page}: {', '.join(error_fields)}")
+                    st.session_state.validation_results[selected_file["base_name"]] = {}
+            
+            # Display validation results
+            if selected_file["base_name"] in st.session_state.validation_results:
+                validation_results = st.session_state.validation_results[selected_file["base_name"]]
+                if validation_results:
+                    st.warning("Validation Issues:")
+                    for index, error_cols in validation_results.items():
+                        page_num = st.session_state.csv_df.at[index, "Page"] if "Page" in st.session_state.csv_df.columns else index + 1
+                        st.write(f"Page {page_num}: {', '.join(error_cols)}")
+        else:
+            st.error("Failed to load CSV for editing")
 
 # Tab 3: Bulk Operations
 with tabs[2]:
@@ -377,9 +376,13 @@ with tabs[2]:
 
     if st.button("Upload All Files to Final Container"):
         with st.spinner("Processing bulk upload..."):
-            success_count = 0
-            error_count = 0
-
+            # Create a container to display results
+            result_container = st.container()
+            
+            # Initialize tracking
+            success_files = []
+            error_files = []
+            
             progress_bar = st.progress(0)
             status_text = st.empty()
 
@@ -396,10 +399,11 @@ with tabs[2]:
 
                     if pdf_content and csv_df is not None:
                         # Upload PDF to final container
-                        pdf_success, _ = upload_to_blob_storage(
+                        pdf_output_blob_name = f"{final_prefix}pdf/{match['base_name']}.pdf"
+                        pdf_success, pdf_url = upload_to_blob_storage(
                             blob_service_client,
                             final_container,
-                            f"{final_prefix}pdf/{match['base_name']}.pdf",  # Store PDF in 'pdf' subfolder
+                            pdf_output_blob_name,
                             pdf_content,
                             "application/pdf"
                         )
@@ -407,31 +411,58 @@ with tabs[2]:
                         # Upload CSV to final container
                         csv_buffer = io.StringIO()
                         csv_df.to_csv(csv_buffer, index=False)
-
-                        csv_success, _ = upload_to_blob_storage(
+                        
+                        csv_output_blob_name = f"{final_prefix}csv/{match['base_name']}.csv"
+                        csv_success, csv_url = upload_to_blob_storage(
                             blob_service_client,
                             final_container,
-                            f"{final_prefix}csv/{match['base_name']}.csv",  # Store CSV in 'csv' subfolder
+                            csv_output_blob_name,
                             csv_buffer.getvalue(),
                             "text/csv"
                         )
 
                         if pdf_success and csv_success:
-                            success_count += 1
+                            success_files.append({
+                                "filename": match['base_name'],
+                                "pdf_path": pdf_output_blob_name,
+                                "csv_path": csv_output_blob_name
+                            })
                         else:
-                            error_count += 1
+                            error_files.append({
+                                "filename": match['base_name'],
+                                "error": "Failed to upload one or both files"
+                            })
                     else:
-                        error_count += 1
+                        error_files.append({
+                            "filename": match['base_name'],
+                            "error": "Failed to download source files"
+                        })
 
                 except Exception as e:
-                    st.error(f"Error processing {match['base_name']}: {str(e)}")
-                    error_count += 1
+                    error_files.append({
+                        "filename": match['base_name'],
+                        "error": str(e)
+                    })
 
             # Final update
             progress_bar.progress(1.0)
             status_text.text("Bulk upload complete")
 
-            st.success(f"Bulk upload completed. Success: {success_count}, Errors: {error_count}")
+            # Display detailed results
+            with result_container:
+                st.success(f"Bulk upload completed. Success: {len(success_files)}, Errors: {len(error_files)}")
+                
+                # Show successful uploads
+                if success_files:
+                    st.subheader("Successfully Uploaded Files")
+                    success_df = pd.DataFrame(success_files)
+                    st.dataframe(success_df, use_container_width=True)
+                
+                # Show errors
+                if error_files:
+                    st.subheader("Failed Uploads")
+                    error_df = pd.DataFrame(error_files)
+                    st.dataframe(error_df, use_container_width=True)
 
     # Bulk download
     st.subheader("Bulk Download")
@@ -450,14 +481,14 @@ with tabs[2]:
                         # Get PDF
                         pdf_content = download_blob_to_memory(blob_service_client, container_name, match["source_blob"])
                         if pdf_content:
-                            zip_file.writestr(f"pdf/{match['base_name']}.pdf", pdf_content)  # added pdf/ prefix
+                            zip_file.writestr(f"pdf/{match['base_name']}.pdf", pdf_content)
 
                         # Get CSV
                         csv_df = load_csv_from_blob(blob_service_client, container_name, match["processed_blob"])
                         if csv_df is not None:
                             csv_buffer = io.StringIO()
                             csv_df.to_csv(csv_buffer, index=False)
-                            zip_file.writestr(f"csv/{match['base_name']}.csv", csv_buffer.getvalue())  # added csv/ prefix
+                            zip_file.writestr(f"csv/{match['base_name']}.csv", csv_buffer.getvalue())
                     except Exception as e:
                         st.error(f"Error adding {match['base_name']} to zip: {str(e)}")
 
@@ -483,7 +514,7 @@ if st.sidebar.button("Clear Memory"):
     gc.collect()
 
     st.sidebar.success("Memory cleared!")
-    st.experimental_rerun()
+    st.rerun()
 
 # Footer with system info
 st.sidebar.markdown("---")
