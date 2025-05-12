@@ -1,0 +1,6 @@
+{
+    "azure_storage_connection_string": "your_azure_storage_connection_string",
+    "source_container": "source-container-name",
+    "processed_container": "processed-container-name",
+    "final_container": "final-container-name"
+}
