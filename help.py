@@ -160,3 +160,9 @@ def apply_edits_to_csv(csv_df, edited_data):
         for col, value in edits.items():
             csv_df.at[int(idx), col] = value
     return csv_df
+
+def prevent_cache(func):
+    """Decorator to prevent caching of a function."""
+    def wrapper(*args, **kwargs):
+        return func(*args, **kwargs)
+    return wrapper
