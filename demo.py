@@ -125,21 +125,25 @@ def load_csv_from_blob(blob_service_client, container_name, blob_name):
         return None
 
 # Upload to blob storage
-def upload_blob_from_memory(blob_service_client, container_name, blob_name, content):
-    """Upload data to Azure Blob Storage from memory."""
+def upload_to_blob_storage(blob_service_client, container_name, blob_name, data, content_type):
+    """Upload data to Azure Blob Storage."""
     try:
-        blob_client = blob_service_client.get_container_client(container_name).get_blob_client(blob_name)
-        blob_client.upload_blob(content, overwrite=True)
-        return True
-    except Exception as e:
-        st.error(f"Error uploading to blob {blob_name}: {str(e)}")
-        return False, str(e)
+        container_client = blob_service_client.get_container_client(container_name)
 
-def save_csv_to_blob(blob_service_client, container_name, blob_name, df):
-    """Save a pandas DataFrame to a CSV file in Azure Blob Storage."""
-    csv_buffer = io.StringIO()
-    df.to_csv(csv_buffer, index=False)
-    return upload_blob_from_memory(blob_service_client, container_name, blob_name, csv_buffer.getvalue())
+        # Create the container if it doesn't exist
+        if not container_client.exists():
+            container_client.create_container()
+
+        # Upload blob
+        blob_client = container_client.get_blob_client(blob_name)
+
+        # Upload the file
+        blob_client.upload_blob(data, overwrite=True)
+
+        return True, blob_client.url
+    except Exception as e:
+        st.error(f"Error uploading to blob: {str(e)}")
+        return False, str(e)
 
 # Extract filename from blob path
 def get_filename_from_blob_path(blob_path):
@@ -197,8 +201,7 @@ from helper_functions import (
     upload_to_blob_storage,
     get_filename_from_blob_path,
     match_source_and_processed_files,
-    apply_edits_to_csv,
-    save_csv_to_blob
+    apply_edits_to_csv
 )
 
 # App title and configuration
@@ -389,11 +392,12 @@ with tabs[1]:
                     pdf_content,
                     "application/pdf"
                 )
-                csv_success, csv_url = save_csv_to_blob(
+                csv_success, csv_url = upload_to_blob_storage(
                     blob_service_client,
                     output_container,
                     csv_output_blob_name,
-                    edited_df
+                    csv_buffer.getvalue(),
+                    "text/csv"
                 )
 
                 if pdf_success and csv_success:
@@ -476,11 +480,15 @@ with tabs[2]:
                         )
 
                         # Upload CSV to final container
-                        csv_success, _ = save_csv_to_blob(
+                        csv_buffer = io.StringIO()
+                        csv_df.to_csv(csv_buffer, index=False)
+
+                        csv_success, _ = upload_to_blob_storage(
                             blob_service_client,
                             final_container,
                             f"{final_prefix}csv/{match['base_name']}.csv",  # Store CSV in 'csv' subfolder
-                            csv_df
+                            csv_buffer.getvalue(),
+                            "text/csv"
                         )
 
                         if pdf_success and csv_success:
