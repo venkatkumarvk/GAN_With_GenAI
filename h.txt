@@ -1,18 +1,6 @@
-#config
-"pricing": {
-  "gpt4o_input_per_1k_tokens": 0.015,
-  "gpt4o_output_per_1k_tokens": 0.06,
-  "batch_discount_percentage": 10
-}
-
-#2. Modify the AzureOpenAIClient class in llm.py to track token usage:
-# Add these imports at the top of llm.py
-import tiktoken
-import re
-
+#1. First, add token tracking to the AzureOpenAIClient class in llm.py:
 class AzureOpenAIClient:
     def __init__(self, config):
-        # Existing initialization code
         self.api_key = config["azure_openai"]["api_key"]
         self.api_version = config["azure_openai"]["api_version"]
         self.endpoint = config["azure_openai"]["azure_endpoint"]
@@ -20,14 +8,11 @@ class AzureOpenAIClient:
         self.batch_size = config["processing"]["batch_size"]
         self.timeout = config["processing"]["timeout_seconds"]
         
-        # Add pricing information
-        self.pricing = config.get("pricing", {
-            "gpt4o_input_per_1k_tokens": 0.015,
-            "gpt4o_output_per_1k_tokens": 0.06,
-            "batch_discount_percentage": 10
-        })
+        # Add token cost parameters
+        self.input_token_cost_per_million = 2.50
+        self.output_token_cost_per_million = 10.0
         
-        # Initialize token counting
+        # Add token counters
         self.total_input_tokens = 0
         self.total_output_tokens = 0
         
@@ -36,128 +21,80 @@ class AzureOpenAIClient:
             api_version=self.api_version,
             azure_endpoint=self.endpoint
         )
-        
-        # Initialize tokenizer
-        try:
-            self.tokenizer = tiktoken.encoding_for_model("gpt-4o")
-        except:
-            # Fallback to cl100k_base which is used by GPT-4 models
-            self.tokenizer = tiktoken.get_encoding("cl100k_base")
     
-    def estimate_tokens(self, text):
-        """Estimate the number of tokens in text."""
-        return len(self.tokenizer.encode(text))
-    
-    def estimate_image_tokens(self, base64_img):
-        """
-        Estimate tokens for an image in base64 format.
-        This is an approximation based on Azure's docs.
-        """
-        # Estimate based on the size of the base64 string
-        # Each 4 chars in base64 represents 3 bytes of data
-        image_bytes = (len(base64_img) * 3) // 4
-        
-        # Image token cost approximation (170 tokens per 512x512 image for gpt-4o)
-        # This is a simplified estimation
-        return min(max(int(image_bytes / 1024), 85), 250)  # Between 85-250 tokens
-    
-    def track_tokens(self, prompt, base64_img=None, response=None):
-        """Track token usage for a single API call."""
-        # Estimate input tokens
-        input_tokens = self.estimate_tokens(prompt)
-        if base64_img:
-            input_tokens += self.estimate_image_tokens(base64_img)
-        
-        # Estimate output tokens if response is available
-        output_tokens = 0
-        if response:
-            output_tokens = self.estimate_tokens(response)
-        
-        # Update totals
-        self.total_input_tokens += input_tokens
-        self.total_output_tokens += output_tokens
-        
-        return input_tokens, output_tokens
-    
-    def calculate_cost(self, is_batch=False):
+    def calculate_cost(self):
         """Calculate the cost based on token usage."""
-        input_cost = (self.total_input_tokens / 1000) * self.pricing["gpt4o_input_per_1k_tokens"]
-        output_cost = (self.total_output_tokens / 1000) * self.pricing["gpt4o_output_per_1k_tokens"]
+        input_cost = (self.total_input_tokens / 1000000) * self.input_token_cost_per_million
+        output_cost = (self.total_output_tokens / 1000000) * self.output_token_cost_per_million
         total_cost = input_cost + output_cost
-        
-        # Apply batch discount if applicable
-        if is_batch:
-            discount = total_cost * (self.pricing["batch_discount_percentage"] / 100)
-            total_cost -= discount
         
         return {
             "input_tokens": self.total_input_tokens,
             "output_tokens": self.total_output_tokens,
             "input_cost": input_cost,
             "output_cost": output_cost,
-            "total_cost": total_cost,
-            "is_batch": is_batch,
-            "discount": discount if is_batch else 0
+            "total_cost": total_cost
         }
+    
+    def track_token_usage(self, response_data):
+        """
+        Track token usage from API response data.
+        This works with both batch and general responses.
+        """
+        try:
+            if isinstance(response_data, dict):
+                if "usage" in response_data:
+                    # Direct OpenAI API response
+                    usage = response_data["usage"]
+                    self.total_input_tokens += usage.get("prompt_tokens", 0)
+                    self.total_output_tokens += usage.get("completion_tokens", 0)
+                elif "response" in response_data and "body" in response_data["response"]:
+                    # Batch API response format
+                    body = response_data["response"]["body"]
+                    if isinstance(body, str):
+                        body = json.loads(body)
+                    
+                    if "usage" in body:
+                        usage = body["usage"]
+                        self.total_input_tokens += usage.get("prompt_tokens", 0)
+                        self.total_output_tokens += usage.get("completion_tokens", 0)
+        except Exception as e:
+            print(f"Error tracking tokens: {str(e)}")
 
-#3. Modify the process_batch method to track tokens:
+#2. Update the process_batch method in AzureOpenAIClient to track token usage:
 def process_batch(self, image_base64_strings, prompts):
     """
     Process images in a batch using the Azure OpenAI batch API.
-    Now tracks token usage and cost.
+    Tracks token usage.
     """
-    # Existing code...
+    # Existing implementation...
     
-    try:
-        # Track token usage for each item in the batch
-        for i, (base64_img, prompt) in enumerate(zip(image_base64_strings, prompts)):
-            self.track_tokens(prompt, base64_img)
-        
-        # Rest of existing code...
-        
-        # After processing, estimate output tokens from responses
-        for raw_response in raw_responses:
-            try:
-                json_response = json.loads(raw_response)
-                if "response" in json_response and "body" in json_response["response"]:
-                    content = json_response["response"]["body"]
-                    if isinstance(content, str):
-                        content_json = json.loads(content)
-                    else:
-                        content_json = content
-                    
-                    if "choices" in content_json and len(content_json["choices"]) > 0:
-                        message_content = content_json["choices"][0]["message"]["content"]
-                        self.track_tokens("", None, message_content)
-            except:
-                pass
-                
-        return raw_responses
-    except Exception as e:
-        print(f"Error during batch processing: {str(e)}")
-        raise
-    finally:
-        # Ensure temporary file is deleted if it exists
-        if tmp_jsonl_path and os.path.exists(tmp_jsonl_path):
-            try:
-                os.unlink(tmp_jsonl_path)
-            except:
-                pass
+    # When retrieving results:
+    print(f"Batch completed. Retrieving results...")
+    file_response = self.client.files.content(output_file_id)
+    raw_responses = file_response.text.strip().split('\n')
+    
+    # Track token usage from each response
+    for raw_response in raw_responses:
+        try:
+            response_data = json.loads(raw_response)
+            self.track_token_usage(response_data)
+        except Exception as e:
+            print(f"Error tracking tokens: {str(e)}")
+    
+    return raw_responses
 
-#4. Similarly, modify the process_general method:
+#3. Update the process_general method in AzureOpenAIClient to track token usage:
 def process_general(self, image_base64_strings, prompts):
     """
     Process images using the general (non-batch) API.
-    Now tracks token usage and cost.
+    Tracks token usage.
     """
     results = []
     
     for i, (base64_img, prompt) in enumerate(zip(image_base64_strings, prompts)):
         try:
             print(f"Processing image {i+1}/{len(image_base64_strings)}")
-            
-            # Track input tokens
-            self.track_tokens(prompt, base64_img)
             
             response = self.client.chat.completions.create(
                 model=self.deployment_name,
@@ -186,12 +123,13 @@ def process_general(self, image_base64_strings, prompts):
                 temperature=0.7
             )
             
+            # Track token usage from the response
+            if hasattr(response, 'usage'):
+                self.total_input_tokens += response.usage.prompt_tokens
+                self.total_output_tokens += response.usage.completion_tokens
+            
             if hasattr(response, 'choices') and len(response.choices) > 0:
                 content = response.choices[0].message.content
-                
-                # Track output tokens
-                self.track_tokens("", None, content)
-                
                 results.append(json.dumps({
                     "custom_id": f"request-{i+1}",
                     "response": {
@@ -202,7 +140,11 @@ def process_general(self, image_base64_strings, prompts):
                                         "content": content
                                     }
                                 }
-                            ]
+                            ],
+                            "usage": {
+                                "prompt_tokens": response.usage.prompt_tokens if hasattr(response, 'usage') else 0,
+                                "completion_tokens": response.usage.completion_tokens if hasattr(response, 'usage') else 0
+                            }
                         }
                     }
                 }))
@@ -221,19 +163,20 @@ def process_general(self, image_base64_strings, prompts):
     
     return results
 
-5. Finally, modify the main processing functions in main.py to display cost information:
-
-# Add at the end of process_azure_pdf_files and process_local_pdf_files:
-
-# Calculate and display cost information
-cost_info = ai_client.calculate_cost(api_type == "batch")
-print("\n===== COST SUMMARY =====")
-print(f"Total input tokens: {cost_info['input_tokens']:,}")
-print(f"Total output tokens: {cost_info['output_tokens']:,}")
-print(f"Input cost: ${cost_info['input_cost']:.4f}")
-print(f"Output cost: ${cost_info['output_cost']:.4f}")
-if api_type == "batch":
-    print(f"Batch discount: ${cost_info['discount']:.4f}")
-print(f"Total cost: ${cost_info['total_cost']:.4f}")
-print(f"Average cost per document: ${cost_info['total_cost']/len(pdf_blobs):.4f}")
-print("========================\n")
+#pdf process
+def process_azure_pdf_files(config, api_type, azure_folder):
+    """Process PDF files from Azure Blob Storage."""
+    # Existing implementation...
+    
+    # After all processing is complete, display token usage and cost
+    cost_info = ai_client.calculate_cost()
+    
+    print("\n===== GPT-4o Token Usage and Cost =====")
+    print(f"Total Input Tokens: {cost_info['input_tokens']:,}")
+    print(f"Total Output Tokens: {cost_info['output_tokens']:,}")
+    print(f"Input Cost: ${cost_info['input_cost']:.4f}")
+    print(f"Output Cost: ${cost_info['output_cost']:.4f}")
+    print(f"Total Cost: ${cost_info['total_cost']:.4f}")
+    print("=======================================")
+    
+    print("Processing complete!")
