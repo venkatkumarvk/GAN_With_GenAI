@@ -78,7 +78,7 @@ if confidence_selection != st.session_state.confidence_selection:
     st.session_state.pdf_content = None
     st.session_state.csv_df = None
     st.session_state.selected_file_idx = 0
-    st.session_state.edit_history = {} # Clear edit history
+    st.session_state.edit_history = {}
 
 # Set paths based on config and confidence selection
 container_name = config["container_name"]
@@ -185,62 +185,67 @@ with tabs[1]:
     else:
         # Use already selected file from sidebar
         selected_file = matched_files[st.session_state.selected_file_idx]
-        st.write(f"Editing file: {selected_file['base_name']}")
-
+        
         # Load the CSV for editing if not already loaded
         if st.session_state.csv_df is None:
             processed_blob = selected_file["processed_blob"]
             st.session_state.csv_df = load_csv_from_blob(blob_service_client, container_name, processed_blob)
 
         if st.session_state.csv_df is not None:
-            # Initialize tracking columns if they don't exist
-            tracking_columns = ["Manual_Edit", "Edit_Timestamp", "Original_Value", "New_Value"]
-            for col in tracking_columns:
-                if col not in st.session_state.csv_df.columns:
-                    st.session_state.csv_df[col] = ""
-            
-            # Get the base name for this file (for tracking purposes)
-            base_name = selected_file["base_name"]
-            
-            # Initialize edit history for this file if not present
-            if base_name not in st.session_state.edit_history:
-                st.session_state.edit_history[base_name] = {}
-            
-            # Create a form-based editor
+            # Create a form-based editor with expanders
             st.subheader("Form-based Edit")
             
-            # Get all fields (excluding confidence columns and tracking columns)
-            all_cols = st.session_state.csv_df.columns.tolist()
+            # Get the data fields and corresponding confidence columns
+            all_columns = st.session_state.csv_df.columns.tolist()
             data_fields = []
-            confidence_map = {}
+            confidence_fields = {}
             
-            # Find data fields and their corresponding confidence columns
-            for col in all_cols:
+            for col in all_columns:
                 if col.endswith("_Confidence"):
-                    base_field = col.replace("_Confidence", "")
-                    confidence_map[base_field] = col
-                elif col not in tracking_columns and col != "Page":
-                    data_fields.append(col)
+                    # Find the corresponding data field
+                    data_field = col.replace("_Confidence", "")
+                    if data_field in all_columns:
+                        confidence_fields[data_field] = col
+                        if data_field not in data_fields:
+                            data_fields.append(data_field)
+                elif not col.endswith("Confidence") and col not in ["Page", "Filename", "Extraction_Time"]:
+                    if col not in data_fields:
+                        data_fields.append(col)
+            
+            # Initialize edit history for this file if not present
+            file_key = selected_file["base_name"]
+            if file_key not in st.session_state.edit_history:
+                st.session_state.edit_history[file_key] = {}
             
             # Create a form for editing
             with st.form(key="edit_form"):
+                # Initialize edited_data if not present
+                if file_key not in st.session_state.edited_data:
+                    st.session_state.edited_data[file_key] = {}
+                
                 # Use expanders for each row
                 for index, row in st.session_state.csv_df.iterrows():
                     page_num = row.get("Page", index + 1)
                     
-                    # Create an expander for each row
-                    with st.expander(f"Row {index+1} (Page {page_num})", expanded=index==0):
-                        st.write(f"Edit data for page {page_num}")
-                        
-                        # Create inputs for each field
+                    # Create an expander for each page/row
+                    with st.expander(f"Row {index + 1}", expanded=index==0):
+                        # Create columns for each field
                         for field in data_fields:
-                            # Get field value
+                            # Get field value and confidence
                             field_value = row.get(field, "")
                             
-                            # Get confidence value if available
+                            # Find the confidence value
                             confidence = 0
-                            if field in confidence_map and confidence_map[field] in row:
-                                confidence = row[confidence_map[field]]
+                            if field in confidence_fields:
+                                confidence_field = confidence_fields[field]
+                                confidence = row.get(confidence_field, 0)
+                            
+                            # Get current edited value if available
+                            current_value = field_value
+                            if file_key in st.session_state.edited_data and \
+                               index in st.session_state.edited_data[file_key] and \
+                               field in st.session_state.edited_data[file_key][index]:
+                                current_value = st.session_state.edited_data[file_key][index][field]
                             
                             # Color code based on confidence
                             confidence_color = "green" if confidence >= 95 else "red"
@@ -250,22 +255,38 @@ with tabs[1]:
                             # Text input for the field
                             new_value = st.text_input(
                                 f"{field}",
-                                value=field_value,
-                                key=f"edit_{base_name}_{index}_{field}"
+                                value=current_value,
+                                key=f"edit_{file_key}_{index}_{field}"
                             )
                             
-                            # Track edits
-                            if new_value != field_value:
-                                # Store original value if this is the first edit
-                                if index not in st.session_state.edit_history[base_name] or field not in st.session_state.edit_history[base_name][index]:
-                                    if index not in st.session_state.edit_history[base_name]:
-                                        st.session_state.edit_history[base_name][index] = {}
-                                    
-                                    st.session_state.edit_history[base_name][index][field] = {
+                            # Store the edited value and track history if it changed
+                            if new_value != str(field_value):
+                                # Initialize nested structure if needed
+                                if index not in st.session_state.edited_data[file_key]:
+                                    st.session_state.edited_data[file_key][index] = {}
+                                
+                                # Store the edited value
+                                st.session_state.edited_data[file_key][index][field] = new_value
+                                
+                                # Track edit history
+                                current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                                
+                                # Initialize history for this index if needed
+                                if index not in st.session_state.edit_history[file_key]:
+                                    st.session_state.edit_history[file_key][index] = {}
+                                
+                                # Record the edit
+                                if field not in st.session_state.edit_history[file_key][index]:
+                                    st.session_state.edit_history[file_key][index][field] = {
                                         "original_value": field_value,
-                                        "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                                        "new_value": new_value
+                                        "edits": []
                                     }
+                                
+                                # Add this edit to the history
+                                st.session_state.edit_history[file_key][index][field]["edits"].append({
+                                    "timestamp": current_time,
+                                    "new_value": new_value
+                                })
                 
                 # Submit button
                 submitted = st.form_submit_button("Save Edits")
@@ -275,18 +296,55 @@ with tabs[1]:
                         # Apply edits to the dataframe
                         edited_df = st.session_state.csv_df.copy()
                         
-                        # Apply all tracked edits
-                        if base_name in st.session_state.edit_history:
-                            for idx, field_edits in st.session_state.edit_history[base_name].items():
-                                for field, edit_info in field_edits.items():
-                                    # Update field value
-                                    edited_df.at[idx, field] = edit_info["new_value"]
+                        # Add tracking columns if they don't exist
+                        if "Manual_Edit" not in edited_df.columns:
+                            edited_df["Manual_Edit"] = "N"
+                        if "Manual_Edit_Time" not in edited_df.columns:
+                            edited_df["Manual_Edit_Time"] = ""
+                        if "Original_Values" not in edited_df.columns:
+                            edited_df["Original_Values"] = ""
+                        if "New_Values" not in edited_df.columns:
+                            edited_df["New_Values"] = ""
+                        
+                        if file_key in st.session_state.edited_data:
+                            for idx, field_edits in st.session_state.edited_data[file_key].items():
+                                # Skip if no edits for this row
+                                if not field_edits:
+                                    continue
+                                
+                                # Apply edits to each field
+                                for field, value in field_edits.items():
+                                    edited_df.at[idx, field] = value
+                                
+                                # Update tracking columns
+                                edited_df.at[idx, "Manual_Edit"] = "Y"
+                                
+                                # Get the latest edit timestamp
+                                if idx in st.session_state.edit_history[file_key]:
+                                    latest_time = ""
+                                    for field, history in st.session_state.edit_history[file_key][idx].items():
+                                        if history["edits"]:
+                                            edit_time = history["edits"][-1]["timestamp"]
+                                            if edit_time > latest_time:
+                                                latest_time = edit_time
                                     
-                                    # Update tracking columns
-                                    edited_df.at[idx, "Manual_Edit"] = "Y"
-                                    edited_df.at[idx, "Edit_Timestamp"] = edit_info["timestamp"]
-                                    edited_df.at[idx, "Original_Value"] = f"{field}: {edit_info['original_value']}"
-                                    edited_df.at[idx, "New_Value"] = f"{field}: {edit_info['new_value']}"
+                                    if latest_time:
+                                        edited_df.at[idx, "Manual_Edit_Time"] = latest_time
+                                
+                                # Collect original and new values
+                                original_values = []
+                                new_values = []
+                                
+                                if idx in st.session_state.edit_history[file_key]:
+                                    for field, history in st.session_state.edit_history[file_key][idx].items():
+                                        if history["edits"]:
+                                            orig = history["original_value"]
+                                            new = history["edits"][-1]["new_value"]
+                                            original_values.append(f"{field}: {orig}")
+                                            new_values.append(f"{field}: {new}")
+                                
+                                edited_df.at[idx, "Original_Values"] = "; ".join(original_values)
+                                edited_df.at[idx, "New_Values"] = "; ".join(new_values)
                         
                         # Save to blob storage
                         output_container = config.get("final_output_container", container_name)
@@ -320,76 +378,83 @@ with tabs[1]:
                         
                         if pdf_success and csv_success:
                             st.success(f"Successfully saved edits to {output_container}")
-                            # Update the CSV in session state with tracking information
+                            # Update the CSV in session state
                             st.session_state.csv_df = edited_df
                         else:
                             st.error("Failed to save edits")
                     except Exception as e:
                         st.error(f"Error saving edits: {str(e)}")
             
-            # Show edit history and tracking information
-            if base_name in st.session_state.edit_history and st.session_state.edit_history[base_name]:
+            # Display edit history summary
+            if file_key in st.session_state.edit_history and st.session_state.edit_history[file_key]:
                 st.subheader("Edit History")
                 
-                edit_data = []
-                for idx, field_edits in st.session_state.edit_history[base_name].items():
-                    for field, edit_info in field_edits.items():
-                        edit_data.append({
-                            "Row": idx + 1,
-                            "Field": field,
-                            "Original Value": edit_info["original_value"],
-                            "New Value": edit_info["new_value"],
-                            "Edit Time": edit_info["timestamp"]
-                        })
+                # Count total edits
+                total_edits = 0
+                for idx, fields in st.session_state.edit_history[file_key].items():
+                    for field, history in fields.items():
+                        total_edits += len(history["edits"])
                 
-                if edit_data:
-                    edit_history_df = pd.DataFrame(edit_data)
-                    st.dataframe(edit_history_df, use_container_width=True)
+                st.write(f"Total edits made: {total_edits}")
+                
+                # Build a dataframe to display edit history
+                history_rows = []
+                for idx, fields in st.session_state.edit_history[file_key].items():
+                    for field, history in fields.items():
+                        for i, edit in enumerate(history["edits"]):
+                            history_rows.append({
+                                "Row": idx + 1,
+                                "Field": field,
+                                "Original Value": history["original_value"] if i == 0 else "",
+                                "New Value": edit["new_value"],
+                                "Edit Time": edit["timestamp"]
+                            })
+                
+                if history_rows:
+                    history_df = pd.DataFrame(history_rows)
+                    st.dataframe(history_df, use_container_width=True)
             
             # Add a Validate button
             if st.button("Validate Edits"):
                 # Apply current edits to a temporary dataframe for validation
                 temp_df = st.session_state.csv_df.copy()
                 
-                # Apply all tracked edits
-                if base_name in st.session_state.edit_history:
-                    for idx, field_edits in st.session_state.edit_history[base_name].items():
-                        for field, edit_info in field_edits.items():
-                            temp_df.at[idx, field] = edit_info["new_value"]
+                if file_key in st.session_state.edited_data:
+                    for idx, field_edits in st.session_state.edited_data[file_key].items():
+                        for field, value in field_edits.items():
+                            temp_df.at[idx, field] = value
                 
                 # Perform validation logic
                 validation_errors = {}
                 for index, row in temp_df.iterrows():
-                    for col in data_fields:
-                        value = row.get(col, "")
+                    for field in data_fields:
+                        value = row.get(field, "")
                         if pd.isna(value) or str(value).strip() == "":
                             if index not in validation_errors:
                                 validation_errors[index] = []
-                            validation_errors[index].append(col)
+                            validation_errors[index].append(field)
                 
                 if validation_errors:
                     error_message = "The following fields have errors:\n"
                     for index, error_cols in validation_errors.items():
-                        page_num = temp_df.at[index, "Page"] if "Page" in temp_df.columns else index + 1
-                        error_message += f"Row {index+1} (Page {page_num}): {', '.join(error_cols)}\n"
+                        error_message += f"Row {index + 1}: {', '.join(error_cols)}\n"
                     st.error(error_message)
-                    st.session_state.validation_results[base_name] = validation_errors
+                    st.session_state.validation_results[file_key] = validation_errors
                 else:
                     st.success("All data is valid!")
-                    st.session_state.validation_results[base_name] = {}
+                    st.session_state.validation_results[file_key] = {}
             
             # Display validation results
-            if base_name in st.session_state.validation_results:
-                validation_results = st.session_state.validation_results[base_name]
+            if file_key in st.session_state.validation_results:
+                validation_results = st.session_state.validation_results[file_key]
                 if validation_results:
                     st.warning("Validation Issues:")
                     for index, error_cols in validation_results.items():
-                        page_num = st.session_state.csv_df.at[index, "Page"] if "Page" in st.session_state.csv_df.columns else index + 1
-                        st.write(f"Row {index+1} (Page {page_num}): {', '.join(error_cols)}")
+                        st.write(f"Row {index + 1}: {', '.join(error_cols)}")
         else:
             st.error("Failed to load CSV for editing")
 
-# Tab 3: Bulk Operations (unchanged from your original code)
+# Tab 3: Bulk Operations
 with tabs[2]:
     st.header("Bulk Operations")
 
