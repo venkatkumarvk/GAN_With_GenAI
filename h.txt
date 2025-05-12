@@ -180,3 +180,64 @@ def process_azure_pdf_files(config, api_type, azure_folder):
     print("=======================================")
     
     print("Processing complete!")
+#Do the same for process_local_pdf_files.
+5. Add per-document token tracking:
+If you want to track costs per document as well, you can add this functionality by modifying the processing loop:
+def process_local_pdf_files(config, api_type, local_folder):
+    """Process PDF files from a local folder."""
+    # Existing initialization...
+    
+    # Add document-level tracking
+    document_costs = []
+    
+    # Process each PDF
+    for i, pdf_file in enumerate(pdf_files):
+        try:
+            print(f"Processing file {i+1}/{len(pdf_files)}: {pdf_file.name}")
+            
+            # Track tokens before processing this document
+            previous_input_tokens = ai_client.total_input_tokens
+            previous_output_tokens = ai_client.total_output_tokens
+            
+            # Read file content and process...
+            # [Existing processing code]
+            
+            # Calculate tokens used for this document
+            doc_input_tokens = ai_client.total_input_tokens - previous_input_tokens
+            doc_output_tokens = ai_client.total_output_tokens - previous_output_tokens
+            
+            # Calculate cost for this document
+            doc_input_cost = (doc_input_tokens / 1000000) * ai_client.input_token_cost_per_million
+            doc_output_cost = (doc_output_tokens / 1000000) * ai_client.output_token_cost_per_million
+            doc_total_cost = doc_input_cost + doc_output_cost
+            
+            document_costs.append({
+                "filename": pdf_file.name,
+                "input_tokens": doc_input_tokens,
+                "output_tokens": doc_output_tokens,
+                "total_cost": doc_total_cost
+            })
+            
+            print(f"Document Cost: ${doc_total_cost:.4f} (Input: {doc_input_tokens} tokens, Output: {doc_output_tokens} tokens)")
+            
+        except Exception as e:
+            print(f"Error processing {pdf_file.name}: {str(e)}")
+    
+    # Display per-document costs
+    print("\n===== Per-Document Costs =====")
+    for doc_cost in document_costs:
+        print(f"{doc_cost['filename']}: ${doc_cost['total_cost']:.4f} (Input: {doc_cost['input_tokens']} tokens, Output: {doc_cost['output_tokens']} tokens)")
+    
+    # Display total costs
+    cost_info = ai_client.calculate_cost()
+    
+    print("\n===== GPT-4o Token Usage and Cost Summary =====")
+    print(f"Total Documents Processed: {len(document_costs)}")
+    print(f"Total Input Tokens: {cost_info['input_tokens']:,}")
+    print(f"Total Output Tokens: {cost_info['output_tokens']:,}")
+    print(f"Input Cost: ${cost_info['input_cost']:.4f}")
+    print(f"Output Cost: ${cost_info['output_cost']:.4f}")
+    print(f"Total Cost: ${cost_info['total_cost']:.4f}")
+    print("=======================================")
+    
+    print("Processing complete!")
