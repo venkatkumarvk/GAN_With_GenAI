@@ -452,4 +452,127 @@ with tabs[4]:
         if high_df is not None and not high_df.empty:
             # Apply any edits
             if len(st.session_state.edited_data) > 0:
-                high_df = apply_edits
+                high_df = apply_edits_to_csv(
+                    high_df,
+                    st.session_state.edited_data,
+                    st.session_state.edit_timestamps
+                )
+            
+            # Preview
+            st.dataframe(high_df.head(), use_container_width=True)
+            
+            # Create CSV for download
+            high_csv = high_df.to_csv(index=False)
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            
+            # Download button
+            st.download_button(
+                label="Download High Confidence CSV",
+                data=high_csv,
+                file_name=f"high_confidence_data_{timestamp}.csv",
+                mime="text/csv"
+            )
+        else:
+            st.info("No high confidence data available. Please view files in the Results tab first.")
+    
+    with col2:
+        st.subheader("Low Confidence Data")
+        if low_df is not None and not low_df.empty:
+            # Apply any edits
+            if len(st.session_state.edited_data) > 0:
+                low_df = apply_edits_to_csv(
+                    low_df,
+                    st.session_state.edited_data,
+                    st.session_state.edit_timestamps
+                )
+            
+            # Preview
+            st.dataframe(low_df.head(), use_container_width=True)
+            
+            # Create CSV for download
+            low_csv = low_df.to_csv(index=False)
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            
+            # Download button
+            st.download_button(
+                label="Download Low Confidence CSV",
+                data=low_csv,
+                file_name=f"low_confidence_data_{timestamp}.csv",
+                mime="text/csv"
+            )
+        else:
+            st.info("No low confidence data available. Please view files in the Results tab first.")
+    
+    # Option to download PDFs
+    st.subheader("Download Source PDFs")
+    
+    # List blobs in the source folder
+    source_blobs = list_blobs_by_folder(blob_service_client, source_container, source_folder)
+    source_df = create_blob_dataframe(source_blobs, source_folder)
+    
+    if not source_df.empty:
+        # Select files to download
+        selected_files = st.multiselect(
+            "Select PDF files to download",
+            options=source_df["Filename"].tolist()
+        )
+        
+        if selected_files:
+            # Create a zip file with selected PDFs
+            import zipfile
+            
+            # Create a BytesIO object to store the zip file
+            zip_buffer = io.BytesIO()
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            
+            # Create a ZipFile object
+            with zipfile.ZipFile(zip_buffer, 'a', zipfile.ZIP_DEFLATED, False) as zip_file:
+                for filename in selected_files:
+                    # Get the full path
+                    blob_path = source_folder + filename
+                    
+                    # Download blob content
+                    blob_content = download_blob_to_memory(
+                        blob_service_client,
+                        source_container,
+                        blob_path
+                    )
+                    
+                    if blob_content:
+                        # Add to zip
+                        zip_file.writestr(filename, blob_content)
+            
+            # Seek to the beginning of the BytesIO object
+            zip_buffer.seek(0)
+            
+            # Download button for zip file
+            st.download_button(
+                label="Download Selected PDFs as ZIP",
+                data=zip_buffer,
+                file_name=f"source_pdfs_{timestamp}.zip",
+                mime="application/zip"
+            )
+    else:
+        st.info("No source PDF files available.")
+
+# Add footer with instructions
+st.markdown("---")
+st.markdown("""
+### Usage Instructions:
+1. **Results Tab**: View source PDFs and their corresponding processed results.
+2. **Evaluation Tab**: Analyze confidence scores and identify documents needing review.
+3. **Manual Edit Tab**: Edit field values and save changes.
+4. **Bulk Upload Tab**: Combine high and low confidence data for upload to final container.
+5. **Download Tab**: Download CSVs and source PDFs to your local machine.
+
+The confidence level selector in the sidebar controls which data set you're working with.
+""")
+
+# Add a button to clear all data
+if st.sidebar.button("Clear All Data", type="secondary"):
+    # Clear session state
+    for key in list(st.session_state.keys()):
+        del st.session_state[key]
+    
+    # Force reload
+    st.experimental_rerun()
