@@ -55,12 +55,10 @@ if 'selected_file_idx' not in st.session_state:
     st.session_state.selected_file_idx = 0
 if 'pdf_content' not in st.session_state:
     st.session_state.pdf_content = None
-if 'pdf_page_count' not in st.session_state:
-    st.session_state.pdf_page_count = 0
-if 'current_page' not in st.session_state:
-    st.session_state.current_page = 1
 if 'csv_df' not in st.session_state:
     st.session_state.csv_df = None
+if 'edit_history' not in st.session_state:
+    st.session_state.edit_history = {}
 
 # Add sidebar with confidence selection
 st.sidebar.title("Options")
@@ -80,6 +78,7 @@ if confidence_selection != st.session_state.confidence_selection:
     st.session_state.pdf_content = None
     st.session_state.csv_df = None
     st.session_state.selected_file_idx = 0
+    st.session_state.edit_history = {} # Clear edit history
 
 # Set paths based on config and confidence selection
 container_name = config["container_name"]
@@ -117,14 +116,11 @@ else:
         st.session_state.selected_file_idx = selected_file_idx
         st.session_state.pdf_content = None  # Reset PDF content when changing files
         st.session_state.csv_df = None
-        st.session_state.current_page = 1
 
     # Load PDF and CSV for selected file
     if st.session_state.pdf_content is None:
         source_blob = matched_files[selected_file_idx]["source_blob"]
         st.session_state.pdf_content = download_blob_to_memory(blob_service_client, container_name, source_blob)
-        if st.session_state.pdf_content:
-            st.session_state.pdf_page_count = get_pdf_page_count(st.session_state.pdf_content)
 
     if st.session_state.csv_df is None:
         processed_blob = matched_files[selected_file_idx]["processed_blob"]
@@ -134,22 +130,6 @@ else:
     if st.session_state.pdf_content:
         st.sidebar.markdown("---")
         st.sidebar.subheader("PDF Preview")
-        
-        # Page navigation if multiple pages
-        if st.session_state.pdf_page_count > 1:
-            col1, col2 = st.sidebar.columns([3, 1])
-            
-            with col1:
-                st.session_state.current_page = st.slider(
-                    "Page", 
-                    min_value=1, 
-                    max_value=st.session_state.pdf_page_count,
-                    value=st.session_state.current_page
-                )
-            
-            with col2:
-                st.write(f"of {st.session_state.pdf_page_count}")
-        
         base64_pdf = convert_pdf_to_base64(st.session_state.pdf_content)
         display_pdf_viewer(base64_pdf, height=400)
 
@@ -213,39 +193,54 @@ with tabs[1]:
             st.session_state.csv_df = load_csv_from_blob(blob_service_client, container_name, processed_blob)
 
         if st.session_state.csv_df is not None:
-            # Create a form-based editor with expanders
+            # Initialize tracking columns if they don't exist
+            tracking_columns = ["Manual_Edit", "Edit_Timestamp", "Original_Value", "New_Value"]
+            for col in tracking_columns:
+                if col not in st.session_state.csv_df.columns:
+                    st.session_state.csv_df[col] = ""
+            
+            # Get the base name for this file (for tracking purposes)
+            base_name = selected_file["base_name"]
+            
+            # Initialize edit history for this file if not present
+            if base_name not in st.session_state.edit_history:
+                st.session_state.edit_history[base_name] = {}
+            
+            # Create a form-based editor
             st.subheader("Form-based Edit")
             
-            # Get the data fields (excluding confidence columns)
-            data_fields = [col for col in st.session_state.csv_df.columns if not col.endswith("Confidence") and col not in ["Page"]]
+            # Get all fields (excluding confidence columns and tracking columns)
+            all_cols = st.session_state.csv_df.columns.tolist()
+            data_fields = []
+            confidence_map = {}
+            
+            # Find data fields and their corresponding confidence columns
+            for col in all_cols:
+                if col.endswith("_Confidence"):
+                    base_field = col.replace("_Confidence", "")
+                    confidence_map[base_field] = col
+                elif col not in tracking_columns and col != "Page":
+                    data_fields.append(col)
             
             # Create a form for editing
             with st.form(key="edit_form"):
-                # Initialize edited_data if not present
-                if selected_file["base_name"] not in st.session_state.edited_data:
-                    st.session_state.edited_data[selected_file["base_name"]] = {}
-                
                 # Use expanders for each row
                 for index, row in st.session_state.csv_df.iterrows():
                     page_num = row.get("Page", index + 1)
                     
-                    # Create an expander for each page
-                    with st.expander(f"Page {page_num}", expanded=index==0):
+                    # Create an expander for each row
+                    with st.expander(f"Row {index+1} (Page {page_num})", expanded=index==0):
                         st.write(f"Edit data for page {page_num}")
                         
-                        # Create a column for each field
+                        # Create inputs for each field
                         for field in data_fields:
-                            # Get field value and confidence
+                            # Get field value
                             field_value = row.get(field, "")
-                            confidence_field = f"{field} Confidence"
-                            confidence = row.get(confidence_field, 0)
                             
-                            # Get current edited value if available
-                            current_value = field_value
-                            if selected_file["base_name"] in st.session_state.edited_data and \
-                               index in st.session_state.edited_data[selected_file["base_name"]] and \
-                               field in st.session_state.edited_data[selected_file["base_name"]][index]:
-                                current_value = st.session_state.edited_data[selected_file["base_name"]][index][field]
+                            # Get confidence value if available
+                            confidence = 0
+                            if field in confidence_map and confidence_map[field] in row:
+                                confidence = row[confidence_map[field]]
                             
                             # Color code based on confidence
                             confidence_color = "green" if confidence >= 95 else "red"
@@ -255,15 +250,22 @@ with tabs[1]:
                             # Text input for the field
                             new_value = st.text_input(
                                 f"{field}",
-                                value=current_value,
-                                key=f"edit_{selected_file['base_name']}_{index}_{field}"
+                                value=field_value,
+                                key=f"edit_{base_name}_{index}_{field}"
                             )
                             
-                            # Store the edited value
+                            # Track edits
                             if new_value != field_value:
-                                if index not in st.session_state.edited_data[selected_file["base_name"]]:
-                                    st.session_state.edited_data[selected_file["base_name"]][index] = {}
-                                st.session_state.edited_data[selected_file["base_name"]][index][field] = new_value
+                                # Store original value if this is the first edit
+                                if index not in st.session_state.edit_history[base_name] or field not in st.session_state.edit_history[base_name][index]:
+                                    if index not in st.session_state.edit_history[base_name]:
+                                        st.session_state.edit_history[base_name][index] = {}
+                                    
+                                    st.session_state.edit_history[base_name][index][field] = {
+                                        "original_value": field_value,
+                                        "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                                        "new_value": new_value
+                                    }
                 
                 # Submit button
                 submitted = st.form_submit_button("Save Edits")
@@ -273,10 +275,18 @@ with tabs[1]:
                         # Apply edits to the dataframe
                         edited_df = st.session_state.csv_df.copy()
                         
-                        if selected_file["base_name"] in st.session_state.edited_data:
-                            for idx, field_edits in st.session_state.edited_data[selected_file["base_name"]].items():
-                                for field, value in field_edits.items():
-                                    edited_df.at[idx, field] = value
+                        # Apply all tracked edits
+                        if base_name in st.session_state.edit_history:
+                            for idx, field_edits in st.session_state.edit_history[base_name].items():
+                                for field, edit_info in field_edits.items():
+                                    # Update field value
+                                    edited_df.at[idx, field] = edit_info["new_value"]
+                                    
+                                    # Update tracking columns
+                                    edited_df.at[idx, "Manual_Edit"] = "Y"
+                                    edited_df.at[idx, "Edit_Timestamp"] = edit_info["timestamp"]
+                                    edited_df.at[idx, "Original_Value"] = f"{field}: {edit_info['original_value']}"
+                                    edited_df.at[idx, "New_Value"] = f"{field}: {edit_info['new_value']}"
                         
                         # Save to blob storage
                         output_container = config.get("final_output_container", container_name)
@@ -310,24 +320,42 @@ with tabs[1]:
                         
                         if pdf_success and csv_success:
                             st.success(f"Successfully saved edits to {output_container}")
-                            # Clear edits after successful save
-                            st.session_state.edited_data[selected_file["base_name"]] = {}
-                            # Update the CSV in session state
+                            # Update the CSV in session state with tracking information
                             st.session_state.csv_df = edited_df
                         else:
                             st.error("Failed to save edits")
                     except Exception as e:
                         st.error(f"Error saving edits: {str(e)}")
             
+            # Show edit history and tracking information
+            if base_name in st.session_state.edit_history and st.session_state.edit_history[base_name]:
+                st.subheader("Edit History")
+                
+                edit_data = []
+                for idx, field_edits in st.session_state.edit_history[base_name].items():
+                    for field, edit_info in field_edits.items():
+                        edit_data.append({
+                            "Row": idx + 1,
+                            "Field": field,
+                            "Original Value": edit_info["original_value"],
+                            "New Value": edit_info["new_value"],
+                            "Edit Time": edit_info["timestamp"]
+                        })
+                
+                if edit_data:
+                    edit_history_df = pd.DataFrame(edit_data)
+                    st.dataframe(edit_history_df, use_container_width=True)
+            
             # Add a Validate button
             if st.button("Validate Edits"):
                 # Apply current edits to a temporary dataframe for validation
                 temp_df = st.session_state.csv_df.copy()
                 
-                if selected_file["base_name"] in st.session_state.edited_data:
-                    for idx, field_edits in st.session_state.edited_data[selected_file["base_name"]].items():
-                        for field, value in field_edits.items():
-                            temp_df.at[idx, field] = value
+                # Apply all tracked edits
+                if base_name in st.session_state.edit_history:
+                    for idx, field_edits in st.session_state.edit_history[base_name].items():
+                        for field, edit_info in field_edits.items():
+                            temp_df.at[idx, field] = edit_info["new_value"]
                 
                 # Perform validation logic
                 validation_errors = {}
@@ -343,25 +371,25 @@ with tabs[1]:
                     error_message = "The following fields have errors:\n"
                     for index, error_cols in validation_errors.items():
                         page_num = temp_df.at[index, "Page"] if "Page" in temp_df.columns else index + 1
-                        error_message += f"Page {page_num}: {', '.join(error_cols)}\n"
+                        error_message += f"Row {index+1} (Page {page_num}): {', '.join(error_cols)}\n"
                     st.error(error_message)
-                    st.session_state.validation_results[selected_file["base_name"]] = validation_errors
+                    st.session_state.validation_results[base_name] = validation_errors
                 else:
                     st.success("All data is valid!")
-                    st.session_state.validation_results[selected_file["base_name"]] = {}
+                    st.session_state.validation_results[base_name] = {}
             
             # Display validation results
-            if selected_file["base_name"] in st.session_state.validation_results:
-                validation_results = st.session_state.validation_results[selected_file["base_name"]]
+            if base_name in st.session_state.validation_results:
+                validation_results = st.session_state.validation_results[base_name]
                 if validation_results:
                     st.warning("Validation Issues:")
                     for index, error_cols in validation_results.items():
                         page_num = st.session_state.csv_df.at[index, "Page"] if "Page" in st.session_state.csv_df.columns else index + 1
-                        st.write(f"Page {page_num}: {', '.join(error_cols)}")
+                        st.write(f"Row {index+1} (Page {page_num}): {', '.join(error_cols)}")
         else:
             st.error("Failed to load CSV for editing")
 
-# Tab 3: Bulk Operations
+# Tab 3: Bulk Operations (unchanged from your original code)
 with tabs[2]:
     st.header("Bulk Operations")
 
