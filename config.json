@@ -1,6 +1,10 @@
 {
-    "azure_storage_connection_string": "your_azure_storage_connection_string",
-    "source_container": "source-container-name",
-    "processed_container": "processed-container-name",
-    "final_container": "final-container-name"
+    "storage_connection_string": "YOUR_AZURE_STORAGE_CONNECTION_STRING",
+    "container_name": "pdfresult",
+    "high_confidence_source": "APinvoice/high_confidence/source/",
+    "high_confidence_processed": "APinvoice/high_confidence/processed_result/",
+    "low_confidence_source": "APinvoice/low_confidence/source/",
+    "low_confidence_processed": "APinvoice/low_confidence/processed_result/",
+    "output_container": "pdfresult_final",
+    "final_folder": "APinvoice_final"
 }
