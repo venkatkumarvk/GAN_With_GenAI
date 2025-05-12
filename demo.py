@@ -125,25 +125,21 @@ def load_csv_from_blob(blob_service_client, container_name, blob_name):
         return None
 
 # Upload to blob storage
-def upload_to_blob_storage(blob_service_client, container_name, blob_name, data, content_type):
-    """Upload data to Azure Blob Storage."""
+def upload_blob_from_memory(blob_service_client, container_name, blob_name, content):
+    """Upload data to Azure Blob Storage from memory."""
     try:
-        container_client = blob_service_client.get_container_client(container_name)
-
-        # Create the container if it doesn't exist
-        if not container_client.exists():
-            container_client.create_container()
-
-        # Upload blob
-        blob_client = container_client.get_blob_client(blob_name)
-
-        # Upload the file
-        blob_client.upload_blob(data, overwrite=True)
-
-        return True, blob_client.url
+        blob_client = blob_service_client.get_container_client(container_name).get_blob_client(blob_name)
+        blob_client.upload_blob(content, overwrite=True)
+        return True
     except Exception as e:
-        st.error(f"Error uploading to blob: {str(e)}")
+        st.error(f"Error uploading to blob {blob_name}: {str(e)}")
         return False, str(e)
+
+def save_csv_to_blob(blob_service_client, container_name, blob_name, df):
+    """Save a pandas DataFrame to a CSV file in Azure Blob Storage."""
+    csv_buffer = io.StringIO()
+    df.to_csv(csv_buffer, index=False)
+    return upload_blob_from_memory(blob_service_client, container_name, blob_name, csv_buffer.getvalue())
 
 # Extract filename from blob path
 def get_filename_from_blob_path(blob_path):
@@ -201,7 +197,8 @@ from helper_functions import (
     upload_to_blob_storage,
     get_filename_from_blob_path,
     match_source_and_processed_files,
-    apply_edits_to_csv
+    apply_edits_to_csv,
+    save_csv_to_blob
 )
 
 # App title and configuration
@@ -230,6 +227,8 @@ if 'current_file_index' not in st.session_state:
     st.session_state.current_file_index = 0
 if 'confidence_selection' not in st.session_state:
     st.session_state.confidence_selection = "high_confidence"
+if 'validation_results' not in st.session_state:
+    st.session_state.validation_results = {}
 
 # Add sidebar with confidence selection
 st.sidebar.title("Options")
@@ -245,6 +244,7 @@ if confidence_selection != st.session_state.confidence_selection:
     st.session_state.confidence_selection = confidence_selection
     st.session_state.current_file_index = 0  # Reset file index when changing confidence level
     st.session_state.edited_data = {}  # Clear edits
+    st.session_state.validation_results = {} # Clear validation
 
 # Set paths based on config and confidence selection
 container_name = config["container_name"]
@@ -374,36 +374,64 @@ with tabs[1]:
 
                 # Create output blob name
                 base_name = matched_files[edit_file_idx]["base_name"]
-                output_blob_name = f"{output_prefix}{base_name}.csv"
+                pdf_output_blob_name = f"{output_prefix}pdf/{base_name}.pdf"  # PDF goes to pdf subfolder
+                csv_output_blob_name = f"{output_prefix}csv/{base_name}.csv"  # CSV goes to csv subfolder
 
                 # Convert dataframe to CSV
                 csv_buffer = io.StringIO()
                 edited_df.to_csv(csv_buffer, index=False)
 
                 # Upload to blob storage
-                success, url = upload_to_blob_storage(
+                pdf_success, pdf_url = upload_to_blob_storage(
                     blob_service_client,
                     output_container,
-                    output_blob_name,
-                    csv_buffer.getvalue(),
-                    "text/csv"
+                    pdf_output_blob_name,
+                    pdf_content,
+                    "application/pdf"
+                )
+                csv_success, csv_url = save_csv_to_blob(
+                    blob_service_client,
+                    output_container,
+                    csv_output_blob_name,
+                    edited_df
                 )
 
-                if success:
-                    st.success(f"Successfully saved edits to {output_blob_name}")
+                if pdf_success and csv_success:
+                    st.success(f"Successfully saved edits to {output_container}")
                 else:
                     st.error("Failed to save edits")
 
-                # Also save source PDF to final output
-                if pdf_content:
-                    source_output_blob = f"{output_prefix}{base_name}.pdf"
-                    upload_to_blob_storage(
-                        blob_service_client,
-                        output_container,
-                        source_output_blob,
-                        pdf_content,
-                        "application/pdf"
-                    )
+
+
+        # Add a Validate button
+        if st.button("Validate"):
+            # Perform validation logic here
+            # For demonstration, let's assume we check for non-empty fields
+            validation_errors = {}
+            for index, row in edited_df.iterrows():  # Use edited_df
+                for col, value in row.items():
+                    if pd.isna(value) or str(value).strip() == "":
+                        if index not in validation_errors:
+                            validation_errors[index] = []
+                        validation_errors[index].append(col)
+            
+            if validation_errors:
+                error_message = "The following fields have errors:\n"
+                for index, error_cols in validation_errors.items():
+                    error_message += f"Row {index}: {', '.join(error_cols)}\n"
+                st.error(error_message)
+                st.session_state.validation_results[edit_file_idx] = validation_errors
+            else:
+                st.success("All data is valid!")
+                st.session_state.validation_results[edit_file_idx] = {} # Clear errors
+
+        # Display validation results
+        if edit_file_idx in st.session_state.validation_results:
+            validation_results = st.session_state.validation_results[edit_file_idx]
+            if validation_results:
+                st.warning("Validation Issues:")
+                for index, error_cols in validation_results.items():
+                    st.write(f"Row {index}: {', '.join(error_cols)}")
 
 # Tab 3: Bulk Operations
 with tabs[2]:
@@ -442,21 +470,17 @@ with tabs[2]:
                         pdf_success, _ = upload_to_blob_storage(
                             blob_service_client,
                             final_container,
-                            f"{final_prefix}{match['base_name']}.pdf",
+                            f"{final_prefix}pdf/{match['base_name']}.pdf",  # Store PDF in 'pdf' subfolder
                             pdf_content,
                             "application/pdf"
                         )
 
                         # Upload CSV to final container
-                        csv_buffer = io.StringIO()
-                        csv_df.to_csv(csv_buffer, index=False)
-
-                        csv_success, _ = upload_to_blob_storage(
+                        csv_success, _ = save_csv_to_blob(
                             blob_service_client,
                             final_container,
-                            f"{final_prefix}{match['base_name']}.csv",
-                            csv_buffer.getvalue(),
-                            "text/csv"
+                            f"{final_prefix}csv/{match['base_name']}.csv",  # Store CSV in 'csv' subfolder
+                            csv_df
                         )
 
                         if pdf_success and csv_success:
@@ -493,14 +517,14 @@ with tabs[2]:
                         # Get PDF
                         pdf_content = download_blob_to_memory(blob_service_client, container_name, match["source_blob"])
                         if pdf_content:
-                            zip_file.writestr(f"{match['base_name']}.pdf", pdf_content)
+                            zip_file.writestr(f"pdf/{match['base_name']}.pdf", pdf_content) # added pdf/ prefix
 
                         # Get CSV
                         csv_df = load_csv_from_blob(blob_service_client, container_name, match["processed_blob"])
                         if csv_df is not None:
                             csv_buffer = io.StringIO()
                             csv_df.to_csv(csv_buffer, index=False)
-                            zip_file.writestr(f"{match['base_name']}.csv", csv_buffer.getvalue())
+                            zip_file.writestr(f"csv/{match['base_name']}.csv", csv_buffer.getvalue()) # added csv/ prefix
                     except Exception as e:
                         st.error(f"Error adding {match['base_name']} to zip: {str(e)}")
 
