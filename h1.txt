@@ -286,3 +286,18 @@ class AzureOpenAIClient:
     print("=========================")
     
     print("Processing complete!")
+
+
+# Extract token usage information from the batch responses
+            total_input_tokens = 0
+            total_output_tokens = 0
+            
+            for raw_response in raw_responses:
+                try:
+                    json_response = json.loads(raw_response)
+                    if "response" in json_response and "usage" in json_response["response"]:
+                        usage = json_response["response"]["usage"]
+                        if "prompt_tokens" in usage:
+                            total_input_tokens += usage["prompt_tokens"]
+                        if "completion_tokens" in usage:
+                            total_output_tokens += usage["completion_tokens"]
