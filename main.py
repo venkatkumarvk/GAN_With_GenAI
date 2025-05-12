@@ -2,412 +2,454 @@ import streamlit as st
 import pandas as pd
 import os
 import io
-import json
-import gc
 from datetime import datetime
 from helper_functions import (
-    load_config, get_blob_service_client, list_blobs_in_folder, 
-    download_blob_to_memory, parse_csv_from_blob, get_pdf_preview,
-    convert_pdf_to_base64, extract_filename_without_path, 
-    update_csv_in_blob, has_high_confidence, create_zip_from_blobs,
-    apply_edits_to_csv, get_csv_summary
+    load_config, get_blob_service_client, list_blobs_by_folder, create_blob_dataframe,
+    download_blob_to_memory, render_pdf_preview, convert_pdf_to_base64, display_pdf_viewer,
+    load_csv_from_blob, update_edited_data, apply_edits_to_csv, create_bulk_upload_csv,
+    upload_edited_results
 )
 
+# Set page configuration
 st.set_page_config(
-    page_title="PDF Financial Data Extractor",
+    page_title="PDF Financial Data Viewer",
     page_icon="📊",
     layout="wide"
 )
 
-# Initialize session state variables
-if 'selected_confidence' not in st.session_state:
-    st.session_state.selected_confidence = "High Confidence"
-if 'selected_csv' not in st.session_state:
-    st.session_state.selected_csv = None
-if 'csv_data' not in st.session_state:
-    st.session_state.csv_data = None
-if 'selected_pdf' not in st.session_state:
-    st.session_state.selected_pdf = None
+# Initialize session state for persistence
 if 'edited_data' not in st.session_state:
     st.session_state.edited_data = {}
-if 'download_completed' not in st.session_state:
-    st.session_state.download_completed = False
+if 'edit_timestamps' not in st.session_state:
+    st.session_state.edit_timestamps = {}
+if 'high_confidence_df' not in st.session_state:
+    st.session_state.high_confidence_df = None
+if 'low_confidence_df' not in st.session_state:
+    st.session_state.low_confidence_df = None
+if 'selected_confidence' not in st.session_state:
+    st.session_state.selected_confidence = "High"
+if 'currently_editing_file' not in st.session_state:
+    st.session_state.currently_editing_file = None
 
 # Load configuration
 config = load_config()
 
-if not config:
-    st.error("Failed to load configuration from config.json. Please make sure the file exists and is properly formatted.")
-    st.stop()
+# Get blob service client
+blob_service_client = get_blob_service_client(config)
 
-# Extract configuration
-azure_storage_connection_string = config.get("azure_storage_connection_string")
-container_name = config.get("container_name")
-high_confidence_source_folder = config.get("high_confidence_source_folder", "high_confidence/source/")
-high_confidence_processed_folder = config.get("high_confidence_processed_folder", "high_confidence/processed/")
-low_confidence_source_folder = config.get("low_confidence_source_folder", "low_confidence/source/")
-low_confidence_processed_folder = config.get("low_confidence_processed_folder", "low_confidence/processed/")
+# Main title
+st.title("PDF Financial Data Viewer")
 
-# Initialize Azure Blob Storage client
-blob_service_client = get_blob_service_client(azure_storage_connection_string)
-
-if not blob_service_client:
-    st.error("Failed to initialize Azure Blob Storage client. Please check your connection string.")
-    st.stop()
-
-def reset_download_state():
-    """Reset the download completion state."""
-    st.session_state.download_completed = False
-
-def display_pdf_viewer(base64_pdf, height=500):
-    """
-    Display a PDF viewer in the Streamlit app using base64 encoded PDF.
-    """
-    if not base64_pdf:
-        st.error("No PDF data available to display")
-        return
-        
-    # Create the HTML with PDF.js for better viewing
-    pdf_display = f"""
-    <iframe src="data:application/pdf;base64,{base64_pdf}" width="100%" height="{height}" 
-    type="application/pdf"></iframe>
-    """
-    
-    # Display the PDF
-    st.markdown(pdf_display, unsafe_allow_html=True)
-
-# Title and header
-st.title("PDF Financial Data Extractor")
-st.header("View and Edit Extraction Results")
-
-# Sidebar for navigation
-st.sidebar.title("Navigation")
-
-# Radio button for confidence level selection
-st.sidebar.header("Filter by Confidence")
-selected_confidence = st.sidebar.radio(
-    "Select confidence level:",
-    ["High Confidence", "Low Confidence"],
-    key="confidence_radio"
+# Sidebar with confidence selection
+st.sidebar.title("Options")
+confidence_level = st.sidebar.radio(
+    "Select Confidence Level",
+    ["High", "Low"],
+    key="confidence_selector"
 )
 
-st.session_state.selected_confidence = selected_confidence
+st.session_state.selected_confidence = confidence_level
 
-# Get folders based on selection
-if selected_confidence == "High Confidence":
-    source_folder = high_confidence_source_folder
-    processed_folder = high_confidence_processed_folder
-else:
-    source_folder = low_confidence_source_folder
-    processed_folder = low_confidence_processed_folder
+# Get container names from config
+source_container = config.get("source_container", "pdf-extraction-source")
+results_container = config.get("results_container", "pdf-extraction-results")
 
-# List files in the folders
-source_blobs = list_blobs_in_folder(blob_service_client, container_name, source_folder)
-processed_blobs = list_blobs_in_folder(blob_service_client, container_name, processed_folder)
+# Get folder prefixes from config
+source_folder = config.get("source_folder", "source/")
+processed_folder = config.get(f"{confidence_level.lower()}_confidence_folder", f"{confidence_level.lower()}_confidence/")
 
-# Extract filenames without paths
-source_filenames = [extract_filename_without_path(blob) for blob in source_blobs]
-processed_filenames = [extract_filename_without_path(blob) for blob in processed_blobs]
+# Main navigation tabs
+tabs = st.tabs(["Results", "Evaluation", "Manual Edit", "Bulk Upload", "Download"])
 
-# Create a mapping of processed filenames to their full blob paths
-processed_mapping = {extract_filename_without_path(blob): blob for blob in processed_blobs}
-
-# Create tabs for different views
-tabs = st.tabs(["Results View", "Evaluation", "Manual Edit", "Bulk Upload/Download"])
-
-# Results View Tab
+# Tab 1: Results
 with tabs[0]:
-    st.subheader(f"{selected_confidence} Results")
+    st.header(f"{confidence_level} Confidence Results")
     
-    # Filter for CSV files in the processed folder
-    csv_blobs = [blob for blob in processed_blobs if blob.lower().endswith('.csv')]
+    # List blobs in the source and processed folders
+    source_blobs = list_blobs_by_folder(blob_service_client, source_container, source_folder)
+    processed_blobs = list_blobs_by_folder(blob_service_client, results_container, processed_folder)
     
-    if not csv_blobs:
-        st.warning(f"No CSV files found in the {selected_confidence} folder.")
-    else:
-        # Create a dataframe with the filenames
-        blob_df = pd.DataFrame({
-            'Filename': [extract_filename_without_path(blob) for blob in csv_blobs],
-            'Full Path': csv_blobs
-        })
-        
-        # Display the CSV files
-        st.write(f"Found {len(csv_blobs)} CSV result files:")
-        st.dataframe(blob_df[['Filename']], use_container_width=True)
-        
-        # Select a CSV to view
-        selected_csv_filename = st.selectbox(
-            "Select a CSV file to view:",
-            options=blob_df['Filename'].tolist(),
-            key="csv_select"
+    # Create DataFrames
+    source_df = create_blob_dataframe(source_blobs, source_folder)
+    processed_df = create_blob_dataframe(processed_blobs, processed_folder)
+    
+    # Create two columns for display
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        st.subheader("Source Files")
+        st.dataframe(source_df, use_container_width=True)
+    
+    with col2:
+        st.subheader("Processed Results")
+        st.dataframe(processed_df, use_container_width=True)
+    
+    # Select a file to preview
+    st.subheader("Preview Files")
+    
+    # Find matching filenames between source and processed
+    matching_files = []
+    for source_file in source_df["Filename"]:
+        for processed_file in processed_df["Filename"]:
+            if source_file in processed_file or processed_file in source_file:
+                matching_files.append((source_file, processed_file))
+    
+    if matching_files:
+        # Select a file pair to view
+        selected_pair = st.selectbox(
+            "Select File Pair to Preview",
+            options=matching_files,
+            format_func=lambda x: f"Source: {x[0]} | Processed: {x[1]}"
         )
         
-        if selected_csv_filename:
-            # Get the full blob path
-            selected_csv_path = blob_df[blob_df['Filename'] == selected_csv_filename]['Full Path'].iloc[0]
-            st.session_state.selected_csv = selected_csv_path
+        if selected_pair:
+            source_file, processed_file = selected_pair
             
-            # Parse the CSV file
-            csv_data = parse_csv_from_blob(blob_service_client, container_name, selected_csv_path)
-            st.session_state.csv_data = csv_data
+            # Get the full paths
+            source_path = source_folder + source_file
+            processed_path = processed_folder + processed_file
             
-            if csv_data is not None:
-                # Show the CSV data
-                st.write(f"Data from {selected_csv_filename}:")
-                st.dataframe(csv_data, use_container_width=True)
+            # Create two columns for preview
+            prev_col1, prev_col2 = st.columns(2)
+            
+            with prev_col1:
+                st.write(f"### Source: {source_file}")
                 
-                # Try to find corresponding PDF in source folder
-                pdf_filename = selected_csv_filename.replace('.csv', '.pdf')
-                pdf_blob_path = None
+                # Download and display PDF
+                source_content = download_blob_to_memory(
+                    blob_service_client, 
+                    source_container, 
+                    source_path
+                )
                 
-                for source_blob in source_blobs:
-                    if extract_filename_without_path(source_blob) == pdf_filename:
-                        pdf_blob_path = source_blob
-                        break
+                if source_content:
+                    source_base64 = convert_pdf_to_base64(source_content)
+                    display_pdf_viewer(source_base64, height=400)
+            
+            with prev_col2:
+                st.write(f"### Processed: {processed_file}")
                 
-                if pdf_blob_path:
-                    st.session_state.selected_pdf = pdf_blob_path
+                # Load and display CSV
+                df = load_csv_from_blob(
+                    blob_service_client,
+                    results_container,
+                    processed_path
+                )
+                
+                if df is not None:
+                    st.dataframe(df, use_container_width=True)
                     
-                    # Add a button to show the PDF preview
-                    if st.button("Show PDF Preview"):
-                        with st.spinner(f"Loading PDF preview for {pdf_filename}..."):
-                            base64_pdf = convert_pdf_to_base64(blob_service_client, container_name, pdf_blob_path)
-                            
-                            if base64_pdf:
-                                st.write(f"### Preview of {pdf_filename}")
-                                display_pdf_viewer(base64_pdf)
-                            else:
-                                st.error(f"Could not load PDF preview for {pdf_filename}")
-                else:
-                    st.warning(f"Could not find corresponding PDF file for {selected_csv_filename}")
-            else:
-                st.error(f"Could not parse CSV file {selected_csv_filename}")
-
-# Evaluation Tab
-with tabs[1]:
-    st.subheader("Extraction Quality Evaluation")
-    
-    # Select a CSV to evaluate
-    if 'csv_data' in st.session_state and st.session_state.csv_data is not None:
-        csv_data = st.session_state.csv_data
-        
-        # Get summary statistics
-        summary = get_csv_summary(csv_data)
-        
-        if summary:
-            # Display basic info
-            col1, col2, col3 = st.columns(3)
-            with col1:
-                st.metric("Total Rows", summary['num_rows'])
-            with col2:
-                st.metric("Manually Edited Rows", summary['edited_rows'])
-            with col3:
-                confidence_level = "High Confidence" if has_high_confidence(csv_data, 95.0) else "Low Confidence"
-                st.metric("Confidence Level", confidence_level)
-            
-            # Display confidence statistics
-            st.subheader("Field Confidence Statistics")
-            
-            # Create a DataFrame for confidence stats
-            conf_stats = []
-            for field, stats in summary['confidence_stats'].items():
-                conf_stats.append({
-                    'Field': field,
-                    'Average Confidence': f"{stats['avg']:.2f}%",
-                    'Minimum Confidence': f"{stats['min']:.2f}%",
-                    'Maximum Confidence': f"{stats['max']:.2f}%"
-                })
-            
-            conf_stats_df = pd.DataFrame(conf_stats)
-            st.dataframe(conf_stats_df, use_container_width=True)
-            
-            # Create a bar chart of average confidences
-            st.subheader("Average Confidence by Field")
-            chart_data = pd.DataFrame({
-                'Field': [field for field in summary['confidence_stats'].keys()],
-                'Confidence': [stats['avg'] for stats in summary['confidence_stats'].values()]
-            })
-            st.bar_chart(chart_data, x='Field', y='Confidence')
-        else:
-            st.warning("Could not generate evaluation for the selected CSV file.")
+                    # Store in session state for later use
+                    if confidence_level == "High":
+                        st.session_state.high_confidence_df = df
+                    else:
+                        st.session_state.low_confidence_df = df
     else:
-        st.info("Please select a CSV file in the Results View tab first.")
+        st.info("No matching files found between source and processed folders")
 
-# Manual Edit Tab
-with tabs[2]:
-    st.subheader("Manual Editing")
+# Tab 2: Evaluation
+with tabs[1]:
+    st.header("Evaluation Results")
     
-    if 'csv_data' in st.session_state and st.session_state.csv_data is not None:
-        csv_data = st.session_state.csv_data
-        
-        # Select a row to edit
-        if not csv_data.empty:
-            row_indices = csv_data.index.tolist()
-            selected_row = st.selectbox("Select a row to edit:", row_indices)
+    # Load DataFrame from session state
+    df = st.session_state.high_confidence_df if confidence_level == "High" else st.session_state.low_confidence_df
+    
+    if df is not None and not df.empty:
+        # Check if DataFrame has confidence scores
+        if any(col.endswith(' Confidence') for col in df.columns):
+            # Analyze confidence scores
+            confidence_cols = [col for col in df.columns if col.endswith(' Confidence')]
             
-            if selected_row is not None:
-                # Get the row data
-                row_data = csv_data.loc[selected_row]
+            # Calculate average confidence by field
+            field_confidences = {}
+            for col in confidence_cols:
+                field_name = col.replace(' Confidence', '')
+                avg_confidence = df[col].mean()
+                field_confidences[field_name] = avg_confidence
+            
+            # Display field confidence scores
+            st.subheader("Average Confidence by Field")
+            
+            # Create a DataFrame for field confidences
+            field_conf_df = pd.DataFrame({
+                "Field": list(field_confidences.keys()),
+                "Average Confidence (%)": [round(conf, 2) for conf in field_confidences.values()]
+            })
+            
+            # Sort by confidence
+            field_conf_df = field_conf_df.sort_values("Average Confidence (%)", ascending=False)
+            
+            # Display as table
+            st.dataframe(field_conf_df, use_container_width=True)
+            
+            # Create a bar chart
+            st.bar_chart(field_conf_df.set_index("Field"))
+            
+            # Show files with low confidence fields
+            st.subheader("Files with Low Confidence Fields")
+            
+            # Identify rows with any field below threshold
+            threshold = 90 if confidence_level == "High" else 75
+            low_confidence_mask = pd.Series(False, index=df.index)
+            
+            for col in confidence_cols:
+                low_confidence_mask = low_confidence_mask | (df[col] < threshold)
+            
+            low_confidence_rows = df[low_confidence_mask]
+            
+            if not low_confidence_rows.empty:
+                st.dataframe(low_confidence_rows[["Filename", "Page"] + confidence_cols], use_container_width=True)
+            else:
+                st.success(f"No fields with confidence below {threshold}%")
+        else:
+            st.warning("No confidence score columns found in the data")
+    else:
+        st.info("No data available for evaluation. Please select a file pair in the Results tab.")
+
+# Tab 3: Manual Edit
+with tabs[2]:
+    st.header("Manual Editing")
+    
+    # Load DataFrame from session state
+    df = st.session_state.high_confidence_df if confidence_level == "High" else st.session_state.low_confidence_df
+    
+    if df is not None and not df.empty:
+        # Get unique filenames
+        filenames = df["Filename"].unique()
+        
+        # Select a file to edit
+        selected_file = st.selectbox(
+            "Select File to Edit",
+            options=filenames
+        )
+        
+        if selected_file:
+            # Store currently editing file
+            st.session_state.currently_editing_file = selected_file
+            
+            # Filter to just this file
+            file_df = df[df["Filename"] == selected_file].copy()
+            
+            # Get pages for this file
+            pages = file_df["Page"].unique()
+            
+            # Select a page to edit
+            selected_page = st.selectbox(
+                "Select Page to Edit",
+                options=pages
+            )
+            
+            if selected_page is not None:
+                # Get the row for this page
+                page_data = file_df[file_df["Page"] == selected_page].iloc[0]
                 
-                # Create a form for editing
-                with st.form(key=f"edit_form_{selected_row}"):
-                    st.write(f"### Editing Row {selected_row}")
+                # Define the fields we can edit
+                editable_fields = [
+                    "VendorName", "InvoiceNumber", "InvoiceDate", "CustomerName", 
+                    "PurchaseOrder", "StockCode", "UnitPrice", "InvoiceAmount", 
+                    "Freight", "Salestax", "Total"
+                ]
+                
+                # Only include fields that exist in the DataFrame
+                editable_fields = [f for f in editable_fields if f in file_df.columns]
+                
+                # Create an editing form
+                with st.form(key=f"edit_form_{selected_file}_{selected_page}"):
+                    st.write(f"### Editing {selected_file} - Page {selected_page}")
                     
-                    # Create input fields for each column that's not a confidence column
+                    # Create columns for field and confidence
                     edited_values = {}
-                    for column in csv_data.columns:
-                        if "Confidence" not in column and column != "Manual_Edit":
-                            # Get current value
-                            current_value = row_data[column]
+                    
+                    for field in editable_fields:
+                        col1, col2 = st.columns([3, 1])
+                        
+                        # Get current value and confidence
+                        current_value = page_data.get(field, "")
+                        confidence_col = f"{field} Confidence"
+                        confidence = page_data.get(confidence_col, 0) if confidence_col in page_data else 0
+                        
+                        # Check if we have an edited value
+                        edited_value = None
+                        if (selected_file in st.session_state.edited_data and 
+                            str(selected_page) in st.session_state.edited_data[selected_file] and
+                            field in st.session_state.edited_data[selected_file][str(selected_page)]):
+                            edited_value = st.session_state.edited_data[selected_file][str(selected_page)][field]
+                        
+                        # Display the field input
+                        with col1:
+                            # Add visual indicator for low confidence
+                            field_label = field
+                            if confidence < 90:
+                                field_label = f"{field} ⚠️"
                             
-                            # Check if there's a confidence column
-                            confidence = None
-                            confidence_col = f"{column} Confidence"
-                            if confidence_col in csv_data.columns:
-                                confidence = row_data[confidence_col]
+                            # Use the edited value if available, otherwise the current value
+                            value_to_show = edited_value if edited_value is not None else current_value
                             
-                            # Display the field with confidence if available
-                            if confidence is not None:
-                                col1, col2 = st.columns([3, 1])
-                                with col1:
-                                    # Add visual indicator for low confidence
-                                    field_label = column
-                                    if confidence < 90:
-                                        field_label = f"{column} ⚠️"
-                                    
-                                    # Text input for the field
-                                    new_value = st.text_input(
-                                        field_label,
-                                        value=str(current_value) if pd.notna(current_value) else "",
-                                        key=f"field_{selected_row}_{column}"
-                                    )
-                                with col2:
-                                    confidence_color = "green" if confidence >= 90 else "red"
-                                    st.markdown(f"<p style='color:{confidence_color};'>Confidence: {confidence:.1f}%</p>", unsafe_allow_html=True)
-                            else:
-                                # Simple text input without confidence
-                                new_value = st.text_input(
-                                    column,
-                                    value=str(current_value) if pd.notna(current_value) else "",
-                                    key=f"field_{selected_row}_{column}"
-                                )
+                            # Text input for the field
+                            new_value = st.text_input(
+                                field_label,
+                                value=value_to_show,
+                                key=f"field_{selected_file}_{selected_page}_{field}"
+                            )
                             
-                            # Store edited value if changed
-                            if new_value != str(current_value):
-                                edited_values[column] = new_value
+                            # Store for later
+                            edited_values[field] = new_value
+                        
+                        # Display confidence
+                        with col2:
+                            confidence_color = "green" if confidence >= 90 else "red"
+                            st.markdown(f"<p style='color:{confidence_color};'>Confidence: {confidence:.1f}%</p>", unsafe_allow_html=True)
                     
                     # Submit button
-                    submit_button = st.form_submit_button("Save Changes")
+                    submit_button = st.form_submit_button("Save Edits")
                     
                     if submit_button:
-                        # Store edits in session state
-                        if selected_row not in st.session_state.edited_data:
-                            st.session_state.edited_data[selected_row] = {}
+                        # Check which fields were changed
+                        for field, new_value in edited_values.items():
+                            current_value = page_data.get(field, "")
+                            if new_value != current_value:
+                                # Update edited data in session state
+                                update_edited_data(selected_file, str(selected_page), field, new_value)
                         
-                        for column, value in edited_values.items():
-                            st.session_state.edited_data[selected_row][column] = value
-                        
-                        st.success(f"Changes saved for row {selected_row}")
+                        st.success(f"Edits saved for {selected_file} - Page {selected_page}")
                 
-                # Show a summary of edits
-                if selected_row in st.session_state.edited_data:
-                    st.write("### Pending Changes")
-                    for column, value in st.session_state.edited_data[selected_row].items():
-                        st.write(f"**{column}**: '{row_data[column]}' → '{value}'")
+                # Show status of edited fields
+                if (selected_file in st.session_state.edited_data and 
+                    str(selected_page) in st.session_state.edited_data[selected_file]):
+                    st.info(f"You have edited {len(st.session_state.edited_data[selected_file][str(selected_page)])} fields on this page.")
             
-            # Apply edits button
-            if st.session_state.edited_data and st.button("Apply All Edits"):
-                with st.spinner("Applying edits..."):
-                    # Apply edits to the DataFrame
-                    updated_df = apply_edits_to_csv(csv_data, st.session_state.edited_data)
+            # Button to apply edits to DataFrame
+            if st.button("Apply Edits to Results"):
+                # Get edited data for this file
+                if selected_file in st.session_state.edited_data:
+                    # Apply edits to DataFrame
+                    edited_df = apply_edits_to_csv(
+                        df,
+                        {selected_file: st.session_state.edited_data[selected_file]},
+                        st.session_state.edit_timestamps
+                    )
                     
-                    # Update the CSV in blob storage
-                    if st.session_state.selected_csv:
-                        success = update_csv_in_blob(blob_service_client, container_name, st.session_state.selected_csv, updated_df)
+                    # Update session state
+                    if confidence_level == "High":
+                        st.session_state.high_confidence_df = edited_df
+                    else:
+                        st.session_state.low_confidence_df = edited_df
+                    
+                    st.success("Edits applied to results successfully!")
+                    
+                    # Option to upload to final container
+                    if st.button("Upload Edited Results to Final Container"):
+                        success, result = upload_edited_results(
+                            blob_service_client,
+                            config,
+                            edited_df,
+                            confidence_level
+                        )
                         
                         if success:
-                            st.success("Edits successfully applied and saved to blob storage")
-                            
-                            # Update the session state
-                            st.session_state.csv_data = updated_df
-                            st.session_state.edited_data = {}
-                            
-                            # Refresh the page
-                            st.experimental_rerun()
+                            st.success(f"Edited results uploaded successfully to final container")
                         else:
-                            st.error("Failed to save edits to blob storage")
-        else:
-            st.warning("The selected CSV file is empty.")
-    else:
-        st.info("Please select a CSV file in the Results View tab first.")
-
-# Bulk Upload/Download Tab
-with tabs[3]:
-    st.subheader("Bulk Upload and Download")
-    
-    # Bulk Download section
-    st.write("### Bulk Download")
-    download_type = st.radio(
-        "Select download type:",
-        ["CSV Results", "Source PDFs", "Both Results and PDFs"]
-    )
-    
-    if st.button("Prepare Download"):
-        with st.spinner("Preparing files for download..."):
-            blobs_to_download = []
-            
-            if download_type in ["CSV Results", "Both Results and PDFs"]:
-                blobs_to_download.extend(processed_blobs)
-            
-            if download_type in ["Source PDFs", "Both Results and PDFs"]:
-                blobs_to_download.extend(source_blobs)
-            
-            if blobs_to_download:
-                # Create a ZIP file
-                zip_buffer = create_zip_from_blobs(blob_service_client, container_name, blobs_to_download)
-                
-                if zip_buffer:
-                    # Store in session state
-                    st.session_state.download_zip = zip_buffer
-                    st.session_state.download_completed = True
-                    st.success(f"Ready to download {len(blobs_to_download)} files")
+                            st.error(f"Error uploading edited results: {result}")
                 else:
-                    st.error("Failed to prepare files for download")
-            else:
-                st.warning("No files to download")
-    
-    # Show download button when data is ready
-    if 'download_zip' in st.session_state and st.session_state.download_completed:
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        confidence_label = "high" if selected_confidence == "High Confidence" else "low"
-        
-        st.download_button(
-            label="Download ZIP File",
-            data=st.session_state.download_zip,
-            file_name=f"{confidence_label}_confidence_files_{timestamp}.zip",
-            mime="application/zip",
-            on_click=reset_download_state
-        )
-    
-    # Add a clear button to remove download data and free memory
-    if 'download_zip' in st.session_state and st.button("Clear Download Data", type="secondary"):
-        if 'download_zip' in st.session_state:
-            del st.session_state.download_zip
-        st.session_state.download_completed = False
-        gc.collect()
-        st.success("Download data cleared from memory")
+                    st.warning("No edits found for this file")
+    else:
+        st.info("No data available for editing. Please select a file pair in the Results tab.")
 
-# Sidebar cleanup button
-if st.sidebar.button("Clear Memory", type="secondary"):
-    # Clear all session state variables
-    for key in list(st.session_state.keys()):
-        del st.session_state[key]
+# Tab 4: Bulk Upload
+with tabs[3]:
+    st.header("Bulk Upload")
     
-    # Force garbage collection
-    gc.collect()
+    # Get DataFrames from session state
+    high_df = st.session_state.high_confidence_df
+    low_df = st.session_state.low_confidence_df
     
-    # Show success message
-    st.sidebar.success("Memory cleared successfully!")
+    if high_df is not None or low_df is not None:
+        # Check if we have edits
+        has_edits = len(st.session_state.edited_data) > 0
+        
+        if has_edits:
+            # Apply edits to both DataFrames
+            if high_df is not None:
+                high_df = apply_edits_to_csv(
+                    high_df,
+                    st.session_state.edited_data,
+                    st.session_state.edit_timestamps
+                )
+            
+            if low_df is not None:
+                low_df = apply_edits_to_csv(
+                    low_df,
+                    st.session_state.edited_data,
+                    st.session_state.edit_timestamps
+                )
+            
+            st.success("Edits have been applied to the combined data")
+        
+        # Combine for bulk upload
+        combined_df = create_bulk_upload_csv(high_df, low_df)
+        
+        # Show preview
+        st.subheader("Combined Data Preview")
+        st.dataframe(combined_df, use_container_width=True)
+        
+        # Create CSV for download
+        csv = combined_df.to_csv(index=False)
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        
+        # Download button
+        st.download_button(
+            label="Download Combined CSV",
+            data=csv,
+            file_name=f"combined_data_{timestamp}.csv",
+            mime="text/csv"
+        )
+        
+        # Upload to final container
+        st.subheader("Upload to Final Container")
+        final_container = config.get("final_container", "pdf-extraction-final")
+        
+        st.write(f"Final Container: {final_container}")
+        
+        if st.button("Upload Combined Data to Final Container"):
+            try:
+                # Prepare CSV data
+                csv_data = combined_df.to_csv(index=False)
+                
+                # Generate blob name
+                blob_name = f"combined_data_{timestamp}.csv"
+                
+                # Upload to blob storage
+                success, url = upload_to_blob_storage(
+                    blob_service_client,
+                    final_container,
+                    blob_name,
+                    csv_data.encode('utf-8'),
+                    "text/csv"
+                )
+                
+                if success:
+                    st.success(f"Combined data uploaded successfully to {final_container}")
+                else:
+                    st.error(f"Error uploading combined data: {url}")
+            except Exception as e:
+                st.error(f"Error in bulk upload: {str(e)}")
+    else:
+        st.info("No data available for bulk upload. Please view files in the Results tab first.")
+
+# Tab 5: Download
+with tabs[4]:
+    st.header("Download")
     
-    # Rerun the app
-    st.experimental_rerun()
+    # Get DataFrames from session state
+    high_df = st.session_state.high_confidence_df
+    low_df = st.session_state.low_confidence_df
+    
+    # Create columns for high and low confidence downloads
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        st.subheader("High Confidence Data")
+        if high_df is not None and not high_df.empty:
+            # Apply any edits
+            if len(st.session_state.edited_data) > 0:
+                high_df = apply_edits
