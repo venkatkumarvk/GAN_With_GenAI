@@ -1,3 +1,4 @@
+# helper_functions.py
 import os
 import io
 import json
@@ -61,18 +62,11 @@ def download_blob_to_memory(blob_service_client, container_name, blob_name):
     try:
         container_client = blob_service_client.get_container_client(container_name)
         blob_client = container_client.get_blob_client(blob_name)
-
-        # Debugging: Print the container name and blob name being used
-        print(f"Attempting to download blob: {blob_name} from container: {container_name}")
-
         download_stream = blob_client.download_blob()
         content = download_stream.readall()
-
         return content
     except Exception as e:
         st.error(f"Error downloading blob {blob_name}: {str(e)}")
-        # Debugging: Print the full exception for more details
-        print(f"Download error for blob {blob_name}: {e}")
         return None
 
 # Convert PDF content to base64
@@ -110,17 +104,11 @@ def load_csv_from_blob(blob_service_client, container_name, blob_name):
     try:
         blob_content = download_blob_to_memory(blob_service_client, container_name, blob_name)
         if blob_content:
-            # Debugging: Check if content was downloaded
-            print(f"Successfully downloaded blob: {blob_name} for CSV loading.")
             return pd.read_csv(io.BytesIO(blob_content))
         else:
-            # Debugging: Indicate that download failed
-            print(f"Failed to download blob: {blob_name}, cannot load CSV.")
             return None
     except Exception as e:
         st.error(f"Error loading CSV from blob: {str(e)}")
-        # Debugging: Print the full exception for more details
-        print(f"CSV loading error for blob {blob_name}: {e}")
         return None
 
 # Upload to blob storage
@@ -173,20 +161,29 @@ def apply_edits_to_csv(csv_df, edited_data):
             csv_df.at[int(idx), col] = value
     return csv_df
 
+# Get total number of pages in a PDF
+def get_pdf_page_count(pdf_content):
+    """Get the total number of pages in a PDF."""
+    try:
+        pdf_io = io.BytesIO(pdf_content)
+        with fitz.open(stream=pdf_io, filetype="pdf") as doc:
+            return len(doc)
+    except Exception as e:
+        st.error(f"Error getting PDF page count: {str(e)}")
+        return 0
+
+# Format confidence level with color
+def format_confidence(confidence_value):
+    """Format confidence level with appropriate color."""
+    if confidence_value >= 95:
+        return f"<span style='color:green;font-weight:bold'>{confidence_value:.1f}%</span>"
+    elif confidence_value >= 90:
+        return f"<span style='color:orange;font-weight:bold'>{confidence_value:.1f}%</span>"
+    else:
+        return f"<span style='color:red;font-weight:bold'>{confidence_value:.1f}%</span>"
+
 def prevent_cache(func):
     """Decorator to prevent caching of a function."""
     def wrapper(*args, **kwargs):
         return func(*args, **kwargs)
     return wrapper
-
-# Render PDF preview for sidebar
-def render_pdf_preview(pdf_content, height=300):
-    """Render a PDF preview for sidebar."""
-    if pdf_content:
-        base64_pdf = convert_pdf_to_base64(pdf_content)
-        if base64_pdf:
-            display_pdf_viewer(base64_pdf, height=height)
-        else:
-            st.sidebar.error("Failed to convert PDF to base64")
-    else:
-        st.sidebar.info("Select a PDF to preview")
