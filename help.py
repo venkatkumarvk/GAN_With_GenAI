@@ -1,12 +1,12 @@
 import os
-import json
 import io
+import json
 import base64
+import tempfile
+import gc
 import fitz  # PyMuPDF
 import pandas as pd
-import gc
-import tempfile
-import zipfile
+import streamlit as st
 from datetime import datetime
 from azure.storage.blob import BlobServiceClient, ContentSettings
 
@@ -15,36 +15,76 @@ def load_config():
     Load configuration from config.json file.
     """
     try:
-        with open('config.json', 'r') as f:
-            config = json.load(f)
-        return config
+        # First check if config.json exists in the current directory
+        if os.path.exists("config.json"):
+            with open("config.json", "r") as f:
+                config = json.load(f)
+            return config
+        else:
+            st.error("config.json file not found. Please create one with your Azure Blob Storage settings.")
+            st.stop()
     except Exception as e:
-        print(f"Error loading configuration: {e}")
-        return None
+        st.error(f"Error loading configuration: {e}")
+        st.stop()
 
-def get_blob_service_client(connection_string):
+def get_blob_service_client(config):
     """
-    Get Azure Blob Storage client.
+    Initialize the Azure Blob Storage client from config.
     """
     try:
+        connection_string = config.get("azure_storage_connection_string")
+        if not connection_string:
+            st.error("Azure Storage connection string not found in config.json")
+            st.stop()
+            
         return BlobServiceClient.from_connection_string(connection_string)
     except Exception as e:
-        print(f"Error creating blob service client: {e}")
-        return None
+        st.error(f"Error connecting to Azure Blob Storage: {e}")
+        st.stop()
 
-def list_blobs_in_folder(blob_service_client, container_name, folder_path):
+def list_blobs_by_folder(blob_service_client, container_name, folder_prefix):
     """
-    List all blobs in a specific folder.
+    List all blobs in a specific folder within a container.
     """
-    blobs = []
     try:
         container_client = blob_service_client.get_container_client(container_name)
-        blob_list = container_client.list_blobs(name_starts_with=folder_path)
-        for blob in blob_list:
-            blobs.append(blob.name)
+        
+        # Filter blobs by folder prefix
+        blobs = list(container_client.list_blobs(name_starts_with=folder_prefix))
+        
+        # Sort blobs by name
+        blobs = sorted(blobs, key=lambda x: x.name)
+        
+        return blobs
     except Exception as e:
-        print(f"Error listing blobs: {e}")
-    return blobs
+        st.error(f"Error listing blobs in {folder_prefix}: {e}")
+        return []
+
+def create_blob_dataframe(blobs, folder_prefix):
+    """
+    Create a DataFrame from blob list.
+    """
+    data = []
+    for blob in blobs:
+        # Remove folder prefix to get just the filename
+        name = blob.name.replace(folder_prefix, '')
+        
+        # Skip if this is a folder
+        if not name or name.endswith('/'):
+            continue
+            
+        # Add to data
+        data.append({
+            "Filename": name,
+            "Size (KB)": round(blob.size / 1024, 2),
+            "Last Modified": blob.last_modified,
+            "Full Path": blob.name
+        })
+    
+    if data:
+        return pd.DataFrame(data)
+    else:
+        return pd.DataFrame(columns=["Filename", "Size (KB)", "Last Modified", "Full Path"])
 
 def download_blob_to_memory(blob_service_client, container_name, blob_name):
     """
@@ -53,242 +93,277 @@ def download_blob_to_memory(blob_service_client, container_name, blob_name):
     try:
         container_client = blob_service_client.get_container_client(container_name)
         blob_client = container_client.get_blob_client(blob_name)
-        download_stream = blob_client.download_blob()
-        return download_stream.readall()
-    except Exception as e:
-        print(f"Error downloading blob {blob_name}: {e}")
-        return None
-
-def parse_csv_from_blob(blob_service_client, container_name, blob_name):
-    """
-    Download and parse a CSV file from blob storage.
-    """
-    try:
-        # Download the CSV content
-        csv_content = download_blob_to_memory(blob_service_client, container_name, blob_name)
-        if csv_content:
-            # Create a DataFrame
-            csv_io = io.BytesIO(csv_content)
-            df = pd.read_csv(csv_io)
-            return df
-        return None
-    except Exception as e:
-        print(f"Error parsing CSV file {blob_name}: {e}")
-        return None
-
-def get_pdf_preview(blob_service_client, container_name, blob_name):
-    """
-    Get a preview image of the first page of a PDF.
-    """
-    try:
-        # Download the PDF
-        pdf_content = download_blob_to_memory(blob_service_client, container_name, blob_name)
-        if not pdf_content:
-            return None
         
+        # Download the blob content
+        download_stream = blob_client.download_blob()
+        content = download_stream.readall()
+        
+        return content
+    except Exception as e:
+        st.error(f"Error downloading blob {blob_name}: {e}")
+        return None
+
+def render_pdf_preview(pdf_content):
+    """
+    Render a preview of the first page of a PDF file.
+    """
+    tmp_path = None
+    try:
         # Create a temporary file
-        with tempfile.NamedTemporaryFile(suffix='.pdf', delete=False) as tmp_file:
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp_file:
             tmp_file.write(pdf_content)
             tmp_path = tmp_file.name
-        
-        try:
-            # Open the PDF and get the first page
-            with fitz.open(tmp_path) as doc:
-                if len(doc) > 0:
-                    page = doc.load_page(0)
-                    zoom = 1.5
-                    pix = page.get_pixmap(matrix=fitz.Matrix(zoom, zoom))
-                    img_bytes = pix.tobytes()
-                    return img_bytes
+            
+        # Open the PDF and get the first page as an image
+        with fitz.open(tmp_path) as doc:
+            if len(doc) > 0:
+                # Get the first page
+                page = doc.load_page(0)
+                
+                # Render the page to an image
+                zoom = 1.5  # Reduced zoom factor to save memory
+                mat = fitz.Matrix(zoom, zoom)
+                pix = page.get_pixmap(matrix=mat)
+                
+                # Convert to an image
+                img_bytes = pix.tobytes()
+                
+                # Return the image
+                return img_bytes
+            else:
+                st.warning("PDF appears to be empty")
                 return None
-        finally:
-            # Clean up the temporary file
-            if os.path.exists(tmp_path):
+                
+    except Exception as e:
+        st.error(f"Error rendering PDF preview: {e}")
+        return None
+    finally:
+        # Clean up temporary file
+        if tmp_path and os.path.exists(tmp_path):
+            try:
                 os.unlink(tmp_path)
-    except Exception as e:
-        print(f"Error getting PDF preview: {e}")
-        return None
+            except Exception as cleanup_error:
+                st.warning(f"Could not remove temporary preview file: {cleanup_error}")
+        # Force garbage collection
+        gc.collect()
 
-def convert_pdf_to_base64(blob_service_client, container_name, blob_name):
+def convert_pdf_to_base64(pdf_content):
     """
-    Convert a PDF from blob storage to base64 for embedding in HTML.
+    Convert PDF content to base64 for embedding in HTML.
     """
     try:
-        pdf_content = download_blob_to_memory(blob_service_client, container_name, blob_name)
-        if pdf_content:
-            base64_pdf = base64.b64encode(pdf_content).decode('utf-8')
-            return base64_pdf
-        return None
+        # Encode to base64
+        base64_pdf = base64.b64encode(pdf_content).decode('utf-8')
+        return base64_pdf
     except Exception as e:
-        print(f"Error converting PDF to base64: {e}")
+        st.error(f"Error converting PDF to base64: {e}")
         return None
 
-def extract_filename_without_path(blob_name):
+def display_pdf_viewer(base64_pdf, height=500):
     """
-    Extract filename without the path.
+    Display a PDF viewer in the Streamlit app using base64 encoded PDF.
     """
-    return blob_name.split('/')[-1]
+    if not base64_pdf:
+        st.error("No PDF data available to display")
+        return
+        
+    # Create the HTML with PDF.js for better viewing
+    pdf_display = f"""
+    <iframe src="data:application/pdf;base64,{base64_pdf}" width="100%" height="{height}" 
+    type="application/pdf"></iframe>
+    """
+    
+    # Display the PDF
+    st.markdown(pdf_display, unsafe_allow_html=True)
 
-def update_blob_content(blob_service_client, container_name, blob_name, content, content_type):
+def load_csv_from_blob(blob_service_client, container_name, blob_name):
     """
-    Update blob content.
+    Load a CSV file from a blob into a pandas DataFrame.
     """
     try:
+        # Download blob content
+        blob_content = download_blob_to_memory(blob_service_client, container_name, blob_name)
+        
+        if blob_content is None:
+            return None
+            
+        # Convert to BytesIO and read with pandas
+        content_stream = io.BytesIO(blob_content)
+        df = pd.read_csv(content_stream)
+        
+        return df
+    except Exception as e:
+        st.error(f"Error loading CSV from {blob_name}: {e}")
+        return None
+
+def upload_to_blob_storage(blob_service_client, container_name, blob_name, data, content_type):
+    """
+    Upload data to Azure Blob Storage.
+    """
+    try:
+        # Get the blob client
         container_client = blob_service_client.get_container_client(container_name)
+        
+        # Create the container if it doesn't exist
+        if not container_client.exists():
+            container_client.create_container()
+        
+        # Upload blob
         blob_client = container_client.get_blob_client(blob_name)
         
         # Set content settings
         content_settings = ContentSettings(content_type=content_type)
         
-        # Upload the content
-        blob_client.upload_blob(content, overwrite=True, content_settings=content_settings)
-        return True
+        # Upload the file
+        blob_client.upload_blob(data, overwrite=True, content_settings=content_settings)
+        
+        return True, blob_client.url
     except Exception as e:
-        print(f"Error updating blob {blob_name}: {e}")
-        return False
+        return False, str(e)
 
-def update_csv_in_blob(blob_service_client, container_name, blob_name, updated_df):
+def update_edited_data(filename, page_num, field, new_value):
     """
-    Update a CSV file in blob storage.
+    Updates the edited data in the session state.
     """
-    try:
-        # Convert DataFrame to CSV
-        csv_content = updated_df.to_csv(index=False).encode('utf-8')
-        
-        # Update the blob
-        return update_blob_content(blob_service_client, container_name, blob_name, csv_content, 'text/csv')
-    except Exception as e:
-        print(f"Error updating CSV in blob {blob_name}: {e}")
-        return False
-
-def has_high_confidence(csv_data, threshold=95.0):
-    """
-    Determine if all fields in CSV data have confidence scores at or above threshold.
-    """
-    try:
-        # Check if DataFrame contains confidence columns
-        confidence_cols = [col for col in csv_data.columns if 'Confidence' in col]
-        
-        if not confidence_cols:
-            return False
-        
-        # Check if all confidence values are above threshold
-        for col in confidence_cols:
-            # Convert to numeric, with NaN for non-numeric values
-            csv_data[col] = pd.to_numeric(csv_data[col], errors='coerce')
-            
-            # Replace NaN with 0
-            csv_data[col] = csv_data[col].fillna(0)
-            
-            # Check if any value is below threshold
-            if (csv_data[col] < threshold).any():
-                return False
-        
-        return True
-    except Exception as e:
-        print(f"Error checking confidence: {e}")
-        return False
-
-def create_zip_from_blobs(blob_service_client, container_name, blob_names):
-    """
-    Create a ZIP file containing multiple blobs.
-    """
-    try:
-        # Create a BytesIO object to store the ZIP
-        zip_buffer = io.BytesIO()
-        
-        # Create a ZIP file
-        with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zip_file:
-            for blob_name in blob_names:
-                # Download the blob
-                blob_content = download_blob_to_memory(blob_service_client, container_name, blob_name)
-                if blob_content:
-                    # Extract filename without path
-                    filename = extract_filename_without_path(blob_name)
-                    
-                    # Add to ZIP
-                    zip_file.writestr(filename, blob_content)
-        
-        # Reset buffer position
-        zip_buffer.seek(0)
-        return zip_buffer
-    except Exception as e:
-        print(f"Error creating ZIP from blobs: {e}")
-        return None
-
-def apply_edits_to_csv(original_csv, edits):
-    """
-    Apply edits to a CSV DataFrame.
+    # Initialize the edited data structure if it doesn't exist
+    if 'edited_data' not in st.session_state:
+        st.session_state.edited_data = {}
     
-    Parameters:
-    - original_csv: Original DataFrame
-    - edits: Dictionary of edits {row_index: {column_name: new_value}}
+    # Create the nested structure if it doesn't exist
+    if filename not in st.session_state.edited_data:
+        st.session_state.edited_data[filename] = {}
     
-    Returns:
-    - Updated DataFrame
+    if page_num not in st.session_state.edited_data[filename]:
+        st.session_state.edited_data[filename][page_num] = {}
+    
+    # Store the edited value
+    st.session_state.edited_data[filename][page_num][field] = new_value
+    
+    # Track edit timestamp
+    if 'edit_timestamps' not in st.session_state:
+        st.session_state.edit_timestamps = {}
+    
+    if filename not in st.session_state.edit_timestamps:
+        st.session_state.edit_timestamps[filename] = {}
+    
+    if page_num not in st.session_state.edit_timestamps[filename]:
+        st.session_state.edit_timestamps[filename][page_num] = {}
+    
+    # Store timestamp
+    st.session_state.edit_timestamps[filename][page_num][field] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+def apply_edits_to_csv(df, edited_data, timestamps):
     """
-    try:
-        # Create a copy to avoid modifying the original
-        updated_csv = original_csv.copy()
-        
-        # Apply edits
-        for row_idx, column_edits in edits.items():
-            for column, new_value in column_edits.items():
-                updated_csv.at[int(row_idx), column] = new_value
+    Apply manual edits to the DataFrame and add edit tracking fields.
+    """
+    if not edited_data:
+        return df
+    
+    # Create a copy to avoid modifying the original
+    edited_df = df.copy()
+    
+    # Add timestamp and edit tracking columns if they don't exist
+    if "Edit_Timestamp" not in edited_df.columns:
+        edited_df["Edit_Timestamp"] = ""
+    if "Manually_Edited_Fields" not in edited_df.columns:
+        edited_df["Manually_Edited_Fields"] = ""
+    if "Manual_Edit" not in edited_df.columns:
+        edited_df["Manual_Edit"] = "N"
+    
+    # Apply the edits
+    for filename, pages in edited_data.items():
+        for page_num, fields in pages.items():
+            # Convert page_num to int if it's a string
+            if isinstance(page_num, str):
+                page_num = int(page_num)
+            
+            # Find matching rows in the DataFrame
+            rows = edited_df[(edited_df["Filename"] == filename) & (edited_df["Page"] == page_num)]
+            
+            if not rows.empty:
+                row_idx = rows.index[0]
                 
-                # If editing a field value, update the confidence
-                if not column.endswith('Confidence') and column + ' Confidence' in updated_csv.columns:
-                    updated_csv.at[int(row_idx), column + ' Confidence'] = 100.0
-                    
-                # Add a marker for manual edits
-                if 'Manual_Edit' in updated_csv.columns:
-                    updated_csv.at[int(row_idx), 'Manual_Edit'] = 'Y'
-                else:
-                    updated_csv['Manual_Edit'] = 'N'
-                    updated_csv.at[int(row_idx), 'Manual_Edit'] = 'Y'
-        
-        return updated_csv
-    except Exception as e:
-        print(f"Error applying edits to CSV: {e}")
-        return original_csv
+                # Apply edits to each field
+                edited_field_names = []
+                latest_timestamp = ""
+                
+                for field, new_value in fields.items():
+                    if field in edited_df.columns:
+                        # Update the value
+                        edited_df.at[row_idx, field] = new_value
+                        edited_field_names.append(f"{field}: {new_value}")
+                        
+                        # Get timestamp if available
+                        if (timestamps and filename in timestamps and page_num in timestamps[filename] 
+                            and field in timestamps[filename][page_num]):
+                            field_timestamp = timestamps[filename][page_num][field]
+                            if not latest_timestamp or field_timestamp > latest_timestamp:
+                                latest_timestamp = field_timestamp
+                
+                # Update edit tracking fields
+                if edited_field_names:
+                    edited_df.at[row_idx, "Manually_Edited_Fields"] = "; ".join(edited_field_names)
+                    edited_df.at[row_idx, "Edit_Timestamp"] = latest_timestamp
+                    edited_df.at[row_idx, "Manual_Edit"] = "Y"
+    
+    return edited_df
 
-def get_csv_summary(csv_data):
+def create_bulk_upload_csv(high_confidence_df, low_confidence_df):
     """
-    Get a summary of a CSV DataFrame.
+    Combine high and low confidence DataFrames for bulk upload.
+    """
+    if high_confidence_df is not None and not high_confidence_df.empty:
+        high_confidence_df["Confidence_Level"] = "High"
+    
+    if low_confidence_df is not None and not low_confidence_df.empty:
+        low_confidence_df["Confidence_Level"] = "Low"
+    
+    # Combine the DataFrames
+    combined_df = pd.concat([high_confidence_df, low_confidence_df], ignore_index=True)
+    
+    # Ensure all columns are present
+    required_columns = ["Filename", "Page", "Confidence_Level", "Manual_Edit", 
+                        "Manually_Edited_Fields", "Edit_Timestamp"]
+    
+    for col in required_columns:
+        if col not in combined_df.columns:
+            combined_df[col] = ""
+    
+    return combined_df
+
+def upload_edited_results(blob_service_client, config, edited_df, confidence_level):
+    """
+    Upload edited results to the output container.
     """
     try:
-        # Get basic info
-        num_rows = len(csv_data)
+        # Get output container from config
+        output_container = config.get("output_container", "pdf-extraction-results-final")
         
-        # Get confidence stats if available
-        confidence_stats = {}
-        confidence_cols = [col for col in csv_data.columns if 'Confidence' in col]
+        # Determine folder based on confidence
+        folder_prefix = f"{confidence_level.lower()}_confidence/"
         
-        for col in confidence_cols:
-            # Convert to numeric
-            csv_data[col] = pd.to_numeric(csv_data[col], errors='coerce')
+        # Create CSV data
+        csv_data = edited_df.to_csv(index=False)
+        
+        # Generate timestamp
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        
+        # Create blob name with folder prefix
+        blob_name = f"{folder_prefix}edited_results_{timestamp}.csv"
+        
+        # Upload to blob storage
+        success, url = upload_to_blob_storage(
+            blob_service_client,
+            output_container,
+            blob_name,
+            csv_data.encode('utf-8'),
+            "text/csv"
+        )
+        
+        if success:
+            return True, url
+        else:
+            return False, url
             
-            field_name = col.replace(' Confidence', '')
-            avg_confidence = csv_data[col].mean()
-            min_confidence = csv_data[col].min()
-            max_confidence = csv_data[col].max()
-            
-            confidence_stats[field_name] = {
-                'avg': avg_confidence,
-                'min': min_confidence,
-                'max': max_confidence
-            }
-        
-        # Check for edited fields
-        edited_rows = 0
-        if 'Manual_Edit' in csv_data.columns:
-            edited_rows = (csv_data['Manual_Edit'] == 'Y').sum()
-        
-        return {
-            'num_rows': num_rows,
-            'confidence_stats': confidence_stats,
-            'edited_rows': edited_rows
-        }
     except Exception as e:
-        print(f"Error getting CSV summary: {e}")
-        return None
+        return False, str(e)
