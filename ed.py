@@ -207,7 +207,7 @@ with tabs[1]:
                                         edited_df.at[idx, "Original_Values"] = "; ".join([f"{k}:{v}" for k, v in old_values_dict.items()])
                                         edited_df.at[idx, "New_Values"] = "; ".join([f"{k}:{v}" for k, v in new_values_dict.items()])
                         
-                        # Save to blob storage
+                        # Save to final output container
                         output_container = config.get("final_output_container", container_name)
                         output_prefix = config.get("final_output_prefix", "final_output/")
                         
@@ -221,7 +221,7 @@ with tabs[1]:
                         edited_df.to_csv(csv_buffer, index=False)
                         csv_data = csv_buffer.getvalue()
                         
-                        # Upload to blob storage
+                        # Upload to final output container only
                         pdf_success, pdf_url = upload_to_blob_storage(
                             blob_service_client,
                             output_container,
@@ -238,19 +238,8 @@ with tabs[1]:
                             "text/csv"
                         )
                         
-                        # IMPORTANT: Also update the processed CSV in the source container
-                        # This ensures bulk operations will use the updated CSV
-                        processed_blob = selected_file["processed_blob"]
-                        update_success, _ = upload_to_blob_storage(
-                            blob_service_client,
-                            container_name,
-                            processed_blob,
-                            csv_data,
-                            "text/csv"
-                        )
-                        
-                        if pdf_success and csv_success and update_success:
-                            st.success(f"Successfully saved edits to {output_container} and updated source data")
+                        if pdf_success and csv_success:
+                            st.success(f"Successfully saved edits to {output_container}")
                             
                             # List the edited fields
                             if current_manual_edits:
@@ -261,8 +250,6 @@ with tabs[1]:
                                                 f"Changed from '{edit['old_value']}' to '{edit['new_value']}'\n"
                                 st.markdown(edit_text)
                             
-                            # Clear edits after successful save
-                            st.session_state.edited_data[selected_file["base_name"]] = {}
                             # Update the CSV in session state
                             st.session_state.csv_df = edited_df
                         else:
@@ -395,25 +382,17 @@ with tabs[1]:
                                             csv_df.at[idx, "Original_Values"] = "; ".join([f"{k}:{v}" for k, v in old_values_dict.items()])
                                             csv_df.at[idx, "New_Values"] = "; ".join([f"{k}:{v}" for k, v in new_values_dict.items()])
                                 
-                                # Save updated CSV
-                                csv_buffer = io.StringIO()
-                                csv_df.to_csv(csv_buffer, index=False)
-                                csv_data = csv_buffer.getvalue()
-                                
-                                # Update in source container
-                                source_success, _ = upload_to_blob_storage(
-                                    blob_service_client,
-                                    container_name,
-                                    file_match["processed_blob"],
-                                    csv_data,
-                                    "text/csv"
-                                )
-                                
-                                # Save to final container as well
+                                # Save to final container only
                                 output_container = config.get("final_output_container", container_name)
                                 output_prefix = config.get("final_output_prefix", "final_output/")
                                 csv_output_blob_name = f"{output_prefix}csv/{file_name}.csv"
                                 
+                                # Convert dataframe to CSV
+                                csv_buffer = io.StringIO()
+                                csv_df.to_csv(csv_buffer, index=False)
+                                csv_data = csv_buffer.getvalue()
+                                
+                                # Save to final container
                                 final_success, _ = upload_to_blob_storage(
                                     blob_service_client,
                                     output_container,
@@ -422,11 +401,11 @@ with tabs[1]:
                                     "text/csv"
                                 )
                                 
-                                if source_success and final_success:
+                                if final_success:
                                     update_results.append({
                                         "Filename": file_name,
                                         "Status": "✅ Success",
-                                        "Message": "Updated both source and final containers"
+                                        "Message": "Updated final container successfully"
                                     })
                                     
                                     # Clear edits for this file
@@ -434,8 +413,8 @@ with tabs[1]:
                                 else:
                                     update_results.append({
                                         "Filename": file_name,
-                                        "Status": "⚠️ Partial Success",
-                                        "Message": f"Source: {'✅' if source_success else '❌'}, Final: {'✅' if final_success else '❌'}"
+                                        "Status": "❌ Failed",
+                                        "Message": "Failed to update final container"
                                     })
                                     
                             except Exception as e:
@@ -455,75 +434,10 @@ with tabs[1]:
                         
                         # If the current file was updated, reload it
                         if st.session_state.csv_df is not None and selected_file["base_name"] in st.session_state.edited_data and not st.session_state.edited_data[selected_file["base_name"]]:
-                            st.session_state.csv_df = load_csv_from_blob(blob_service_client, container_name, selected_file["processed_blob"])
-                            st.success("All updates applied successfully. Current file reloaded.")
-                            st.rerun()  # Refresh the UI
+                            # We're not updating the input blob, so no need to reload
+                            st.success("All updates applied successfully to final output container.")
                     
                 except Exception as e:
                     st.error(f"Error applying updates: {str(e)}")
                     import traceback
                     st.error(traceback.format_exc())
-
-#helper
-# Load CSV from blob storage
-def load_csv_from_blob(blob_service_client, container_name, blob_name):
-    """Load CSV from blob storage into a pandas DataFrame."""
-    try:
-        blob_content = download_blob_to_memory(blob_service_client, container_name, blob_name)
-        if blob_content:
-            # Debugging: Check if content was downloaded
-            print(f"Successfully downloaded blob: {blob_name} for CSV loading. Size: {len(blob_content)} bytes")
-            
-            # Try parsing the CSV with different encodings
-            try:
-                return pd.read_csv(io.BytesIO(blob_content))
-            except UnicodeDecodeError:
-                # Try different encodings
-                for encoding in ['utf-8', 'latin1', 'cp1252']:
-                    try:
-                        return pd.read_csv(io.BytesIO(blob_content), encoding=encoding)
-                    except UnicodeDecodeError:
-                        continue
-                
-                # If all encoding attempts fail, try with error handling
-                return pd.read_csv(io.BytesIO(blob_content), encoding='utf-8', errors='replace')
-        else:
-            # Debugging: Indicate that download failed
-            print(f"Failed to download blob: {blob_name}, cannot load CSV.")
-            return None
-    except Exception as e:
-        st.error(f"Error loading CSV from blob: {str(e)}")
-        # Debugging: Print the full exception for more details
-        print(f"CSV loading error for blob {blob_name}: {e}")
-        return None
-
-
-# Within the "Upload Selected Files to Final Container" button handler
-# Replace the CSV loading part with:
-
-# Download CSV results - make sure to get the latest version
-csv_df = load_csv_from_blob(blob_service_client, container_name, match["processed_blob"])
-
-# Additional debugging
-if csv_df is None:
-    st.warning(f"Could not load CSV for {match['base_name']}")
-    print(f"Failed to load CSV for bulk upload: {match['processed_blob']}")
-else:
-    print(f"Successfully loaded CSV for bulk upload: {match['base_name']} with {len(csv_df)} rows")
-    # Check for edited fields
-    has_edits = "Manual_Edit" in csv_df.columns and csv_df["Manual_Edit"].eq("Y").any()
-    if has_edits:
-        print(f"File {match['base_name']} has manual edits")
-
-
-
-import logging
-
-# Set up logging
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
-
-# Helper for debugging
-def debug_print(message):
-    print(f"DEBUG: {message}")
-    logger.info(message)
