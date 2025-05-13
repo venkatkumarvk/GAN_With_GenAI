@@ -174,6 +174,16 @@ def apply_edits_to_csv(csv_df, edited_data):
             csv_df.at[int(idx), col] = value
     return csv_df
 
+# Find confidence columns in a dataframe
+def find_confidence_columns(df):
+    """Identify confidence columns with different naming formats."""
+    confidence_cols = []
+    for col in df.columns:
+        # Check for both naming formats: "Field_Confidence" or "Field Confidence"
+        if col.endswith("_Confidence") or col.endswith(" Confidence"):
+            confidence_cols.append(col)
+    return confidence_cols
+
 def prevent_cache(func):
     """Decorator to prevent caching of a function."""
     def wrapper(*args, **kwargs):
@@ -190,3 +200,25 @@ def get_pdf_page_count(pdf_content):
     except Exception as e:
         st.error(f"Error getting PDF page count: {str(e)}")
         return 0
+
+# Get base field name from confidence column
+def get_base_field_name(confidence_col):
+    """Extract the base field name from a confidence column."""
+    if confidence_col.endswith("_Confidence"):
+        return confidence_col.replace("_Confidence", "")
+    elif confidence_col.endswith(" Confidence"):
+        return confidence_col.replace(" Confidence", "")
+    return None
+
+# Initialize tracking columns in DataFrame
+def initialize_tracking_columns(df):
+    """Ensure tracking columns exist in the DataFrame."""
+    if "Manual_Edit" not in df.columns:
+        df["Manual_Edit"] = "N"
+    if "Edit_Timestamp" not in df.columns:
+        df["Edit_Timestamp"] = ""
+    if "New_Value" not in df.columns:
+        df["New_Value"] = ""
+    if "Old_Value" not in df.columns:
+        df["Old_Value"] = ""
+    return df
