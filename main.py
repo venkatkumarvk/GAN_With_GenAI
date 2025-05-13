@@ -406,6 +406,9 @@ elif st.session_state.app_view == "main":
                             for field, value in field_edits.items():
                                 temp_df.at[idx, field] = value
                     
+                   # main.py (continued)
+                                temp_df.at[idx, field] = value
+                    
                     # Perform validation logic
                     validation_errors = {}
                     for index, row in temp_df.iterrows():
@@ -472,6 +475,33 @@ elif st.session_state.app_view == "main":
     with tabs[2]:
         st.header("Bulk Operations")
 
+        # Bulk file selection
+        if matched_files:
+            st.subheader("Select Files for Processing")
+            
+            # Option to select all files
+            select_all = st.checkbox("Select All Files", value=False)
+            
+            if select_all:
+                st.session_state.selected_files_for_bulk = list(range(len(matched_files)))
+            else:
+                # Multiselect widget for selecting specific files
+                selected_indices = st.multiselect(
+                    "Select Files to Process",
+                    options=list(range(len(matched_files))),
+                    format_func=lambda x: matched_files[x]["base_name"],
+                    default=st.session_state.selected_files_for_bulk
+                )
+                st.session_state.selected_files_for_bulk = selected_indices
+            
+            # Display selected files
+            if st.session_state.selected_files_for_bulk:
+                st.write("Selected Files:")
+                selected_files_df = pd.DataFrame([matched_files[i] for i in st.session_state.selected_files_for_bulk])
+                st.dataframe(selected_files_df[["base_name"]], use_container_width=True)
+            else:
+                st.info("No files selected for bulk processing")
+
         # Bulk upload to final container
         st.subheader("Bulk Upload to Final Container")
 
@@ -481,7 +511,10 @@ elif st.session_state.app_view == "main":
         st.write(f"Target Container: {final_container}")
         st.write(f"Target Prefix: {final_prefix}")
 
-        if st.button("Upload All Files to Final Container"):
+        # Only enable upload if files are selected
+        upload_button_disabled = len(st.session_state.selected_files_for_bulk) == 0
+        
+        if st.button("Upload Selected Files to Final Container", disabled=upload_button_disabled):
             with st.spinner("Processing bulk upload..."):
                 # Create a container to display results
                 result_container = st.container()
@@ -489,14 +522,17 @@ elif st.session_state.app_view == "main":
                 # Initialize tracking
                 upload_results = []
                 
+                # List of files to process
+                files_to_process = [matched_files[i] for i in st.session_state.selected_files_for_bulk]
+                
                 progress_bar = st.progress(0)
                 status_text = st.empty()
 
-                for i, match in enumerate(matched_files):
+                for i, match in enumerate(files_to_process):
                     try:
                         # Update progress
-                        progress_bar.progress((i + 1) / len(matched_files))
-                        status_text.text(f"Processing {i+1}/{len(matched_files)}: {match['base_name']}")
+                        progress_bar.progress((i + 1) / len(files_to_process))
+                        status_text.text(f"Processing {i+1}/{len(files_to_process)}: {match['base_name']}")
 
                         # Download source PDF
                         pdf_content = download_blob_to_memory(blob_service_client, container_name, match["source_blob"])
@@ -512,6 +548,9 @@ elif st.session_state.app_view == "main":
                         }
 
                         if pdf_content and csv_df is not None:
+                            # Initialize tracking columns if needed
+                            csv_df = initialize_tracking_columns(csv_df)
+                            
                             # Upload PDF to final container
                             pdf_output_blob_name = f"{final_prefix}pdf/{match['base_name']}.pdf"
                             pdf_success, pdf_url = upload_to_blob_storage(
@@ -586,16 +625,20 @@ elif st.session_state.app_view == "main":
         # Bulk download
         st.subheader("Bulk Download")
 
-        if st.button("Download All Results"):
+        if st.button("Download Selected Files", disabled=upload_button_disabled):
             with st.spinner("Preparing download..."):
                 # Create in-memory zip file
                 import zipfile
                 from io import BytesIO
 
                 zip_buffer = BytesIO()
+                
+                # List of files to download
+                files_to_download = [matched_files[i] for i in st.session_state.selected_files_for_bulk]
+                
                 with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zip_file:
                     # Add each matching file to the zip
-                    for match in matched_files:
+                    for match in files_to_download:
                         try:
                             # Get PDF
                             pdf_content = download_blob_to_memory(blob_service_client, container_name, match["source_blob"])
