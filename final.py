@@ -401,3 +401,106 @@ if pd.api.types.is_numeric_dtype(csv_df[field].dtype):
     csv_df.at[idx, field] = safe_cast_value(value, csv_df[field].dtype)
 else:
     csv_df.at[idx, field] = value
+-------------------------
+# Match source and processed files
+def match_source_and_processed_files(source_blobs, processed_blobs):
+    """Match source PDFs with their processed CSV results."""
+    source_filenames = {get_filename_from_blob_path(blob.name).split('.')[0]: blob for blob in source_blobs}
+    processed_filenames = {get_filename_from_blob_path(blob.name).split('.')[0]: blob for blob in processed_blobs}
+
+    matched_files = []
+    for base_name in set(source_filenames.keys()) & set(processed_filenames.keys()):
+        source_blob = source_filenames[base_name]
+        processed_blob = processed_filenames[base_name]
+        
+        # Convert creation time to local time string
+        source_date = source_blob.creation_time.strftime("%Y-%m-%d") if hasattr(source_blob, 'creation_time') else "Unknown"
+        source_time = source_blob.creation_time.strftime("%H:%M:%S") if hasattr(source_blob, 'creation_time') else "Unknown"
+        
+        processed_date = processed_blob.creation_time.strftime("%Y-%m-%d") if hasattr(processed_blob, 'creation_time') else "Unknown"
+        processed_time = processed_blob.creation_time.strftime("%H:%M:%S") if hasattr(processed_blob, 'creation_time') else "Unknown"
+        
+        matched_files.append({
+            "base_name": base_name,
+            "source_blob": source_blob.name,
+            "source_date": source_date,
+            "source_time": source_time,
+            "processed_blob": processed_blob.name,
+            "processed_date": processed_date,
+            "processed_time": processed_time
+        })
+
+    return matched_files
+    ---------------
+    # In Results View tab, replace the matched files display:
+# Display matched files in a table with date/time
+matched_display_df = pd.DataFrame(matched_files)[["base_name", "source_date", "source_time", 
+                                                 "processed_date", "processed_time"]]
+st.write(f"Found {len(matched_files)} matched files")
+st.dataframe(matched_display_df, use_container_width=True)
+
+--------
+# Update the bulk download button handler:
+if st.button("Download All Results"):
+    with st.spinner("Preparing download..."):
+        # Create in-memory zip file
+        import zipfile
+        from io import BytesIO
+
+        zip_buffer = BytesIO()
+        with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zip_file:
+            # Add each matching file to the zip
+            for match in matched_files:
+                try:
+                    # Check if we have edited data for this file
+                    if ("edited_csv_data" in st.session_state and 
+                        match["base_name"] in st.session_state.edited_csv_data):
+                        
+                        # Get PDF
+                        pdf_content = st.session_state.pdf_content if match["base_name"] == selected_file["base_name"] else download_blob_to_memory(blob_service_client, container_name, match["source_blob"])
+                        if pdf_content:
+                            zip_file.writestr(f"pdf/{match['base_name']}.pdf", pdf_content)
+                        
+                        # Get edited CSV
+                        csv_data = st.session_state.edited_csv_data[match["base_name"]]["csv_data"]
+                        zip_file.writestr(f"csv/{match['base_name']}_edited.csv", csv_data)
+                        
+                    else:
+                        # Get PDF
+                        pdf_content = download_blob_to_memory(blob_service_client, container_name, match["source_blob"])
+                        if pdf_content:
+                            zip_file.writestr(f"pdf/{match['base_name']}.pdf", pdf_content)
+
+                        # Get CSV
+                        csv_df = load_csv_from_blob(blob_service_client, container_name, match["processed_blob"])
+                        if csv_df is not None:
+                            csv_buffer = io.StringIO()
+                            csv_df.to_csv(csv_buffer, index=False)
+                            zip_file.writestr(f"csv/{match['base_name']}.csv", csv_buffer.getvalue())
+                except Exception as e:
+                    st.error(f"Error adding {match['base_name']} to zip: {str(e)}")
+
+            # Add a summary file
+            summary_content = f"Confidence Selection: {confidence_selection}\n"
+            summary_content += f"Total Files: {len(matched_files)}\n"
+            summary_content += f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n"
+            summary_content += "Files:\n"
+            
+            for match in matched_files:
+                is_edited = ("edited_csv_data" in st.session_state and 
+                            match["base_name"] in st.session_state.edited_csv_data)
+                summary_content += f"- {match['base_name']} (Edited: {'Yes' if is_edited else 'No'})\n"
+            
+            zip_file.writestr("summary.txt", summary_content)
+
+        # Reset buffer position
+        zip_buffer.seek(0)
+
+        # Create download button
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        st.download_button(
+            label="Download ZIP File",
+            data=zip_buffer,
+            file_name=f"invoice_results_{confidence_selection}_{timestamp}.zip",
+            mime="application/zip"
+        )
