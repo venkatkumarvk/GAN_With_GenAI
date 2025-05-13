@@ -440,67 +440,172 @@ st.write(f"Found {len(matched_files)} matched files")
 st.dataframe(matched_display_df, use_container_width=True)
 
 --------
-# Update the bulk download button handler:
-if st.button("Download All Results"):
-    with st.spinner("Preparing download..."):
-        # Create in-memory zip file
-        import zipfile
-        from io import BytesIO
-
-        zip_buffer = BytesIO()
-        with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zip_file:
-            # Add each matching file to the zip
-            for match in matched_files:
-                try:
-                    # Check if we have edited data for this file
-                    if ("edited_csv_data" in st.session_state and 
-                        match["base_name"] in st.session_state.edited_csv_data):
-                        
-                        # Get PDF
-                        pdf_content = st.session_state.pdf_content if match["base_name"] == selected_file["base_name"] else download_blob_to_memory(blob_service_client, container_name, match["source_blob"])
-                        if pdf_content:
-                            zip_file.writestr(f"pdf/{match['base_name']}.pdf", pdf_content)
-                        
-                        # Get edited CSV
-                        csv_data = st.session_state.edited_csv_data[match["base_name"]]["csv_data"]
-                        zip_file.writestr(f"csv/{match['base_name']}_edited.csv", csv_data)
-                        
-                    else:
-                        # Get PDF
-                        pdf_content = download_blob_to_memory(blob_service_client, container_name, match["source_blob"])
-                        if pdf_content:
-                            zip_file.writestr(f"pdf/{match['base_name']}.pdf", pdf_content)
-
-                        # Get CSV
-                        csv_df = load_csv_from_blob(blob_service_client, container_name, match["processed_blob"])
-                        if csv_df is not None:
-                            csv_buffer = io.StringIO()
-                            csv_df.to_csv(csv_buffer, index=False)
-                            zip_file.writestr(f"csv/{match['base_name']}.csv", csv_buffer.getvalue())
-                except Exception as e:
-                    st.error(f"Error adding {match['base_name']} to zip: {str(e)}")
-
-            # Add a summary file
-            summary_content = f"Confidence Selection: {confidence_selection}\n"
-            summary_content += f"Total Files: {len(matched_files)}\n"
-            summary_content += f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n"
-            summary_content += "Files:\n"
+# Replace the "Apply All Updates" button code with this:
+if st.button("Apply All Updates and Prepare Download"):
+    try:
+        # Check if we have edits for any file
+        has_edits = False
+        for file_edits in st.session_state.edited_data.values():
+            if file_edits:
+                has_edits = True
+                break
+        
+        if not has_edits:
+            st.info("No pending edits to apply.")
+        else:
+            # Create a progress indicator
+            progress_bar = st.progress(0)
+            status_text = st.empty()
+            status_text.text("Processing files...")
             
-            for match in matched_files:
-                is_edited = ("edited_csv_data" in st.session_state and 
-                            match["base_name"] in st.session_state.edited_csv_data)
-                summary_content += f"- {match['base_name']} (Edited: {'Yes' if is_edited else 'No'})\n"
+            # Create in-memory zip file for download
+            import zipfile
+            from io import BytesIO
             
-            zip_file.writestr("summary.txt", summary_content)
-
-        # Reset buffer position
-        zip_buffer.seek(0)
-
-        # Create download button
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        st.download_button(
-            label="Download ZIP File",
-            data=zip_buffer,
-            file_name=f"invoice_results_{confidence_selection}_{timestamp}.zip",
-            mime="application/zip"
-        )
+            zip_buffer = BytesIO()
+            with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zip_file:
+                # Process each file with edits
+                file_count = len(st.session_state.edited_data)
+                processed_count = 0
+                
+                for file_name, file_edits in st.session_state.edited_data.items():
+                    if not file_edits:  # Skip files with no edits
+                        continue
+                        
+                    processed_count += 1
+                    progress_bar.progress(processed_count / file_count)
+                    status_text.text(f"Processing {processed_count}/{file_count}: {file_name}")
+                    
+                    # Find the file in matched_files
+                    file_match = next((m for m in matched_files if m["base_name"] == file_name), None)
+                    
+                    if not file_match:
+                        st.warning(f"File not found in matched files: {file_name}")
+                        continue
+                    
+                    # Load the CSV and PDF
+                    csv_df = load_csv_from_blob(blob_service_client, container_name, file_match["processed_blob"])
+                    pdf_content = download_blob_to_memory(blob_service_client, container_name, file_match["source_blob"])
+                    
+                    if csv_df is None:
+                        st.warning(f"Could not load CSV data for {file_name}")
+                        continue
+                    
+                    if pdf_content is None:
+                        st.warning(f"Could not load PDF data for {file_name}")
+                    
+                    # Apply edits
+                    try:
+                        # Ensure tracking columns exist
+                        for col in ["Manual_Edit", "Edit_Timestamp", "Manually_Edited_Fields", "Original_Values", "New_Values"]:
+                            if col not in csv_df.columns:
+                                csv_df[col] = ""
+                        
+                        current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                        
+                        for idx, field_edits in file_edits.items():
+                            for field, value in field_edits.items():
+                                # Fix for dtype warning - ensure value types match
+                                # First determine the column dtype
+                                if pd.api.types.is_numeric_dtype(csv_df[field].dtype):
+                                    # Convert value to numeric if the column is numeric
+                                    try:
+                                        value = pd.to_numeric(value)
+                                    except ValueError:
+                                        # If conversion fails, convert the column to object type
+                                        csv_df[field] = csv_df[field].astype(object)
+                                
+                                # Get old value before replacing
+                                old_value = csv_df.at[int(idx), field]
+                                
+                                # Update the value
+                                csv_df.at[int(idx), field] = value
+                                
+                                # Update tracking columns
+                                csv_df.at[int(idx), "Manual_Edit"] = "Y"
+                                csv_df.at[int(idx), "Edit_Timestamp"] = current_time
+                                
+                                # Update edited fields tracking
+                                # Handle fields that may have NaN values
+                                def safe_get(df, idx, col):
+                                    val = df.at[int(idx), col]
+                                    return "" if pd.isna(val) else str(val)
+                                
+                                current_edited_fields = safe_get(csv_df, idx, "Manually_Edited_Fields")
+                                current_old_values = safe_get(csv_df, idx, "Original_Values")
+                                current_new_values = safe_get(csv_df, idx, "New_Values")
+                                
+                                # Add/update field in tracking lists
+                                field_list = current_edited_fields.split("; ") if current_edited_fields else []
+                                if field not in field_list:
+                                    field_list.append(field)
+                                csv_df.at[int(idx), "Manually_Edited_Fields"] = "; ".join(field_list)
+                                
+                                # Add old/new values
+                                old_values_dict = {}
+                                new_values_dict = {}
+                                
+                                # Parse existing values
+                                if current_old_values:
+                                    for item in current_old_values.split("; "):
+                                        if ":" in item:
+                                            key, val = item.split(":", 1)
+                                            old_values_dict[key] = val
+                                
+                                if current_new_values:
+                                    for item in current_new_values.split("; "):
+                                        if ":" in item:
+                                            key, val = item.split(":", 1)
+                                            new_values_dict[key] = val
+                                
+                                # Update values
+                                old_values_dict[field] = str(old_value)
+                                new_values_dict[field] = str(value)
+                                
+                                # Convert back to strings
+                                csv_df.at[int(idx), "Original_Values"] = "; ".join([f"{k}:{v}" for k, v in old_values_dict.items()])
+                                csv_df.at[int(idx), "New_Values"] = "; ".join([f"{k}:{v}" for k, v in new_values_dict.items()])
+                        
+                        # Add to zip file
+                        # Add PDF
+                        if pdf_content:
+                            zip_file.writestr(f"pdf/{file_name}.pdf", pdf_content)
+                        
+                        # Add CSV
+                        csv_buffer = io.StringIO()
+                        csv_df.to_csv(csv_buffer, index=False)
+                        zip_file.writestr(f"csv/{file_name}.csv", csv_buffer.getvalue())
+                        
+                        # Clear edits for this file as they've been applied
+                        st.session_state.edited_data[file_name] = {}
+                        
+                    except Exception as e:
+                        st.warning(f"Error processing edits for {file_name}: {str(e)}")
+                        import traceback
+                        print(traceback.format_exc())
+            
+            # Reset buffer position
+            zip_buffer.seek(0)
+            
+            # Show download button
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            
+            # Update progress
+            progress_bar.progress(1.0)
+            status_text.text("Processing complete! You can now download the results.")
+            
+            st.download_button(
+                label="Download All Edited Files",
+                data=zip_buffer,
+                file_name=f"edited_invoices_{confidence_selection}_{timestamp}.zip",
+                mime="application/zip"
+            )
+            
+            # If the current file was updated, reload it to show changes
+            if st.session_state.csv_df is not None:
+                st.success("All edits applied and ready for download.")
+            
+    except Exception as e:
+        st.error(f"Error applying updates: {str(e)}")
+        import traceback
+        st.error(traceback.format_exc())
