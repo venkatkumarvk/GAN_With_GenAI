@@ -9,139 +9,158 @@ def match_source_and_processed_files(source_blobs, processed_blobs):
         source_blob = source_filenames[base_name]
         processed_blob = processed_filenames[base_name]
         
-        # Extract creation time from blob properties
-        source_time = source_blob.creation_time if hasattr(source_blob, 'creation_time') else None
-        processed_time = processed_blob.creation_time if hasattr(processed_blob, 'creation_time') else None
+        # Extract creation time from blobs
+        source_creation_time = source_blob.creation_time if hasattr(source_blob, 'creation_time') else None
+        processed_creation_time = processed_blob.creation_time if hasattr(processed_blob, 'creation_time') else None
         
-        # Format date and time if available
-        date_str = source_time.strftime("%Y-%m-%d") if source_time else "Unknown"
-        time_str = source_time.strftime("%H:%M:%S") if source_time else "Unknown"
+        # Format date and time
+        source_date = source_creation_time.strftime("%Y-%m-%d") if source_creation_time else "Unknown"
+        source_time = source_creation_time.strftime("%H:%M:%S") if source_creation_time else "Unknown"
         
-        # Get month and year for filtering
-        month = source_time.month if source_time else None
-        year = source_time.year if source_time else None
+        # Get year and month for filtering
+        year = source_creation_time.year if source_creation_time else None
+        month = source_creation_time.month if source_creation_time else None
         
         matched_files.append({
             "base_name": base_name,
             "source_blob": source_blob.name,
             "processed_blob": processed_blob.name,
-            "date": date_str,
-            "time": time_str,
-            "month": month,
-            "year": year
+            "creation_date": source_date,
+            "creation_time": source_time,
+            "year": year,
+            "month": month
         })
 
     return matched_files
 
 
-----
-# Add to the sidebar, right after confidence selection
+---
+# PDF Selector in Sidebar
 st.sidebar.markdown("---")
-st.sidebar.subheader("Filter by Date")
+st.sidebar.subheader("File Selection")
 
-# Get unique years and months from matched files
-years = sorted(list(set(f["year"] for f in matched_files if f["year"] is not None)), reverse=True)
-months = list(range(1, 13))  # 1-12 for months
-
-# Default to all if no years available
-if not years:
-    years = [datetime.now().year]
+if not matched_files:
+    st.sidebar.warning("No matched files found.")
+else:
+    # Add date filters
+    # Get unique years and months from the data
+    years = sorted(list(set([f["year"] for f in matched_files if f["year"] is not None])), reverse=True)
     
-# Set defaults if not in session state
-if 'selected_year' not in st.session_state:
-    st.session_state.selected_year = years[0] if years else datetime.now().year
-if 'selected_month' not in st.session_state:
-    st.session_state.selected_month = 0  # 0 means "All months"
-
-# Year selector
-selected_year = st.sidebar.selectbox(
-    "Select Year",
-    [0] + years,  # 0 means "All years"
-    format_func=lambda x: "All Years" if x == 0 else str(x),
-    index=[0] + years.index(st.session_state.selected_year) + 1 if st.session_state.selected_year in years else 0
-)
-
-# Month selector
-month_names = ["All Months", "January", "February", "March", "April", "May", "June", 
-               "July", "August", "September", "October", "November", "December"]
-selected_month = st.sidebar.selectbox(
-    "Select Month",
-    list(range(13)),  # 0-12, where 0 means "All months"
-    format_func=lambda x: month_names[x],
-    index=st.session_state.selected_month
-)
-
-# Update session state
-st.session_state.selected_year = selected_year
-st.session_state.selected_month = selected_month
-
-# Filter matched files based on selection
-filtered_matched_files = matched_files
-if selected_year != 0:  # If not "All Years"
-    filtered_matched_files = [f for f in filtered_matched_files if f["year"] == selected_year]
-if selected_month != 0:  # If not "All Months"
-    filtered_matched_files = [f for f in filtered_matched_files if f["month"] == selected_month]
-
-# Show how many files match the filter
-if len(filtered_matched_files) != len(matched_files):
-    st.sidebar.info(f"Showing {len(filtered_matched_files)} of {len(matched_files)} files")
-else:
-    st.sidebar.info(f"Showing all {len(matched_files)} files")
-
-# Reset selected file index if our filters changed the available files
-if 'filtered_files_count' not in st.session_state or st.session_state.filtered_files_count != len(filtered_matched_files):
-    st.session_state.selected_file_idx = 0
-    st.session_state.filtered_files_count = len(filtered_matched_files)
-
-----
-# Replace the existing file selector with this
-if not filtered_matched_files:
-    st.sidebar.warning("No files match the selected filters.")
-else:
-    # File selector dropdown in sidebar
-    selected_file_idx = st.sidebar.selectbox(
-        "Select a file",
-        range(len(filtered_matched_files)),
-        format_func=lambda x: f"{filtered_matched_files[x]['base_name']} ({filtered_matched_files[x]['date']})",
-        index=min(st.session_state.selected_file_idx, len(filtered_matched_files)-1)
+    # Add "All" option
+    filter_years = ["All"] + years
+    
+    # Year filter
+    selected_year = st.sidebar.selectbox(
+        "Filter by Year:", 
+        filter_years,
+        index=0
     )
-
-    # Update the selected file in session state
-    if selected_file_idx != st.session_state.selected_file_idx:
-        st.session_state.selected_file_idx = selected_file_idx
-        st.session_state.pdf_content = None  # Reset PDF content when changing files
-        st.session_state.csv_df = None
-        st.session_state.manual_edit_fields = []
-
-    # Load PDF and CSV for selected file
-    if st.session_state.pdf_content is None:
-        source_blob = filtered_matched_files[selected_file_idx]["source_blob"]
-        st.session_state.pdf_content = download_blob_to_memory(blob_service_client, container_name, source_blob)
-
-    if st.session_state.csv_df is None:
-        processed_blob = filtered_matched_files[selected_file_idx]["processed_blob"]
-        st.session_state.csv_df = load_csv_from_blob(blob_service_client, container_name, processed_blob)
+    
+    # Month filter (only show if year is selected)
+    if selected_year != "All":
+        # Get months for selected year
+        months_in_year = sorted(list(set([f["month"] for f in matched_files 
+                                 if f["year"] == selected_year and f["month"] is not None])))
+        filter_months = ["All"] + months_in_year
         
-        # Rest of your existing code...
-
-
-----
-# Find the code where you create matched_df and replace with:
-if filtered_matched_files:
-    # Display matched files in a table with date and time
-    matched_df = pd.DataFrame(filtered_matched_files)
-    st.write(f"Found {len(filtered_matched_files)} matched files")
-    st.dataframe(matched_df[["base_name", "date", "time", "source_blob", "processed_blob"]], use_container_width=True)
+        selected_month = st.sidebar.selectbox(
+            "Filter by Month:", 
+            filter_months,
+            index=0
+        )
+    else:
+        selected_month = "All"
     
-    # Use already selected file from sidebar
-    selected_file = filtered_matched_files[st.session_state.selected_file_idx]
-    st.write(f"Selected file: {selected_file['base_name']} (Date: {selected_file['date']})")
+    # Apply filters
+    filtered_files = matched_files
+    if selected_year != "All":
+        filtered_files = [f for f in filtered_files if f["year"] == selected_year]
+        if selected_month != "All":
+            filtered_files = [f for f in filtered_files if f["month"] == selected_month]
     
-    # Rest of the code...
+    if not filtered_files:
+        st.sidebar.warning(f"No files found for the selected time period.")
+    else:
+        # File selector dropdown in sidebar
+        file_options = [f"{f['base_name']} ({f['creation_date']})" for f in filtered_files]
+        
+        # Set default index
+        default_index = 0
+        if 'selected_file_idx' in st.session_state and st.session_state.selected_file_idx < len(filtered_files):
+            default_index = st.session_state.selected_file_idx
+        
+        selected_file_display = st.sidebar.selectbox(
+            "Select a file",
+            file_options,
+            index=default_index
+        )
+        
+        # Find the index of the selected file in filtered_files
+        selected_file_idx = file_options.index(selected_file_display)
+        
+        # Update the selected file in session state
+        if 'selected_file_idx' not in st.session_state or selected_file_idx != st.session_state.selected_file_idx:
+            st.session_state.selected_file_idx = selected_file_idx
+            st.session_state.pdf_content = None  # Reset PDF content when changing files
+            st.session_state.csv_df = None
+            st.session_state.manual_edit_fields = []
 
-----
-# Instead of
-selected_file = matched_files[st.session_state.selected_file_idx]
+        # Load PDF and CSV for selected file
+        if st.session_state.pdf_content is None:
+            source_blob = filtered_files[selected_file_idx]["source_blob"]
+            st.session_state.pdf_content = download_blob_to_memory(blob_service_client, container_name, source_blob)
 
-# Use
-selected_file = filtered_matched_files[st.session_state.selected_file_idx]
+        if st.session_state.csv_df is None:
+            processed_blob = filtered_files[selected_file_idx]["processed_blob"]
+            st.session_state.csv_df = load_csv_from_blob(blob_service_client, container_name, processed_blob)
+            
+            # Get fields that can be edited (exclude metadata columns)
+            if st.session_state.csv_df is not None:
+                exclude_columns = ["Page", "Filename", "Extraction_Timestamp", "Manual_Edit", "Edit_Timestamp", 
+                                  "Manually_Edited_Fields", "Original_Values", "New_Values"]
+                
+                # Handle different confidence column naming conventions
+                confidence_cols = []
+                for col in st.session_state.csv_df.columns:
+                    if col.endswith("Confidence") or col.endswith("_Confidence") or " Confidence" in col:
+                        confidence_cols.append(col)
+                
+                # Get editable fields by excluding all metadata and confidence columns
+                st.session_state.manual_edit_fields = [col for col in st.session_state.csv_df.columns 
+                                                    if col not in exclude_columns and col not in confidence_cols]
+
+        # Display PDF preview in sidebar
+        if st.session_state.pdf_content:
+            st.sidebar.markdown("---")
+            st.sidebar.subheader("PDF Preview")
+            base64_pdf = convert_pdf_to_base64(st.session_state.pdf_content)
+            display_pdf_viewer(base64_pdf, height=400)
+
+
+--
+
+# Tab 1: Results View
+with tabs[0]:
+    st.header(f"Results - {confidence_selection.replace('_', ' ').title()}")
+
+    if not matched_files:
+        st.warning("No matched source and processed files found.")
+    else:
+        # Ensure we're using the filtered_files
+        display_files = filtered_files if 'filtered_files' in locals() else matched_files
+        
+        # Display matched files in a table with date and time
+        display_df = pd.DataFrame([{
+            "File Name": f["base_name"],
+            "Creation Date": f["creation_date"],
+            "Creation Time": f["creation_time"],
+            "Source Path": f["source_blob"],
+            "Results Path": f["processed_blob"]
+        } for f in display_files])
+        
+        st.write(f"Found {len(display_files)} matched files")
+        st.dataframe(display_df, use_container_width=True)
+
+        # Use already selected file from sidebar
+        st.write(f"Selected file: {display_files[st.session_state.selected_file_idx]['base_name']} " +
+                f"(Created: {display_files[st.session_state.selected_file_idx]['creation_date']})")
