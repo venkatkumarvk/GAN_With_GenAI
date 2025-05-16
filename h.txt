@@ -1,28 +1,40 @@
+
 trigger:
   branches:
     include:
-      - main
+    - main  # Change to your primary branch name if different
 
 pool:
   vmImage: 'ubuntu-latest'
 
 variables:
-  azureSubscription: '<your-azure-service-connection-name>'
-  webAppName: '<your-web-app-name>'
-  pythonVersion: '3.10'
+  # Update these values with your resource names
+  azureSubscription: 'your-azure-subscription'  # Service connection name
+  webAppName: 'your-streamlit-app'              # Azure Web App name
+  resourceGroupName: 'your-resource-group'      # Azure Resource Group
 
 steps:
-
+# Set up Python 3.11
 - task: UsePythonVersion@0
   inputs:
-    versionSpec: '$(pythonVersion)'
+    versionSpec: '3.11'
     addToPath: true
+  displayName: 'Set up Python 3.11'
 
+# Install dependencies
 - script: |
     python -m pip install --upgrade pip
     pip install -r requirements.txt
-  displayName: 'Install Python dependencies'
+  displayName: 'Install dependencies'
 
+# Create Streamlit startup script
+- script: |
+    echo '#!/bin/bash' > run.sh
+    echo 'python -m streamlit run app.py --server.port 8000 --server.address 0.0.0.0' >> run.sh
+    chmod +x run.sh
+  displayName: 'Create startup script'
+
+# Archive files for deployment
 - task: ArchiveFiles@2
   inputs:
     rootFolderOrFile: '$(System.DefaultWorkingDirectory)'
@@ -30,17 +42,30 @@ steps:
     archiveType: 'zip'
     archiveFile: '$(Build.ArtifactStagingDirectory)/app.zip'
     replaceExistingArchive: true
+  displayName: 'Archive application files'
 
-- task: PublishBuildArtifacts@1
-  inputs:
-    PathtoPublish: '$(Build.ArtifactStagingDirectory)'
-    ArtifactName: 'drop'
-    publishLocation: 'Container'
-
+# Deploy to Azure Web App
 - task: AzureWebApp@1
   inputs:
     azureSubscription: '$(azureSubscription)'
     appType: 'webAppLinux'
     appName: '$(webAppName)'
+    resourceGroupName: '$(resourceGroupName)'
     package: '$(Build.ArtifactStagingDirectory)/app.zip'
-streamlit run app.py --server.port 8000 --server.enableCORS false
+    runtimeStack: 'PYTHON|3.11'
+    startupCommand: 'sh run.sh'
+  displayName: 'Deploy to Azure Web App'
+
+# Enable WebSockets (required for Streamlit)
+- task: AzureCLI@2
+  inputs:
+    azureSubscription: '$(azureSubscription)'
+    scriptType: 'bash'
+    scriptLocation: 'inlineScript'
+    inlineScript: |
+      az webapp config set --name $(webAppName) --resource-group $(resourceGroupName) --web-sockets-enabled true
+      az webapp restart --name $(webAppName) --resource-group $(resourceGroupName)
+  displayName: 'Enable WebSockets and restart app'
+
+------------
+sh run.sh
