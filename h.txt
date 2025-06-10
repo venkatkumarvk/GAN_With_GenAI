@@ -4,60 +4,58 @@ import pandas as pd
 # Initialize session state
 if "csv_df" not in st.session_state:
     st.session_state.csv_df = None
-if "original_values" not in st.session_state:
-    st.session_state.original_values = None
-if "current_file_name" not in st.session_state:
-    st.session_state.current_file_name = None
+if "old_values" not in st.session_state:
+    st.session_state.old_values = None
 
 # File upload
 uploaded_file = st.file_uploader("Choose a CSV file", type="csv")
 
 if uploaded_file is not None:
-    # Check if this is a new file
-    if st.session_state.current_file_name != uploaded_file.name:
-        # New file uploaded - reset everything
-        st.session_state.current_file_name = uploaded_file.name
-        st.session_state.csv_df = pd.read_csv(uploaded_file)
-        # Store original values (first row)
-        st.session_state.original_values = st.session_state.csv_df.iloc[0].copy()
+    # Read the current CSV
+    current_df = pd.read_csv(uploaded_file)
     
-    # If CSV data exists in session state
-    if st.session_state.csv_df is not None:
-        # Filter columns (exclude columns with certain suffixes)
-        exclude_suffixes = ['_id', '_key', '_index']
-        filtered_columns = [
-            col for col in st.session_state.csv_df.columns
-            if not any(col.endswith(suffix) for suffix in exclude_suffixes)
-        ]
+    # Filter columns (exclude columns with certain suffixes)
+    exclude_suffixes = ['_id', '_key', '_index']
+    filtered_columns = [
+        col for col in current_df.columns
+        if not any(col.endswith(suffix) for suffix in exclude_suffixes)
+    ]
+    
+    # Get filtered dataframe
+    filtered_df = current_df[filtered_columns]
+    
+    # Initialize "Old Values" only ONCE (never reset)
+    if st.session_state.old_values is None:
+        st.session_state.old_values = filtered_df.iloc[0].copy()  # Store first row as old values ONLY ONCE
+    
+    # Update current dataframe
+    st.session_state.csv_df = filtered_df
+    
+    # Create the comparison table
+    table_data = []
+    for col in filtered_columns:
+        old_val = st.session_state.old_values[col]
+        new_val = st.session_state.csv_df.iloc[0][col]  # Current first row values
         
-        # Get filtered dataframe
-        filtered_df = st.session_state.csv_df[filtered_columns]
-        
-        # Create the comparison table
-        table_data = []
-        for col in filtered_columns:
-            original_val = st.session_state.original_values[col]
-            current_val = filtered_df.iloc[0][col]  # First row current values
-            
-            table_data.append({
-                "Field": col,
-                "Old Values": str(original_val),
-                "New Values": str(current_val)
-            })
-        
-        # Create DataFrame for display
-        table_format = pd.DataFrame(table_data)
-        
-        # Convert columns to strings to avoid type conflicts
-        table_format["Old Values"] = table_format["Old Values"].astype(str)
-        table_format["New Values"] = table_format["New Values"].astype(str)
-        
-        # Display the table
-        st.dataframe(table_format, use_container_width=True, hide_index=True)
-        
-        # Show memory usage
-        memory_usage = st.session_state.csv_df.memory_usage(deep=True).sum()
-        st.write(f"Memory usage: {memory_usage} bytes")
+        table_data.append({
+            "Field": col,
+            "Old Values": str(old_val),
+            "New Values": str(new_val)
+        })
+    
+    # Create DataFrame for display
+    table_format = pd.DataFrame(table_data)
+    
+    # Convert columns to strings to avoid type conflicts
+    table_format["Old Values"] = table_format["Old Values"].astype(str)
+    table_format["New Values"] = table_format["New Values"].astype(str)
+    
+    # Display the table
+    st.dataframe(table_format, use_container_width=True, hide_index=True)
+    
+    # Show memory usage
+    memory_usage = current_df.memory_usage(deep=True).sum()
+    st.write(f"Memory usage: {memory_usage} bytes")
 
 else:
     st.info("Please upload a CSV file to begin.")
