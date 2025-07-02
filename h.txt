@@ -1,6 +1,6 @@
 import pandas as pd
 import re
-from typing import Dict, List, Tuple
+from typing import Dict, List, Tuple, Set
 
 class DatabricksSchemaGenerator:
     def __init__(self, excel_file_path: str):
@@ -12,13 +12,16 @@ class DatabricksSchemaGenerator:
             # RDMOF datatype mappings
             'VARCHAR2(255 BYTE)': 'VARCHAR(255)',
             'VARCHAR2(100 BYTE)': 'VARCHAR(100)',
+            'VARCHAR2(50 BYTE)': 'VARCHAR(50)',
+            'VARCHAR2(20 BYTE)': 'VARCHAR(20)',
+            'VARCHAR2(10 BYTE)': 'VARCHAR(10)',
             'TIMESTAMP(6)': 'TIMESTAMP',
             'NUMBER(12,6)': 'DECIMAL(12,6)',
-            # Add more mappings as needed
-            'VARCHAR2': 'VARCHAR',
-            'NUMBER': 'DECIMAL',
+            'NUMBER(10,2)': 'DECIMAL(10,2)',
+            'NUMBER(18,0)': 'BIGINT',
+            'NUMBER(10,0)': 'INT',
             'DATE': 'DATE',
-            'CHAR': 'CHAR',
+            'CHAR(1)': 'CHAR(1)',
             'CLOB': 'STRING',
             'BLOB': 'BINARY'
         }
@@ -45,7 +48,6 @@ class DatabricksSchemaGenerator:
                 df = pd.read_excel(self.excel_file_path, sheet_name=target_sheet)
             else:
                 print("BROKER_GROUP_RELATION sheet not found. Available sheets:", available_sheets)
-                # Try first sheet as fallback
                 print(f"Using first sheet: {available_sheets[0]}")
                 df = pd.read_excel(self.excel_file_path, sheet_name=available_sheets[0])
             
@@ -54,13 +56,6 @@ class DatabricksSchemaGenerator:
         except Exception as e:
             print(f"Error loading Excel file: {e}")
             return None
-    
-    def filter_broker_group_relation(self, df: pd.DataFrame) -> pd.DataFrame:
-        """
-        Since we're already loading the BROKER_GROUP_RELATION sheet, return all data
-        """
-        print(f"Using all data from BROKER_GROUP_RELATION sheet: {len(df)} rows")
-        return df
     
     def map_datatype(self, original_datatype: str) -> str:
         """
@@ -76,257 +71,42 @@ class DatabricksSchemaGenerator:
             return self.datatype_mapping[datatype_str]
         
         # Pattern-based mapping for parameterized types
-        for pattern, replacement in self.datatype_mapping.items():
-            if pattern in datatype_str:
-                if 'VARCHAR2' in pattern and '(' in datatype_str:
-                    # Extract size for VARCHAR2
-                    size_match = re.search(r'\((\d+)', datatype_str)
-                    if size_match:
-                        size = size_match.group(1)
-                        return f'VARCHAR({size})'
-                elif 'NUMBER' in pattern and '(' in datatype_str:
-                    # Extract precision and scale for NUMBER
-                    number_match = re.search(r'\((\d+),(\d+)\)', datatype_str)
-                    if number_match:
-                        precision, scale = number_match.groups()
-                        return f'DECIMAL({precision},{scale})'
+        if 'VARCHAR2' in datatype_str and '(' in datatype_str:
+            # Extract size for VARCHAR2
+            size_match = re.search(r'\((\d+)', datatype_str)
+            if size_match:
+                size = size_match.group(1)
+                return f'VARCHAR({size})'
+            return 'VARCHAR(255)'
+        
+        elif 'NUMBER' in datatype_str and '(' in datatype_str:
+            # Extract precision and scale for NUMBER
+            number_match = re.search(r'\((\d+),(\d+)\)', datatype_str)
+            if number_match:
+                precision, scale = number_match.groups()
+                return f'DECIMAL({precision},{scale})'
+            else:
+                precision_match = re.search(r'\((\d+)\)', datatype_str)
+                if precision_match:
+                    precision = precision_match.group(1)
+                    if int(precision) <= 10:
+                        return 'INT'
                     else:
-                        precision_match = re.search(r'\((\d+)\)', datatype_str)
-                        if precision_match:
-                            precision = precision_match.group(1)
-                            return f'DECIMAL({precision})'
-                return replacement
+                        return 'BIGINT'
+        
+        elif 'TIMESTAMP' in datatype_str:
+            return 'TIMESTAMP'
+        elif 'DATE' in datatype_str:
+            return 'DATE'
+        elif 'CHAR' in datatype_str:
+            return 'STRING'
+        elif 'CLOB' in datatype_str:
+            return 'STRING'
+        elif 'BLOB' in datatype_str:
+            return 'BINARY'
         
         # Default fallback
         return 'STRING'
-    
-    def process_categories(self, df: pd.DataFrame) -> Dict[str, List[Tuple[str, str, str, str]]]:
-        """
-        Process the three categories and extract schema information
-        """
-        categories = {
-            'RDMOF': [],
-            'EDL': [],
-            'Original SSR': []
-        }
-        
-        print("\nAnalyzing Excel structure...")
-        print(f"Columns found: {list(df.columns)}")
-        print(f"First few rows:")
-        print(df.head())
-        
-        # More flexible column identification
-        column_mapping = {}
-        
-        # Look for category-related columns
-        category_patterns = ['category', 'cat', 'type', 'source', 'system']
-        schema_patterns = ['schema', 'database', 'db', 'namespace']
-        table_patterns = ['table', 'tbl', 'entity', 'object']
-        column_patterns = ['column', 'col', 'field', 'attribute', 'element']
-        datatype_patterns = ['datatype', 'data_type', 'type', 'format', 'dtype']
-        
-        for col in df.columns:
-            col_lower = col.lower().replace('_', ' ').replace('-', ' ')
-            
-            # Check for category column
-            if any(pattern in col_lower for pattern in category_patterns) and 'category' not in column_mapping:
-                column_mapping['category'] = col
-            
-            # Check for schema column
-            elif any(pattern in col_lower for pattern in schema_patterns) and 'schema' not in column_mapping:
-                column_mapping['schema'] = col
-            
-            # Check for table name column
-            elif any(pattern in col_lower for pattern in table_patterns) and 'name' in col_lower and 'column' not in col_lower:
-                column_mapping['table_name'] = col
-            
-            # Check for column name
-            elif any(pattern in col_lower for pattern in column_patterns) and 'name' in col_lower:
-                column_mapping['column_name'] = col
-            
-            # Check for datatype
-            elif any(pattern in col_lower for pattern in datatype_patterns) and 'datatype' not in column_mapping:
-                column_mapping['datatype'] = col
-        
-        print(f"\nIdentified column mapping: {column_mapping}")
-        
-        # If we can't find the standard columns, let's look for category-specific columns
-        if not column_mapping:
-            print("\nNo standard columns found. Looking for category-specific columns...")
-            
-            # Look for columns that might contain category information
-            for col in df.columns:
-                col_str = str(col)
-                if any(cat in col_str.upper() for cat in ['RDMOF', 'EDL', 'SSR']):
-                    print(f"Found potential category column: {col}")
-                    
-                    # Try to determine what type of information this column contains
-                    sample_values = df[col].dropna().head(10).astype(str)
-                    print(f"Sample values from {col}: {sample_values.tolist()}")
-        
-        # If still no mapping found, try to use column positions or ask user
-        if not column_mapping:
-            print("\nCould not automatically identify columns.")
-            print("Available columns:")
-            for i, col in enumerate(df.columns):
-                print(f"{i}: {col}")
-            
-            # For now, let's try to work with what we have
-            # Look for any columns that might contain the three categories
-            for col in df.columns:
-                unique_values = df[col].dropna().astype(str).str.upper().unique()
-                if any('RDMOF' in val or 'EDL' in val or 'SSR' in val for val in unique_values):
-                    column_mapping['category'] = col
-                    print(f"Found category column based on values: {col}")
-                    break
-        
-        # Process the data if we have at least a category column
-        if 'category' in column_mapping or any('RDMOF' in str(col).upper() or 'EDL' in str(col).upper() or 'SSR' in str(col).upper() for col in df.columns):
-            
-            # If we have category-specific columns (like RDMOF_Schema, EDL_Schema, etc.)
-            category_specific_columns = {}
-            for col in df.columns:
-                col_upper = str(col).upper()
-                for cat in ['RDMOF', 'EDL', 'ORIGINAL SSR', 'SSR']:
-                    if cat in col_upper:
-                        if cat not in category_specific_columns:
-                            category_specific_columns[cat] = {}
-                        
-                        if 'SCHEMA' in col_upper:
-                            category_specific_columns[cat]['schema'] = col
-                        elif 'TABLE' in col_upper and 'NAME' in col_upper:
-                            category_specific_columns[cat]['table_name'] = col
-                        elif 'COLUMN' in col_upper and 'NAME' in col_upper:
-                            category_specific_columns[cat]['column_name'] = col
-                        elif 'DATATYPE' in col_upper or 'DATA_TYPE' in col_upper:
-                            category_specific_columns[cat]['datatype'] = col
-            
-            print(f"Category-specific columns found: {category_specific_columns}")
-            
-            # Process each row
-            for _, row in df.iterrows():
-                # Method 1: Use category-specific columns
-                if category_specific_columns:
-                    for cat_key, col_info in category_specific_columns.items():
-                        category = 'RDMOF' if cat_key == 'RDMOF' else 'EDL' if cat_key == 'EDL' else 'Original SSR'
-                        
-                        if col_info:  # If we have column info for this category
-                            schema = row.get(col_info.get('schema'), 'default_schema')
-                            table_name = row.get(col_info.get('table_name'), 'broker_group_relation')
-                            column_name = row.get(col_info.get('column_name'), f'unknown_column_{len(categories[category])}')
-                            datatype = row.get(col_info.get('datatype'), 'STRING')
-                            
-                            # Skip if essential data is missing
-                            if pd.isna(column_name) or str(column_name).strip() == '':
-                                continue
-                            
-                            # Map datatype for RDMOF category
-                            if category == 'RDMOF':
-                                mapped_datatype = self.map_datatype(datatype)
-                            else:
-                                mapped_datatype = str(datatype) if not pd.isna(datatype) else 'STRING'
-                            
-                            categories[category].append((
-                                str(schema) if not pd.isna(schema) else 'default_schema',
-                                str(table_name) if not pd.isna(table_name) else 'broker_group_relation',
-                                str(column_name).strip(),
-                                mapped_datatype
-                            ))
-                
-                # Method 2: Use single category column
-                elif 'category' in column_mapping:
-                    cat_value = str(row[column_mapping['category']]).upper()
-                    category = None
-                    
-                    if 'RDMOF' in cat_value:
-                        category = 'RDMOF'
-                    elif 'EDL' in cat_value:
-                        category = 'EDL'
-                    elif 'SSR' in cat_value or 'ORIGINAL SSR' in cat_value:
-                        category = 'Original SSR'
-                    
-                    if category:
-                        schema = row.get(column_mapping.get('schema', ''), 'default_schema')
-                        table_name = row.get(column_mapping.get('table_name', ''), 'broker_group_relation')
-                        column_name = row.get(column_mapping.get('column_name', ''), f'unknown_column_{len(categories[category])}')
-                        datatype = row.get(column_mapping.get('datatype', ''), 'STRING')
-                        
-                        # Skip if essential data is missing
-                        if pd.isna(column_name) or str(column_name).strip() == '':
-                            continue
-                        
-                        # Map datatype for RDMOF category
-                        if category == 'RDMOF':
-                            mapped_datatype = self.map_datatype(datatype)
-                        else:
-                            mapped_datatype = str(datatype) if not pd.isna(datatype) else 'STRING'
-                        
-                        categories[category].append((
-                            str(schema) if not pd.isna(schema) else 'default_schema',
-                            str(table_name) if not pd.isna(table_name) else 'broker_group_relation',
-                            str(column_name).strip(),
-                            mapped_datatype
-                        ))
-        
-        return categories
-    
-    def generate_sql_schema(self, categories: Dict[str, List[Tuple[str, str, str, str]]]) -> str:
-        """
-        Generate SQL CREATE TABLE statements for each category
-        """
-        sql_statements = []
-        
-        for category, columns in categories.items():
-            if not columns:
-                continue
-            
-            # Use the first row to get schema and table name
-            schema_name = columns[0][0]
-            table_name = columns[0][1]
-            
-            # Create table name with category suffix
-            full_table_name = f"{schema_name}.{table_name}_{category.replace(' ', '_').lower()}"
-            
-            sql = f"-- {category} Schema\n"
-            sql += f"CREATE TABLE IF NOT EXISTS {full_table_name} (\n"
-            
-            column_definitions = []
-            for _, _, column_name, datatype in columns:
-                column_definitions.append(f"    {column_name} {datatype}")
-            
-            sql += ",\n".join(column_definitions)
-            sql += "\n);\n\n"
-            
-            sql_statements.append(sql)
-        
-        return "\n".join(sql_statements)
-    
-    def generate_unified_schema(self, categories: Dict[str, List[Tuple[str, str, str, str]]]) -> str:
-        """
-        Generate a unified schema with all categories in one table
-        """
-        all_columns = []
-        
-        for category, columns in categories.items():
-            for _, _, column_name, datatype in columns:
-                # Add category prefix to avoid column name conflicts
-                prefixed_column_name = f"{category.replace(' ', '_').lower()}_{column_name}"
-                all_columns.append((prefixed_column_name, datatype))
-        
-        if not all_columns:
-            return "-- No columns found to generate schema"
-        
-        sql = "-- Unified BROKER GROUP RELATION Schema\n"
-        sql += "CREATE TABLE IF NOT EXISTS broker_group_relation_unified (\n"
-        
-        column_definitions = []
-        for column_name, datatype in all_columns:
-            column_definitions.append(f"    {column_name} {datatype}")
-        
-        sql += ",\n".join(column_definitions)
-        sql += "\n);\n"
-        
-        return sql
     
     def analyze_excel_structure(self, df: pd.DataFrame):
         """
@@ -344,18 +124,13 @@ class DatabricksSchemaGenerator:
             print(f"  {i+1:2d}. {col}")
         
         print(f"\nSample data (first 3 rows):")
-        for i, (idx, row) in enumerate(df.head(3).iterrows()):
-            print(f"\nRow {i+1}:")
-            for col in df.columns:
-                value = row[col]
-                if pd.notna(value):
-                    print(f"  {col}: {value}")
+        print(df.head(3).to_string())
         
         print(f"\nLooking for category indicators...")
         category_keywords = ['RDMOF', 'EDL', 'SSR', 'ORIGINAL SSR']
         
         for col in df.columns:
-            unique_vals = df[col].dropna().astype(str).unique()[:10]  # First 10 unique values
+            unique_vals = df[col].dropna().astype(str).unique()[:10]
             has_category = any(any(keyword in str(val).upper() for keyword in category_keywords) for val in unique_vals)
             
             if has_category:
@@ -363,46 +138,195 @@ class DatabricksSchemaGenerator:
                 print(f"    Sample values: {list(unique_vals)}")
         
         print("="*60)
-
-    def run(self, generate_unified: bool = True, debug: bool = True) -> str:
+    
+    def extract_columns_from_categories(self, df: pd.DataFrame) -> List[Tuple[str, str]]:
+        """
+        Extract all unique columns from all three categories
+        Returns list of (column_name, datatype) tuples
+        """
+        all_columns = []
+        seen_columns = set()  # To avoid duplicates
+        
+        print("\nProcessing categories...")
+        
+        # Try to identify the structure
+        # Look for category-specific columns first
+        category_mappings = {
+            'RDMOF': {},
+            'EDL': {},
+            'Original SSR': {}
+        }
+        
+        # Method 1: Look for category-specific columns (e.g., RDMOF_Schema, EDL_Schema)
+        for col in df.columns:
+            col_upper = str(col).upper()
+            
+            # Check for RDMOF columns
+            if 'RDMOF' in col_upper:
+                if 'SCHEMA' in col_upper:
+                    category_mappings['RDMOF']['schema'] = col
+                elif 'TABLE' in col_upper:
+                    category_mappings['RDMOF']['table'] = col
+                elif 'COLUMN' in col_upper:
+                    category_mappings['RDMOF']['column'] = col
+                elif 'DATATYPE' in col_upper or 'DATA_TYPE' in col_upper:
+                    category_mappings['RDMOF']['datatype'] = col
+            
+            # Check for EDL columns
+            elif 'EDL' in col_upper:
+                if 'SCHEMA' in col_upper:
+                    category_mappings['EDL']['schema'] = col
+                elif 'TABLE' in col_upper:
+                    category_mappings['EDL']['table'] = col
+                elif 'COLUMN' in col_upper:
+                    category_mappings['EDL']['column'] = col
+                elif 'DATATYPE' in col_upper or 'DATA_TYPE' in col_upper:
+                    category_mappings['EDL']['datatype'] = col
+            
+            # Check for Original SSR columns
+            elif 'SSR' in col_upper or 'ORIGINAL' in col_upper:
+                if 'SCHEMA' in col_upper:
+                    category_mappings['Original SSR']['schema'] = col
+                elif 'TABLE' in col_upper:
+                    category_mappings['Original SSR']['table'] = col
+                elif 'COLUMN' in col_upper:
+                    category_mappings['Original SSR']['column'] = col
+                elif 'DATATYPE' in col_upper or 'DATA_TYPE' in col_upper:
+                    category_mappings['Original SSR']['datatype'] = col
+        
+        print(f"Category mappings found: {category_mappings}")
+        
+        # Process each category
+        for category, mapping in category_mappings.items():
+            if mapping.get('column'):  # If we have column information
+                print(f"\nProcessing {category} category...")
+                
+                column_col = mapping['column']
+                datatype_col = mapping.get('datatype')
+                
+                # Get all non-null column names for this category
+                for _, row in df.iterrows():
+                    column_name = row.get(column_col)
+                    if pd.notna(column_name) and str(column_name).strip():
+                        column_name = str(column_name).strip()
+                        
+                        # Get datatype
+                        if datatype_col and pd.notna(row.get(datatype_col)):
+                            datatype = str(row[datatype_col]).strip()
+                            # Apply datatype mapping for RDMOF
+                            if category == 'RDMOF':
+                                mapped_datatype = self.map_datatype(datatype)
+                            else:
+                                mapped_datatype = datatype if datatype else 'STRING'
+                        else:
+                            mapped_datatype = 'STRING'
+                        
+                        # Avoid duplicates
+                        if column_name.lower() not in seen_columns:
+                            all_columns.append((column_name, mapped_datatype))
+                            seen_columns.add(column_name.lower())
+                            print(f"  Added: {column_name} {mapped_datatype}")
+        
+        # Method 2: If no category-specific columns, look for single category column
+        if not all_columns:
+            print("\nNo category-specific columns found. Looking for single category column...")
+            
+            # Look for a column that contains category information
+            category_col = None
+            for col in df.columns:
+                unique_vals = df[col].dropna().astype(str).str.upper().unique()
+                if any('RDMOF' in val or 'EDL' in val or 'SSR' in val for val in unique_vals):
+                    category_col = col
+                    break
+            
+            if category_col:
+                print(f"Found category column: {category_col}")
+                
+                # Look for column name and datatype columns
+                column_name_col = None
+                datatype_col = None
+                
+                for col in df.columns:
+                    col_lower = col.lower()
+                    if 'column' in col_lower and 'name' in col_lower:
+                        column_name_col = col
+                    elif 'datatype' in col_lower or 'data_type' in col_lower:
+                        datatype_col = col
+                
+                if column_name_col:
+                    print(f"Column name column: {column_name_col}")
+                    print(f"Datatype column: {datatype_col}")
+                    
+                    for _, row in df.iterrows():
+                        category = str(row[category_col]).upper()
+                        column_name = row.get(column_name_col)
+                        
+                        if pd.notna(column_name) and str(column_name).strip():
+                            column_name = str(column_name).strip()
+                            
+                            # Get datatype
+                            if datatype_col and pd.notna(row.get(datatype_col)):
+                                datatype = str(row[datatype_col]).strip()
+                                # Apply datatype mapping for RDMOF
+                                if 'RDMOF' in category:
+                                    mapped_datatype = self.map_datatype(datatype)
+                                else:
+                                    mapped_datatype = datatype if datatype else 'STRING'
+                            else:
+                                mapped_datatype = 'STRING'
+                            
+                            # Avoid duplicates
+                            if column_name.lower() not in seen_columns:
+                                all_columns.append((column_name, mapped_datatype))
+                                seen_columns.add(column_name.lower())
+                                print(f"  Added: {column_name} {mapped_datatype} (from {category})")
+        
+        print(f"\nTotal unique columns found: {len(all_columns)}")
+        return all_columns
+    
+    def generate_broker_group_relation_schema(self, columns: List[Tuple[str, str]]) -> str:
+        """
+        Generate the single BROKER_GROUP_RELATION table schema
+        """
+        if not columns:
+            return "-- No columns found to generate schema"
+        
+        sql = "-- BROKER_GROUP_RELATION Table Schema\n"
+        sql += "CREATE TABLE IF NOT EXISTS external_catalog.EDM_Reporting.BROKER_GROUP_RELATION (\n"
+        
+        column_definitions = []
+        for column_name, datatype in columns:
+            column_definitions.append(f"    {column_name} {datatype}")
+        
+        sql += ",\n".join(column_definitions)
+        sql += "\n);"
+        
+        return sql
+    
+    def run(self, debug: bool = True) -> str:
         """
         Main method to run the schema generation process
         """
-        print("Starting Databricks Schema Generation...")
+        print("Starting Databricks Schema Generation for BROKER_GROUP_RELATION...")
         
         # Load Excel data
         df = self.load_excel_data()
         if df is None:
             return "Error: Could not load Excel file"
         
-        print("Excel columns:", list(df.columns))
-        
         if debug:
             self.analyze_excel_structure(df)
         
-        # Filter for BROKER GROUP RELATION table
-        filtered_df = self.filter_broker_group_relation(df)
-        print(f"Filtered data: {len(filtered_df)} rows")
+        # Extract all columns from all categories
+        all_columns = self.extract_columns_from_categories(df)
         
-        # Process categories
-        categories = self.process_categories(filtered_df)
+        if not all_columns:
+            return "Error: No columns found in the data. Please check your Excel structure."
         
-        # Print category summary
-        for cat, cols in categories.items():
-            print(f"{cat}: {len(cols)} columns")
+        # Generate the single table schema
+        schema_sql = self.generate_broker_group_relation_schema(all_columns)
         
-        # Generate SQL schemas
-        separate_schemas = self.generate_sql_schema(categories)
-        
-        result = "-- DATABRICKS SCHEMA GENERATION RESULTS\n"
-        result += "-- =====================================\n\n"
-        result += separate_schemas
-        
-        if generate_unified:
-            unified_schema = self.generate_unified_schema(categories)
-            result += "\n" + unified_schema
-        
-        return result
+        return schema_sql
 
 # Usage Example
 def main():
@@ -411,17 +335,18 @@ def main():
     
     try:
         generator = DatabricksSchemaGenerator(excel_file_path)
-        schema_sql = generator.run(generate_unified=True, debug=True)
+        schema_sql = generator.run(debug=True)
         
-        print("Generated SQL Schema:")
-        print("=" * 50)
+        print("\n" + "="*60)
+        print("GENERATED SQL SCHEMA")
+        print("="*60)
         print(schema_sql)
         
         # Save to file
-        with open("databricks_schema.sql", "w") as f:
+        with open("broker_group_relation_schema.sql", "w") as f:
             f.write(schema_sql)
         
-        print("\nSchema saved to 'databricks_schema.sql'")
+        print(f"\nSchema saved to 'broker_group_relation_schema.sql'")
         
     except FileNotFoundError:
         print(f"Error: Excel file '{excel_file_path}' not found.")
