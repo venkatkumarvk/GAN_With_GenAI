@@ -25,12 +25,31 @@ class DatabricksSchemaGenerator:
     
     def load_excel_data(self) -> pd.DataFrame:
         """
-        Load data from Excel file
+        Load data from Excel file, specifically from BROKER_GROUP_RELATION sheet
         """
         try:
-            # Try to read the Excel file
-            df = pd.read_excel(self.excel_file_path)
-            print(f"Successfully loaded Excel file with {len(df)} rows")
+            # First, check available sheets
+            excel_file = pd.ExcelFile(self.excel_file_path)
+            available_sheets = excel_file.sheet_names
+            print(f"Available sheets: {available_sheets}")
+            
+            # Look for BROKER_GROUP_RELATION sheet (case insensitive)
+            target_sheet = None
+            for sheet in available_sheets:
+                if 'BROKER_GROUP_RELATION' in sheet.upper() or 'BROKER GROUP RELATION' in sheet.upper():
+                    target_sheet = sheet
+                    break
+            
+            if target_sheet:
+                print(f"Loading sheet: {target_sheet}")
+                df = pd.read_excel(self.excel_file_path, sheet_name=target_sheet)
+            else:
+                print("BROKER_GROUP_RELATION sheet not found. Available sheets:", available_sheets)
+                # Try first sheet as fallback
+                print(f"Using first sheet: {available_sheets[0]}")
+                df = pd.read_excel(self.excel_file_path, sheet_name=available_sheets[0])
+            
+            print(f"Successfully loaded Excel file with {len(df)} rows and {len(df.columns)} columns")
             return df
         except Exception as e:
             print(f"Error loading Excel file: {e}")
@@ -38,21 +57,10 @@ class DatabricksSchemaGenerator:
     
     def filter_broker_group_relation(self, df: pd.DataFrame) -> pd.DataFrame:
         """
-        Filter data for BROKER GROUP RELATION table
+        Since we're already loading the BROKER_GROUP_RELATION sheet, return all data
         """
-        # Assuming there's a column that identifies the table name
-        # Adjust column names based on your actual Excel structure
-        table_columns = [col for col in df.columns if 'table' in col.lower() or 'name' in col.lower()]
-        
-        if table_columns:
-            table_col = table_columns[0]  # Use first matching column
-            filtered_df = df[df[table_col].str.contains('BROKER GROUP RELATION', case=False, na=False)]
-        else:
-            # If no table column found, use all data
-            print("Warning: No table identifier column found. Using all data.")
-            filtered_df = df
-        
-        return filtered_df
+        print(f"Using all data from BROKER_GROUP_RELATION sheet: {len(df)} rows")
+        return df
     
     def map_datatype(self, original_datatype: str) -> str:
         """
@@ -102,59 +110,163 @@ class DatabricksSchemaGenerator:
             'Original SSR': []
         }
         
-        # Assuming your Excel has columns like:
-        # Category, Schema, Physical_Table_Name, Physical_Column_Name, Datatype
-        # Adjust these column names based on your actual Excel structure
+        print("\nAnalyzing Excel structure...")
+        print(f"Columns found: {list(df.columns)}")
+        print(f"First few rows:")
+        print(df.head())
         
-        expected_columns = ['category', 'schema', 'table_name', 'column_name', 'datatype']
-        
-        # Try to identify columns by common patterns
+        # More flexible column identification
         column_mapping = {}
+        
+        # Look for category-related columns
+        category_patterns = ['category', 'cat', 'type', 'source', 'system']
+        schema_patterns = ['schema', 'database', 'db', 'namespace']
+        table_patterns = ['table', 'tbl', 'entity', 'object']
+        column_patterns = ['column', 'col', 'field', 'attribute', 'element']
+        datatype_patterns = ['datatype', 'data_type', 'type', 'format', 'dtype']
+        
         for col in df.columns:
-            col_lower = col.lower()
-            if 'category' in col_lower:
+            col_lower = col.lower().replace('_', ' ').replace('-', ' ')
+            
+            # Check for category column
+            if any(pattern in col_lower for pattern in category_patterns) and 'category' not in column_mapping:
                 column_mapping['category'] = col
-            elif 'schema' in col_lower:
+            
+            # Check for schema column
+            elif any(pattern in col_lower for pattern in schema_patterns) and 'schema' not in column_mapping:
                 column_mapping['schema'] = col
-            elif 'table' in col_lower and 'name' in col_lower:
+            
+            # Check for table name column
+            elif any(pattern in col_lower for pattern in table_patterns) and 'name' in col_lower and 'column' not in col_lower:
                 column_mapping['table_name'] = col
-            elif 'column' in col_lower and 'name' in col_lower:
+            
+            # Check for column name
+            elif any(pattern in col_lower for pattern in column_patterns) and 'name' in col_lower:
                 column_mapping['column_name'] = col
-            elif 'datatype' in col_lower or 'data_type' in col_lower or 'type' in col_lower:
+            
+            # Check for datatype
+            elif any(pattern in col_lower for pattern in datatype_patterns) and 'datatype' not in column_mapping:
                 column_mapping['datatype'] = col
         
-        print("Identified columns:", column_mapping)
+        print(f"\nIdentified column mapping: {column_mapping}")
         
-        for _, row in df.iterrows():
-            # Determine category
-            category = None
-            if 'category' in column_mapping:
-                cat_value = str(row[column_mapping['category']]).upper()
-                if 'RDMOF' in cat_value:
-                    category = 'RDMOF'
-                elif 'EDL' in cat_value:
-                    category = 'EDL'
-                elif 'SSR' in cat_value or 'ORIGINAL SSR' in cat_value:
-                    category = 'Original SSR'
+        # If we can't find the standard columns, let's look for category-specific columns
+        if not column_mapping:
+            print("\nNo standard columns found. Looking for category-specific columns...")
             
-            if category:
-                schema = row.get(column_mapping.get('schema', ''), 'default_schema')
-                table_name = row.get(column_mapping.get('table_name', ''), 'unknown_table')
-                column_name = row.get(column_mapping.get('column_name', ''), 'unknown_column')
-                datatype = row.get(column_mapping.get('datatype', ''), 'STRING')
+            # Look for columns that might contain category information
+            for col in df.columns:
+                col_str = str(col)
+                if any(cat in col_str.upper() for cat in ['RDMOF', 'EDL', 'SSR']):
+                    print(f"Found potential category column: {col}")
+                    
+                    # Try to determine what type of information this column contains
+                    sample_values = df[col].dropna().head(10).astype(str)
+                    print(f"Sample values from {col}: {sample_values.tolist()}")
+        
+        # If still no mapping found, try to use column positions or ask user
+        if not column_mapping:
+            print("\nCould not automatically identify columns.")
+            print("Available columns:")
+            for i, col in enumerate(df.columns):
+                print(f"{i}: {col}")
+            
+            # For now, let's try to work with what we have
+            # Look for any columns that might contain the three categories
+            for col in df.columns:
+                unique_values = df[col].dropna().astype(str).str.upper().unique()
+                if any('RDMOF' in val or 'EDL' in val or 'SSR' in val for val in unique_values):
+                    column_mapping['category'] = col
+                    print(f"Found category column based on values: {col}")
+                    break
+        
+        # Process the data if we have at least a category column
+        if 'category' in column_mapping or any('RDMOF' in str(col).upper() or 'EDL' in str(col).upper() or 'SSR' in str(col).upper() for col in df.columns):
+            
+            # If we have category-specific columns (like RDMOF_Schema, EDL_Schema, etc.)
+            category_specific_columns = {}
+            for col in df.columns:
+                col_upper = str(col).upper()
+                for cat in ['RDMOF', 'EDL', 'ORIGINAL SSR', 'SSR']:
+                    if cat in col_upper:
+                        if cat not in category_specific_columns:
+                            category_specific_columns[cat] = {}
+                        
+                        if 'SCHEMA' in col_upper:
+                            category_specific_columns[cat]['schema'] = col
+                        elif 'TABLE' in col_upper and 'NAME' in col_upper:
+                            category_specific_columns[cat]['table_name'] = col
+                        elif 'COLUMN' in col_upper and 'NAME' in col_upper:
+                            category_specific_columns[cat]['column_name'] = col
+                        elif 'DATATYPE' in col_upper or 'DATA_TYPE' in col_upper:
+                            category_specific_columns[cat]['datatype'] = col
+            
+            print(f"Category-specific columns found: {category_specific_columns}")
+            
+            # Process each row
+            for _, row in df.iterrows():
+                # Method 1: Use category-specific columns
+                if category_specific_columns:
+                    for cat_key, col_info in category_specific_columns.items():
+                        category = 'RDMOF' if cat_key == 'RDMOF' else 'EDL' if cat_key == 'EDL' else 'Original SSR'
+                        
+                        if col_info:  # If we have column info for this category
+                            schema = row.get(col_info.get('schema'), 'default_schema')
+                            table_name = row.get(col_info.get('table_name'), 'broker_group_relation')
+                            column_name = row.get(col_info.get('column_name'), f'unknown_column_{len(categories[category])}')
+                            datatype = row.get(col_info.get('datatype'), 'STRING')
+                            
+                            # Skip if essential data is missing
+                            if pd.isna(column_name) or str(column_name).strip() == '':
+                                continue
+                            
+                            # Map datatype for RDMOF category
+                            if category == 'RDMOF':
+                                mapped_datatype = self.map_datatype(datatype)
+                            else:
+                                mapped_datatype = str(datatype) if not pd.isna(datatype) else 'STRING'
+                            
+                            categories[category].append((
+                                str(schema) if not pd.isna(schema) else 'default_schema',
+                                str(table_name) if not pd.isna(table_name) else 'broker_group_relation',
+                                str(column_name).strip(),
+                                mapped_datatype
+                            ))
                 
-                # Map datatype for RDMOF category
-                if category == 'RDMOF':
-                    mapped_datatype = self.map_datatype(datatype)
-                else:
-                    mapped_datatype = str(datatype) if not pd.isna(datatype) else 'STRING'
-                
-                categories[category].append((
-                    str(schema) if not pd.isna(schema) else 'default_schema',
-                    str(table_name) if not pd.isna(table_name) else 'broker_group_relation',
-                    str(column_name) if not pd.isna(column_name) else 'unknown_column',
-                    mapped_datatype
-                ))
+                # Method 2: Use single category column
+                elif 'category' in column_mapping:
+                    cat_value = str(row[column_mapping['category']]).upper()
+                    category = None
+                    
+                    if 'RDMOF' in cat_value:
+                        category = 'RDMOF'
+                    elif 'EDL' in cat_value:
+                        category = 'EDL'
+                    elif 'SSR' in cat_value or 'ORIGINAL SSR' in cat_value:
+                        category = 'Original SSR'
+                    
+                    if category:
+                        schema = row.get(column_mapping.get('schema', ''), 'default_schema')
+                        table_name = row.get(column_mapping.get('table_name', ''), 'broker_group_relation')
+                        column_name = row.get(column_mapping.get('column_name', ''), f'unknown_column_{len(categories[category])}')
+                        datatype = row.get(column_mapping.get('datatype', ''), 'STRING')
+                        
+                        # Skip if essential data is missing
+                        if pd.isna(column_name) or str(column_name).strip() == '':
+                            continue
+                        
+                        # Map datatype for RDMOF category
+                        if category == 'RDMOF':
+                            mapped_datatype = self.map_datatype(datatype)
+                        else:
+                            mapped_datatype = str(datatype) if not pd.isna(datatype) else 'STRING'
+                        
+                        categories[category].append((
+                            str(schema) if not pd.isna(schema) else 'default_schema',
+                            str(table_name) if not pd.isna(table_name) else 'broker_group_relation',
+                            str(column_name).strip(),
+                            mapped_datatype
+                        ))
         
         return categories
     
@@ -216,7 +328,43 @@ class DatabricksSchemaGenerator:
         
         return sql
     
-    def run(self, generate_unified: bool = True) -> str:
+    def analyze_excel_structure(self, df: pd.DataFrame):
+        """
+        Analyze and print Excel structure to help with debugging
+        """
+        print("\n" + "="*60)
+        print("EXCEL STRUCTURE ANALYSIS")
+        print("="*60)
+        
+        print(f"Total rows: {len(df)}")
+        print(f"Total columns: {len(df.columns)}")
+        
+        print(f"\nColumn names:")
+        for i, col in enumerate(df.columns):
+            print(f"  {i+1:2d}. {col}")
+        
+        print(f"\nSample data (first 3 rows):")
+        for i, (idx, row) in enumerate(df.head(3).iterrows()):
+            print(f"\nRow {i+1}:")
+            for col in df.columns:
+                value = row[col]
+                if pd.notna(value):
+                    print(f"  {col}: {value}")
+        
+        print(f"\nLooking for category indicators...")
+        category_keywords = ['RDMOF', 'EDL', 'SSR', 'ORIGINAL SSR']
+        
+        for col in df.columns:
+            unique_vals = df[col].dropna().astype(str).unique()[:10]  # First 10 unique values
+            has_category = any(any(keyword in str(val).upper() for keyword in category_keywords) for val in unique_vals)
+            
+            if has_category:
+                print(f"  Column '{col}' contains category keywords")
+                print(f"    Sample values: {list(unique_vals)}")
+        
+        print("="*60)
+
+    def run(self, generate_unified: bool = True, debug: bool = True) -> str:
         """
         Main method to run the schema generation process
         """
@@ -228,8 +376,9 @@ class DatabricksSchemaGenerator:
             return "Error: Could not load Excel file"
         
         print("Excel columns:", list(df.columns))
-        print("Sample data:")
-        print(df.head())
+        
+        if debug:
+            self.analyze_excel_structure(df)
         
         # Filter for BROKER GROUP RELATION table
         filtered_df = self.filter_broker_group_relation(df)
@@ -262,7 +411,7 @@ def main():
     
     try:
         generator = DatabricksSchemaGenerator(excel_file_path)
-        schema_sql = generator.run(generate_unified=True)
+        schema_sql = generator.run(generate_unified=True, debug=True)
         
         print("Generated SQL Schema:")
         print("=" * 50)
@@ -282,6 +431,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
-
-#pip install pandas openpyxl
