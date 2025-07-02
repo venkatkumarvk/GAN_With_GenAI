@@ -6,13 +6,6 @@ from typing import Dict, List, Tuple
 class DatabricksSchemaGenerator:
     def __init__(self, excel_file_path: str):
         self.excel_file_path = excel_file_path
-        self.datatype_mapping = {
-            'TIMESTAMP(6)': 'TIMESTAMP',
-            'DATE': 'DATE',
-            'CHAR(1)': 'CHAR(1)',
-            'CLOB': 'STRING',
-            'BLOB': 'BINARY'
-        }
 
     def load_excel_data(self) -> pd.DataFrame:
         try:
@@ -45,41 +38,30 @@ class DatabricksSchemaGenerator:
 
         datatype_str = str(original_datatype).upper().strip()
 
-        # Exact known mappings
-        if datatype_str in self.datatype_mapping:
-            return self.datatype_mapping[datatype_str]
+        # VARCHAR2(N BYTE) -> VARCHAR(N)
+        match = re.match(r'VARCHAR2\((\d+)\s*BYTE\)', datatype_str)
+        if match:
+            return f'VARCHAR({match.group(1)})'
 
-        # Handle VARCHAR2(n BYTE) → VARCHAR(n)
-        varchar_match = re.match(r'VARCHAR2\((\d+)\s*BYTE\)', datatype_str)
-        if varchar_match:
-            return f'VARCHAR({varchar_match.group(1)})'
+        match = re.match(r'VARCHAR2\((\d+)\)', datatype_str)
+        if match:
+            return f'VARCHAR({match.group(1)})'
 
-        # Handle generic VARCHAR2(n)
-        varchar_match_simple = re.match(r'VARCHAR2\((\d+)\)', datatype_str)
-        if varchar_match_simple:
-            return f'VARCHAR({varchar_match_simple.group(1)})'
+        # NUMBER(P,S) -> DECIMAL(P,S)
+        match = re.match(r'NUMBER\((\d+),\s*(\d+)\)', datatype_str)
+        if match:
+            return f'DECIMAL({match.group(1)},{match.group(2)})'
 
-        # Handle NUMBER(p,s) → DECIMAL(p,s)
-        number_decimal_match = re.match(r'NUMBER\((\d+),\s*(\d+)\)', datatype_str)
-        if number_decimal_match:
-            p, s = number_decimal_match.groups()
-            return f'DECIMAL({p},{s})'
-
-        # Handle NUMBER(p) → INT or BIGINT
-        number_int_match = re.match(r'NUMBER\((\d+)\)', datatype_str)
-        if number_int_match:
-            precision = int(number_int_match.group(1))
+        # NUMBER(P) -> INT or BIGINT
+        match = re.match(r'NUMBER\((\d+)\)', datatype_str)
+        if match:
+            precision = int(match.group(1))
             return 'INT' if precision <= 10 else 'BIGINT'
 
-        # TIMESTAMP
         if 'TIMESTAMP' in datatype_str:
             return 'TIMESTAMP'
-
-        # DATE
         if 'DATE' in datatype_str:
             return 'DATE'
-
-        # CHAR, CLOB, BLOB
         if 'CHAR' in datatype_str:
             return 'STRING'
         if 'CLOB' in datatype_str:
@@ -97,6 +79,7 @@ class DatabricksSchemaGenerator:
         }
         seen_columns = set()
 
+        # Map Excel columns to category fields
         category_mappings = {
             'RDMOF': {},
             'EDL': {},
@@ -104,53 +87,51 @@ class DatabricksSchemaGenerator:
         }
 
         for col in df.columns:
-            col_upper = str(col).upper()
-            if 'RDMOF' in col_upper:
-                if 'SCHEMA' in col_upper:
-                    category_mappings['RDMOF']['schema'] = col
-                elif 'TABLE' in col_upper:
-                    category_mappings['RDMOF']['table'] = col
-                elif 'COLUMN' in col_upper:
-                    category_mappings['RDMOF']['column'] = col
-                elif 'DATATYPE' in col_upper or 'DATA_TYPE' in col_upper:
-                    category_mappings['RDMOF']['datatype'] = col
-            elif 'EDL' in col_upper:
-                if 'SCHEMA' in col_upper:
-                    category_mappings['EDL']['schema'] = col
-                elif 'TABLE' in col_upper:
-                    category_mappings['EDL']['table'] = col
-                elif 'COLUMN' in col_upper:
-                    category_mappings['EDL']['column'] = col
-                elif 'DATATYPE' in col_upper or 'DATA_TYPE' in col_upper:
-                    category_mappings['EDL']['datatype'] = col
-            elif 'SSR' in col_upper or 'ORIGINAL' in col_upper:
-                if 'SCHEMA' in col_upper:
-                    category_mappings['Original SSR']['schema'] = col
-                elif 'TABLE' in col_upper:
-                    category_mappings['Original SSR']['table'] = col
-                elif 'COLUMN' in col_upper:
-                    category_mappings['Original SSR']['column'] = col
-                elif 'DATATYPE' in col_upper or 'DATA_TYPE' in col_upper:
-                    category_mappings['Original SSR']['datatype'] = col
+            col_upper = col.upper()
+            for category in category_mappings.keys():
+                if category in col_upper:
+                    if 'SCHEMA' in col_upper:
+                        category_mappings[category]['schema'] = col
+                    elif 'TABLE' in col_upper:
+                        category_mappings[category]['table'] = col
+                    elif 'COLUMN' in col_upper:
+                        category_mappings[category]['column'] = col
+                    elif 'DATATYPE' in col_upper or 'DATA_TYPE' in col_upper:
+                        category_mappings[category]['datatype'] = col
 
+        # Loop through each category and extract columns
         for category, mapping in category_mappings.items():
-            if mapping.get('column'):
-                col_col = mapping['column']
-                dtype_col = mapping.get('datatype')
-                for _, row in df.iterrows():
-                    col_name = row.get(col_col)
-                    if pd.notna(col_name):
-                        col_name = str(col_name).strip()
-                        if (category, col_name.lower()) in seen_columns:
-                            continue
-                        raw_dtype = str(row.get(dtype_col)).strip() if dtype_col and pd.notna(row.get(dtype_col)) else ''
-                        mapped_dtype = self.map_datatype(raw_dtype)
+            if 'column' not in mapping:
+                continue
 
-                        if mapped_dtype == 'STRING' and raw_dtype:
-                            print(f"⚠️  Defaulted to STRING for column '{col_name}' with raw datatype '{raw_dtype}' in category '{category}'")
+            col_col = mapping['column']
+            dtype_col = mapping.get('datatype')
 
-                        category_columns[category].append((col_name, mapped_dtype))
-                        seen_columns.add((category, col_name.lower()))
+            for _, row in df.iterrows():
+                col_name = row.get(col_col)
+                if pd.isna(col_name) or str(col_name).strip() == '':
+                    continue
+                col_name = str(col_name).strip()
+
+                if (category, col_name.lower()) in seen_columns:
+                    continue
+
+                # Use RDMOF's datatype column if exists
+                if dtype_col and pd.notna(row.get(dtype_col)):
+                    raw_dtype = str(row[dtype_col]).strip()
+                elif category != 'RDMOF' and category_mappings['RDMOF'].get('datatype'):
+                    # Fallback: use RDMOF datatype column if available
+                    raw_dtype = str(row.get(category_mappings['RDMOF']['datatype'], '')).strip()
+                else:
+                    raw_dtype = ''
+
+                mapped_dtype = self.map_datatype(raw_dtype)
+
+                if mapped_dtype == 'STRING' and raw_dtype:
+                    print(f"⚠️ Defaulted to STRING for column '{col_name}' with raw datatype '{raw_dtype}' in {category}")
+
+                category_columns[category].append((col_name, mapped_dtype))
+                seen_columns.add((category, col_name.lower()))
 
         return {
             "RDMOF": category_columns["RDMOF"],
@@ -184,16 +165,16 @@ class DatabricksSchemaGenerator:
             print(f"\nGenerated schema for {category}:\n")
             print(schema_sql)
 
-            # Save to individual .sql files
+            # Save each schema
             file_name = f"{table_name.lower()}.sql"
             with open(file_name, "w") as f:
                 f.write(schema_sql)
-            print(f"Schema saved to '{file_name}'")
+            print(f"✅ Schema saved to: {file_name}")
 
 
 # Example Usage
 def main():
-    excel_file_path = "your_excel_file.xlsx"  # 🔁 Replace with your actual Excel file path
+    excel_file_path = "your_excel_file.xlsx"  # Replace this with your actual file
     generator = DatabricksSchemaGenerator(excel_file_path)
     generator.run(debug=True)
 
