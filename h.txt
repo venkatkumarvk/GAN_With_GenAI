@@ -1,1 +1,287 @@
+import pandas as pd
+import re
+from typing import Dict, List, Tuple
 
+class DatabricksSchemaGenerator:
+    def __init__(self, excel_file_path: str):
+        """
+        Initialize the schema generator with Excel file path
+        """
+        self.excel_file_path = excel_file_path
+        self.datatype_mapping = {
+            # RDMOF datatype mappings
+            'VARCHAR2(255 BYTE)': 'VARCHAR(255)',
+            'VARCHAR2(100 BYTE)': 'VARCHAR(100)',
+            'TIMESTAMP(6)': 'TIMESTAMP',
+            'NUMBER(12,6)': 'DECIMAL(12,6)',
+            # Add more mappings as needed
+            'VARCHAR2': 'VARCHAR',
+            'NUMBER': 'DECIMAL',
+            'DATE': 'DATE',
+            'CHAR': 'CHAR',
+            'CLOB': 'STRING',
+            'BLOB': 'BINARY'
+        }
+    
+    def load_excel_data(self) -> pd.DataFrame:
+        """
+        Load data from Excel file
+        """
+        try:
+            # Try to read the Excel file
+            df = pd.read_excel(self.excel_file_path)
+            print(f"Successfully loaded Excel file with {len(df)} rows")
+            return df
+        except Exception as e:
+            print(f"Error loading Excel file: {e}")
+            return None
+    
+    def filter_broker_group_relation(self, df: pd.DataFrame) -> pd.DataFrame:
+        """
+        Filter data for BROKER GROUP RELATION table
+        """
+        # Assuming there's a column that identifies the table name
+        # Adjust column names based on your actual Excel structure
+        table_columns = [col for col in df.columns if 'table' in col.lower() or 'name' in col.lower()]
+        
+        if table_columns:
+            table_col = table_columns[0]  # Use first matching column
+            filtered_df = df[df[table_col].str.contains('BROKER GROUP RELATION', case=False, na=False)]
+        else:
+            # If no table column found, use all data
+            print("Warning: No table identifier column found. Using all data.")
+            filtered_df = df
+        
+        return filtered_df
+    
+    def map_datatype(self, original_datatype: str) -> str:
+        """
+        Map RDMOF datatypes to Databricks datatypes
+        """
+        if pd.isna(original_datatype):
+            return 'STRING'
+        
+        datatype_str = str(original_datatype).upper().strip()
+        
+        # Direct mapping
+        if datatype_str in self.datatype_mapping:
+            return self.datatype_mapping[datatype_str]
+        
+        # Pattern-based mapping for parameterized types
+        for pattern, replacement in self.datatype_mapping.items():
+            if pattern in datatype_str:
+                if 'VARCHAR2' in pattern and '(' in datatype_str:
+                    # Extract size for VARCHAR2
+                    size_match = re.search(r'\((\d+)', datatype_str)
+                    if size_match:
+                        size = size_match.group(1)
+                        return f'VARCHAR({size})'
+                elif 'NUMBER' in pattern and '(' in datatype_str:
+                    # Extract precision and scale for NUMBER
+                    number_match = re.search(r'\((\d+),(\d+)\)', datatype_str)
+                    if number_match:
+                        precision, scale = number_match.groups()
+                        return f'DECIMAL({precision},{scale})'
+                    else:
+                        precision_match = re.search(r'\((\d+)\)', datatype_str)
+                        if precision_match:
+                            precision = precision_match.group(1)
+                            return f'DECIMAL({precision})'
+                return replacement
+        
+        # Default fallback
+        return 'STRING'
+    
+    def process_categories(self, df: pd.DataFrame) -> Dict[str, List[Tuple[str, str, str, str]]]:
+        """
+        Process the three categories and extract schema information
+        """
+        categories = {
+            'RDMOF': [],
+            'EDL': [],
+            'Original SSR': []
+        }
+        
+        # Assuming your Excel has columns like:
+        # Category, Schema, Physical_Table_Name, Physical_Column_Name, Datatype
+        # Adjust these column names based on your actual Excel structure
+        
+        expected_columns = ['category', 'schema', 'table_name', 'column_name', 'datatype']
+        
+        # Try to identify columns by common patterns
+        column_mapping = {}
+        for col in df.columns:
+            col_lower = col.lower()
+            if 'category' in col_lower:
+                column_mapping['category'] = col
+            elif 'schema' in col_lower:
+                column_mapping['schema'] = col
+            elif 'table' in col_lower and 'name' in col_lower:
+                column_mapping['table_name'] = col
+            elif 'column' in col_lower and 'name' in col_lower:
+                column_mapping['column_name'] = col
+            elif 'datatype' in col_lower or 'data_type' in col_lower or 'type' in col_lower:
+                column_mapping['datatype'] = col
+        
+        print("Identified columns:", column_mapping)
+        
+        for _, row in df.iterrows():
+            # Determine category
+            category = None
+            if 'category' in column_mapping:
+                cat_value = str(row[column_mapping['category']]).upper()
+                if 'RDMOF' in cat_value:
+                    category = 'RDMOF'
+                elif 'EDL' in cat_value:
+                    category = 'EDL'
+                elif 'SSR' in cat_value or 'ORIGINAL SSR' in cat_value:
+                    category = 'Original SSR'
+            
+            if category:
+                schema = row.get(column_mapping.get('schema', ''), 'default_schema')
+                table_name = row.get(column_mapping.get('table_name', ''), 'unknown_table')
+                column_name = row.get(column_mapping.get('column_name', ''), 'unknown_column')
+                datatype = row.get(column_mapping.get('datatype', ''), 'STRING')
+                
+                # Map datatype for RDMOF category
+                if category == 'RDMOF':
+                    mapped_datatype = self.map_datatype(datatype)
+                else:
+                    mapped_datatype = str(datatype) if not pd.isna(datatype) else 'STRING'
+                
+                categories[category].append((
+                    str(schema) if not pd.isna(schema) else 'default_schema',
+                    str(table_name) if not pd.isna(table_name) else 'broker_group_relation',
+                    str(column_name) if not pd.isna(column_name) else 'unknown_column',
+                    mapped_datatype
+                ))
+        
+        return categories
+    
+    def generate_sql_schema(self, categories: Dict[str, List[Tuple[str, str, str, str]]]) -> str:
+        """
+        Generate SQL CREATE TABLE statements for each category
+        """
+        sql_statements = []
+        
+        for category, columns in categories.items():
+            if not columns:
+                continue
+            
+            # Use the first row to get schema and table name
+            schema_name = columns[0][0]
+            table_name = columns[0][1]
+            
+            # Create table name with category suffix
+            full_table_name = f"{schema_name}.{table_name}_{category.replace(' ', '_').lower()}"
+            
+            sql = f"-- {category} Schema\n"
+            sql += f"CREATE TABLE IF NOT EXISTS {full_table_name} (\n"
+            
+            column_definitions = []
+            for _, _, column_name, datatype in columns:
+                column_definitions.append(f"    {column_name} {datatype}")
+            
+            sql += ",\n".join(column_definitions)
+            sql += "\n);\n\n"
+            
+            sql_statements.append(sql)
+        
+        return "\n".join(sql_statements)
+    
+    def generate_unified_schema(self, categories: Dict[str, List[Tuple[str, str, str, str]]]) -> str:
+        """
+        Generate a unified schema with all categories in one table
+        """
+        all_columns = []
+        
+        for category, columns in categories.items():
+            for _, _, column_name, datatype in columns:
+                # Add category prefix to avoid column name conflicts
+                prefixed_column_name = f"{category.replace(' ', '_').lower()}_{column_name}"
+                all_columns.append((prefixed_column_name, datatype))
+        
+        if not all_columns:
+            return "-- No columns found to generate schema"
+        
+        sql = "-- Unified BROKER GROUP RELATION Schema\n"
+        sql += "CREATE TABLE IF NOT EXISTS broker_group_relation_unified (\n"
+        
+        column_definitions = []
+        for column_name, datatype in all_columns:
+            column_definitions.append(f"    {column_name} {datatype}")
+        
+        sql += ",\n".join(column_definitions)
+        sql += "\n);\n"
+        
+        return sql
+    
+    def run(self, generate_unified: bool = True) -> str:
+        """
+        Main method to run the schema generation process
+        """
+        print("Starting Databricks Schema Generation...")
+        
+        # Load Excel data
+        df = self.load_excel_data()
+        if df is None:
+            return "Error: Could not load Excel file"
+        
+        print("Excel columns:", list(df.columns))
+        print("Sample data:")
+        print(df.head())
+        
+        # Filter for BROKER GROUP RELATION table
+        filtered_df = self.filter_broker_group_relation(df)
+        print(f"Filtered data: {len(filtered_df)} rows")
+        
+        # Process categories
+        categories = self.process_categories(filtered_df)
+        
+        # Print category summary
+        for cat, cols in categories.items():
+            print(f"{cat}: {len(cols)} columns")
+        
+        # Generate SQL schemas
+        separate_schemas = self.generate_sql_schema(categories)
+        
+        result = "-- DATABRICKS SCHEMA GENERATION RESULTS\n"
+        result += "-- =====================================\n\n"
+        result += separate_schemas
+        
+        if generate_unified:
+            unified_schema = self.generate_unified_schema(categories)
+            result += "\n" + unified_schema
+        
+        return result
+
+# Usage Example
+def main():
+    # Replace with your Excel file path
+    excel_file_path = "your_excel_file.xlsx"  # Update this path
+    
+    try:
+        generator = DatabricksSchemaGenerator(excel_file_path)
+        schema_sql = generator.run(generate_unified=True)
+        
+        print("Generated SQL Schema:")
+        print("=" * 50)
+        print(schema_sql)
+        
+        # Save to file
+        with open("databricks_schema.sql", "w") as f:
+            f.write(schema_sql)
+        
+        print("\nSchema saved to 'databricks_schema.sql'")
+        
+    except FileNotFoundError:
+        print(f"Error: Excel file '{excel_file_path}' not found.")
+        print("Please update the excel_file_path variable with the correct path to your Excel file.")
+    except Exception as e:
+        print(f"Error: {e}")
+
+if __name__ == "__main__":
+    main()
+
+
+#pip install pandas openpyxl
