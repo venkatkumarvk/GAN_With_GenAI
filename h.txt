@@ -1,12 +1,14 @@
 import pandas as pd
 import re
+import os
 from typing import List, Tuple, Dict
 from collections import defaultdict
 
 
 class DatabricksSchemaGenerator:
-    def __init__(self, excel_file_path: str):
+    def __init__(self, excel_file_path: str, output_base_folder: str = "generated_schemas"):
         self.excel_file_path = excel_file_path
+        self.output_base_folder = output_base_folder
         self.tables_created = 0  # Track number of tables created
 
     def load_excel_data(self) -> pd.DataFrame:
@@ -139,7 +141,28 @@ class DatabricksSchemaGenerator:
 
         return result
 
-    def generate_schema_sql(self, table_name: str, columns: List[Tuple[str, str]], category: str) -> str:
+    def create_folder_structure(self):
+        """Create folder structure for organizing SQL files"""
+        folders = ["EDL", "Original_SSR", "RDMOF"]
+        created_folders = []
+        
+        # Create base output folder
+        if not os.path.exists(self.output_base_folder):
+            os.makedirs(self.output_base_folder)
+            print(f"📁 Created base folder: {self.output_base_folder}")
+        
+        # Create category folders
+        for folder in folders:
+            folder_path = os.path.join(self.output_base_folder, folder)
+            if not os.path.exists(folder_path):
+                os.makedirs(folder_path)
+                created_folders.append(folder)
+                print(f"📁 Created folder: {folder_path}")
+        
+        if created_folders:
+            print(f"✅ Created {len(created_folders)} category folders")
+        
+        return True
         if not columns:
             return f"-- No columns found for {table_name}"
         
@@ -151,6 +174,10 @@ class DatabricksSchemaGenerator:
 
     def run(self):
         print("🚀 Starting schema generation by Physical Table Names...")
+        
+        # Create folder structure
+        self.create_folder_structure()
+        
         df = self.load_excel_data()
         if df is None:
             return
@@ -172,16 +199,21 @@ class DatabricksSchemaGenerator:
                 print(f"⚠️ No tables found for {category}")
                 continue
             
+            # Create category folder path
+            category_folder = os.path.join(self.output_base_folder, category)
+            
             for table_name, columns in tables.items():
                 if columns:  # Only process tables with columns
                     sql = self.generate_schema_sql(table_name, columns, category)
                     print(f"\n📄 {table_name} ({len(columns)} columns):\n{sql}")
                     
-                    # Save to file
-                    filename = f"{category.lower()}_{table_name.lower()}.sql"
-                    with open(filename, "w") as f:
+                    # Save to category-specific folder
+                    filename = f"{table_name.lower()}.sql"
+                    file_path = os.path.join(category_folder, filename)
+                    
+                    with open(file_path, "w") as f:
                         f.write(sql)
-                    print(f"✅ Saved to file: {filename}")
+                    print(f"✅ Saved to: {file_path}")
                     
                     category_tables += 1
                     category_stats[category][table_name] = len(columns)
@@ -189,7 +221,7 @@ class DatabricksSchemaGenerator:
                     print(f"⚠️ No columns found for {table_name} - skipping")
             
             total_tables += category_tables
-            print(f"\n📈 {category} Summary: {category_tables} tables created")
+            print(f"\n📈 {category} Summary: {category_tables} tables created in {category_folder}")
 
         self.tables_created = total_tables
         
@@ -199,14 +231,18 @@ class DatabricksSchemaGenerator:
         print(f"{'='*60}")
         print(f"🏗️  Total tables created: {self.tables_created}")
         print(f"📁 Total SQL files generated: {self.tables_created}")
+        print(f"📂 Output folder: {self.output_base_folder}")
         
+        # Print folder structure
+        print(f"\n📂 Folder Structure:")
+        print(f"   {self.output_base_folder}/")
         for category, tables in category_stats.items():
             if tables:
-                print(f"\n📊 {category}:")
+                print(f"   ├── {category}/")
                 for table_name, column_count in tables.items():
-                    print(f"   • {table_name}: {column_count} columns")
+                    print(f"   │   ├── {table_name.lower()}.sql ({column_count} columns)")
             else:
-                print(f"\n📊 {category}: No tables created")
+                print(f"   ├── {category}/ (empty)")
         
         print(f"{'='*60}")
 
@@ -218,7 +254,9 @@ class DatabricksSchemaGenerator:
 # Usage
 def main():
     excel_path = "your_excel_file.xlsx"  # Replace with your actual Excel path
-    generator = DatabricksSchemaGenerator(excel_path)
+    output_folder = "generated_schemas"   # You can customize this folder name
+    
+    generator = DatabricksSchemaGenerator(excel_path, output_folder)
     generator.run()
     
     # You can also get the count separately
