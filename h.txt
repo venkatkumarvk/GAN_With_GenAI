@@ -488,3 +488,31 @@ def test_sql_file_execution(sql_file):
     finally:
         conn.close()
 
+##sqlglot
+import os
+import pytest
+import sqlglot
+from sqlglot.errors import ParseError
+
+
+def get_sql_files(folder_path: str):
+    sql_files = []
+    for root, _, files in os.walk(folder_path):
+        for file in files:
+            if file.endswith(".sql"):
+                sql_files.append(os.path.join(root, file))
+    return sql_files
+
+
+@pytest.mark.parametrize("sql_file", get_sql_files("generated_schemas"))
+def test_sql_syntax_like_databricks(sql_file):
+    """Parse SQL using sqlglot to simulate Databricks-style syntax."""
+    with open(sql_file, "r") as f:
+        sql = f.read()
+
+    try:
+        # Try parsing the SQL
+        sqlglot.parse(sql, read="spark")  # you can also try `read="hive"` or `read="databricks"` if supported
+        print(f"✅ SQL Parsed: {sql_file}")
+    except ParseError as e:
+        pytest.fail(f"❌ Databricks-like SQL parse failed: {sql_file}\nError: {e}")
