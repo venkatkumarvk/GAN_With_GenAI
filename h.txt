@@ -413,4 +413,78 @@ def test_sql_file_execution(sql_file):
     finally:
         conn.close()
 
+##duplicate columns
+import os
+import sqlite3
+import re
+import pytest
+
+def sanitize_sql(sql_text: str) -> str:
+    """
+    Convert Databricks SQL to SQLite-compatible SQL.
+    - Remove brackets: [col] -> col
+    - Replace types: VARCHAR(255) -> TEXT, DECIMAL -> REAL, etc.
+    - Remove schema/catalog from table names.
+    """
+    sql_text = re.sub(r'\[([^\]]+)\]', r'\1', sql_text)  # Remove square brackets
+    sql_text = re.sub(r'\bVARCHAR\(\d+\)', 'TEXT', sql_text, flags=re.IGNORECASE)
+    sql_text = re.sub(r'\bDECIMAL\(\d+,\s*\d+\)', 'REAL', sql_text, flags=re.IGNORECASE)
+    sql_text = re.sub(r'\bBIGINT\b', 'INTEGER', sql_text, flags=re.IGNORECASE)
+    sql_text = re.sub(r'\bINT\b', 'INTEGER', sql_text, flags=re.IGNORECASE)
+    sql_text = re.sub(r'\bSTRING\b', 'TEXT', sql_text, flags=re.IGNORECASE)
+    sql_text = re.sub(r'\bBINARY\b', 'BLOB', sql_text, flags=re.IGNORECASE)
+    sql_text = re.sub(r'\bTIMESTAMP\b', 'TEXT', sql_text, flags=re.IGNORECASE)
+    sql_text = re.sub(r'\bDATE\b', 'TEXT', sql_text, flags=re.IGNORECASE)
+    sql_text = re.sub(r'CREATE TABLE IF NOT EXISTS\s+[^\s]+\.', 'CREATE TABLE IF NOT EXISTS ', sql_text, flags=re.IGNORECASE)
+    return sql_text
+
+
+def get_sql_files(folder_path: str):
+    """Collect all .sql files recursively in the provided folder."""
+    sql_files = []
+    for root, _, files in os.walk(folder_path):
+        for file in files:
+            if file.endswith(".sql"):
+                sql_files.append(os.path.join(root, file))
+    return sql_files
+
+
+def has_duplicate_columns(sql: str) -> bool:
+    """Check if the SQL has duplicate column names."""
+    match = re.search(r'CREATE TABLE.*?\((.*?)\);', sql, re.DOTALL | re.IGNORECASE)
+    if not match:
+        return False
+
+    columns_block = match.group(1)
+    # Extract only column names (first word before space/comma)
+    column_names = []
+    for line in columns_block.split(","):
+        parts = line.strip().split()
+        if parts:
+            col = parts[0].strip().lower()
+            column_names.append(col)
+
+    return len(column_names) != len(set(column_names))
+
+
+@pytest.mark.parametrize("sql_file", get_sql_files("generated_schemas"))
+def test_sql_file_execution(sql_file):
+    """Sanitize, check for duplicates, and execute SQL against SQLite."""
+    with open(sql_file, "r") as f:
+        original_sql = f.read()
+
+    sanitized_sql = sanitize_sql(original_sql)
+
+    if has_duplicate_columns(sanitized_sql):
+        pytest.fail(f"❌ Duplicate column found in: {sql_file}")
+
+    try:
+        conn = sqlite3.connect(":memory:")
+        cursor = conn.cursor()
+        cursor.executescript(sanitized_sql)
+        print(f"✅ Validated: {sql_file}")
+    except sqlite3.Error as e:
+        pytest.fail(f"❌ SQL file failed: {sql_file}\nError: {e}")
+    finally:
+        conn.close()
 
