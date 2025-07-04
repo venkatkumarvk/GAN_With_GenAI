@@ -1,0 +1,228 @@
+import pandas as pd
+import re
+from typing import List, Tuple, Dict
+from collections import defaultdict
+
+
+class DatabricksSchemaGenerator:
+    def __init__(self, excel_file_path: str):
+        self.excel_file_path = excel_file_path
+        self.tables_created = 0  # Track number of tables created
+
+    def load_excel_data(self) -> pd.DataFrame:
+        try:
+            excel_file = pd.ExcelFile(self.excel_file_path)
+            sheets = excel_file.sheet_names
+            print(f"📄 Available sheets: {sheets}")
+            sheet = next((s for s in sheets if 'BROKER_GROUP_RELATION' in s.upper()), sheets[0])
+            df = pd.read_excel(excel_file, sheet_name=sheet)
+            print(f"✅ Loaded sheet: {sheet} with {df.shape[0]} rows and {df.shape[1]} columns.")
+            return df
+        except Exception as e:
+            print(f"❌ Error loading Excel file: {e}")
+            return None
+
+    def map_datatype(self, datatype: str) -> str:
+        if pd.isna(datatype):
+            return 'VARCHAR(255)'
+        dtype = str(datatype).upper().strip()
+
+        if m := re.match(r'VARCHAR2\((\d+)\s*BYTE\)', dtype):
+            return f'VARCHAR({m.group(1)})'
+        if m := re.match(r'VARCHAR2\((\d+)\)', dtype):
+            return f'VARCHAR({m.group(1)})'
+        if m := re.match(r'NUMBER\((\d+),\s*(\d+)\)', dtype):
+            return f'DECIMAL({m.group(1)},{m.group(2)})'
+        if m := re.match(r'NUMBER\((\d+)\)', dtype):
+            return 'INT' if int(m.group(1)) <= 10 else 'BIGINT'
+        if 'TIMESTAMP' in dtype:
+            return 'TIMESTAMP'
+        if 'DATE' in dtype:
+            return 'DATE'
+        if 'CHAR' in dtype:
+            return 'VARCHAR(1)'
+        if 'CLOB' in dtype:
+            return 'STRING'
+        if 'BLOB' in dtype:
+            return 'BINARY'
+        return 'VARCHAR(255)'
+
+    def extract_tables_by_physical_name(self, df: pd.DataFrame) -> Dict[str, Dict[str, List[Tuple[str, str]]]]:
+        """
+        Extract tables grouped by Physical Table Name for each category (EDL, Original SSR, RDMOF)
+        Returns: {category: {table_name: [(column_name, datatype), ...]}}
+        """
+        result = {
+            "EDL": defaultdict(list),
+            "Original_SSR": defaultdict(list),
+            "RDMOF": defaultdict(list)
+        }
+        
+        # Track seen columns to avoid duplicates
+        seen_columns = {
+            "EDL": defaultdict(set),
+            "Original_SSR": defaultdict(set),
+            "RDMOF": defaultdict(set)
+        }
+
+        # Map column names from Excel
+        column_map = {}
+        for col in df.columns:
+            col_upper = col.upper()
+            # Physical Table Name columns
+            if 'EDL' in col_upper and 'PHYSICAL' in col_upper and 'TABLE' in col_upper:
+                column_map['EDL_table'] = col
+            elif ('SSR' in col_upper or 'ORIGINAL' in col_upper) and 'PHYSICAL' in col_upper and 'TABLE' in col_upper:
+                column_map['SSR_table'] = col
+            elif 'RDMOF' in col_upper and 'PHYSICAL' in col_upper and 'TABLE' in col_upper:
+                column_map['RDMOF_table'] = col
+            
+            # Column Name columns
+            elif 'EDL' in col_upper and 'COLUMN' in col_upper:
+                column_map['EDL_column'] = col
+            elif ('SSR' in col_upper or 'ORIGINAL' in col_upper) and 'COLUMN' in col_upper:
+                column_map['SSR_column'] = col
+            elif 'RDMOF' in col_upper and 'COLUMN' in col_upper:
+                column_map['RDMOF_column'] = col
+            
+            # Data Type column
+            elif 'RDMOF' in col_upper and 'DATA' in col_upper:
+                column_map['datatype'] = col
+
+        print(f"🔍 Found column mappings: {column_map}")
+
+        if 'datatype' not in column_map:
+            print("⚠️ 'RDMOF - Data Type' column not found.")
+
+        for _, row in df.iterrows():
+            rd_dtype = row.get(column_map.get('datatype', ''), None)
+
+            # Process EDL
+            if 'EDL_table' in column_map and 'EDL_column' in column_map:
+                table_name = row.get(column_map['EDL_table'])
+                column_name = row.get(column_map['EDL_column'])
+                
+                if pd.notna(table_name) and pd.notna(column_name):
+                    table_name = str(table_name).strip()
+                    column_name = str(column_name).strip()
+                    
+                    if column_name.lower() not in seen_columns["EDL"][table_name]:
+                        result["EDL"][table_name].append((column_name, 'VARCHAR(255)'))
+                        seen_columns["EDL"][table_name].add(column_name.lower())
+
+            # Process Original SSR
+            if 'SSR_table' in column_map and 'SSR_column' in column_map:
+                table_name = row.get(column_map['SSR_table'])
+                column_name = row.get(column_map['SSR_column'])
+                
+                if pd.notna(table_name) and pd.notna(column_name):
+                    table_name = str(table_name).strip()
+                    column_name = str(column_name).strip()
+                    
+                    if column_name.lower() not in seen_columns["Original_SSR"][table_name]:
+                        result["Original_SSR"][table_name].append((column_name, 'VARCHAR(255)'))
+                        seen_columns["Original_SSR"][table_name].add(column_name.lower())
+
+            # Process RDMOF
+            if 'RDMOF_table' in column_map and 'RDMOF_column' in column_map:
+                table_name = row.get(column_map['RDMOF_table'])
+                column_name = row.get(column_map['RDMOF_column'])
+                
+                if pd.notna(table_name) and pd.notna(column_name):
+                    table_name = str(table_name).strip()
+                    column_name = str(column_name).strip()
+                    
+                    if column_name.lower() not in seen_columns["RDMOF"][table_name]:
+                        dtype = self.map_datatype(rd_dtype)
+                        result["RDMOF"][table_name].append((column_name, dtype))
+                        seen_columns["RDMOF"][table_name].add(column_name.lower())
+
+        return result
+
+    def generate_schema_sql(self, table_name: str, columns: List[Tuple[str, str]], category: str) -> str:
+        if not columns:
+            return f"-- No columns found for {table_name}"
+        
+        sql = f"-- {category} - {table_name} Table Schema\n"
+        sql += f"CREATE TABLE IF NOT EXISTS external_catalog.EDM_Reporting.{table_name} (\n"
+        sql += ",\n".join([f"    [{col}] {dtype}" for col, dtype in columns])
+        sql += "\n);"
+        return sql
+
+    def run(self):
+        print("🚀 Starting schema generation by Physical Table Names...")
+        df = self.load_excel_data()
+        if df is None:
+            return
+
+        tables_by_category = self.extract_tables_by_physical_name(df)
+        
+        total_tables = 0
+        category_stats = {}
+
+        for category, tables in tables_by_category.items():
+            category_tables = 0
+            category_stats[category] = {}
+            
+            print(f"\n{'='*60}")
+            print(f"📊 {category} CATEGORY")
+            print(f"{'='*60}")
+            
+            if not tables:
+                print(f"⚠️ No tables found for {category}")
+                continue
+            
+            for table_name, columns in tables.items():
+                if columns:  # Only process tables with columns
+                    sql = self.generate_schema_sql(table_name, columns, category)
+                    print(f"\n📄 {table_name} ({len(columns)} columns):\n{sql}")
+                    
+                    # Save to file
+                    filename = f"{category.lower()}_{table_name.lower()}.sql"
+                    with open(filename, "w") as f:
+                        f.write(sql)
+                    print(f"✅ Saved to file: {filename}")
+                    
+                    category_tables += 1
+                    category_stats[category][table_name] = len(columns)
+                else:
+                    print(f"⚠️ No columns found for {table_name} - skipping")
+            
+            total_tables += category_tables
+            print(f"\n📈 {category} Summary: {category_tables} tables created")
+
+        self.tables_created = total_tables
+        
+        # Print final summary
+        print(f"\n{'='*60}")
+        print(f"🎯 FINAL SUMMARY")
+        print(f"{'='*60}")
+        print(f"🏗️  Total tables created: {self.tables_created}")
+        print(f"📁 Total SQL files generated: {self.tables_created}")
+        
+        for category, tables in category_stats.items():
+            if tables:
+                print(f"\n📊 {category}:")
+                for table_name, column_count in tables.items():
+                    print(f"   • {table_name}: {column_count} columns")
+            else:
+                print(f"\n📊 {category}: No tables created")
+        
+        print(f"{'='*60}")
+
+    def get_table_count(self) -> int:
+        """Return the number of tables created"""
+        return self.tables_created
+
+
+# Usage
+def main():
+    excel_path = "your_excel_file.xlsx"  # Replace with your actual Excel path
+    generator = DatabricksSchemaGenerator(excel_path)
+    generator.run()
+    
+    # You can also get the count separately
+    print(f"\n🔢 Total tables created: {generator.get_table_count()}")
+
+if __name__ == "__main__":
+    main()
