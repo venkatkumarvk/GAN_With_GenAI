@@ -50,90 +50,69 @@ class DatabricksSchemaGenerator:
         return 'VARCHAR(255)'
 
     def extract_tables_by_physical_name(self, df: pd.DataFrame) -> Dict[str, Dict[str, List[Tuple[str, str]]]]:
-        """
-        Extract tables grouped by Physical Table Name for each category (EDL, Original SSR, RDMOF)
-        Returns: {category: {table_name: [(column_name, datatype), ...]}}
-        """
         result = {
             "EDL": defaultdict(list),
             "Original_SSR": defaultdict(list),
             "RDMOF": defaultdict(list)
         }
-        
-        # Track seen columns to avoid duplicates
         seen_columns = {
             "EDL": defaultdict(set),
             "Original_SSR": defaultdict(set),
             "RDMOF": defaultdict(set)
         }
 
-        # Map column names from Excel
         column_map = {}
         for col in df.columns:
             col_upper = col.upper()
-            # Physical Table Name columns
             if 'EDL' in col_upper and 'PHYSICAL' in col_upper and 'TABLE' in col_upper:
                 column_map['EDL_table'] = col
             elif ('SSR' in col_upper or 'ORIGINAL' in col_upper) and 'PHYSICAL' in col_upper and 'TABLE' in col_upper:
                 column_map['SSR_table'] = col
             elif 'RDMOF' in col_upper and 'PHYSICAL' in col_upper and 'TABLE' in col_upper:
                 column_map['RDMOF_table'] = col
-            
-            # Column Name columns
             elif 'EDL' in col_upper and 'COLUMN' in col_upper:
                 column_map['EDL_column'] = col
             elif ('SSR' in col_upper or 'ORIGINAL' in col_upper) and 'COLUMN' in col_upper:
                 column_map['SSR_column'] = col
             elif 'RDMOF' in col_upper and 'COLUMN' in col_upper:
                 column_map['RDMOF_column'] = col
-            
-            # Data Type column
             elif 'RDMOF' in col_upper and 'DATA' in col_upper:
                 column_map['datatype'] = col
 
         print(f"🔍 Found column mappings: {column_map}")
 
-        if 'datatype' not in column_map:
-            print("⚠️ 'RDMOF - Data Type' column not found.")
-
         for _, row in df.iterrows():
             rd_dtype = row.get(column_map.get('datatype', ''), None)
 
-            # Process EDL
+            # EDL
             if 'EDL_table' in column_map and 'EDL_column' in column_map:
                 table_name = row.get(column_map['EDL_table'])
                 column_name = row.get(column_map['EDL_column'])
-                
                 if pd.notna(table_name) and pd.notna(column_name):
                     table_name = str(table_name).strip()
                     column_name = str(column_name).strip()
-                    
                     if column_name.lower() not in seen_columns["EDL"][table_name]:
                         result["EDL"][table_name].append((column_name, 'VARCHAR(255)'))
                         seen_columns["EDL"][table_name].add(column_name.lower())
 
-            # Process Original SSR
+            # SSR
             if 'SSR_table' in column_map and 'SSR_column' in column_map:
                 table_name = row.get(column_map['SSR_table'])
                 column_name = row.get(column_map['SSR_column'])
-                
                 if pd.notna(table_name) and pd.notna(column_name):
                     table_name = str(table_name).strip()
                     column_name = str(column_name).strip()
-                    
                     if column_name.lower() not in seen_columns["Original_SSR"][table_name]:
                         result["Original_SSR"][table_name].append((column_name, 'VARCHAR(255)'))
                         seen_columns["Original_SSR"][table_name].add(column_name.lower())
 
-            # Process RDMOF
+            # RDMOF
             if 'RDMOF_table' in column_map and 'RDMOF_column' in column_map:
                 table_name = row.get(column_map['RDMOF_table'])
                 column_name = row.get(column_map['RDMOF_column'])
-                
                 if pd.notna(table_name) and pd.notna(column_name):
                     table_name = str(table_name).strip()
                     column_name = str(column_name).strip()
-                    
                     if column_name.lower() not in seen_columns["RDMOF"][table_name]:
                         dtype = self.map_datatype(rd_dtype)
                         result["RDMOF"][table_name].append((column_name, dtype))
@@ -142,30 +121,27 @@ class DatabricksSchemaGenerator:
         return result
 
     def create_folder_structure(self):
-        """Create folder structure for organizing SQL files"""
         folders = ["EDL", "Original_SSR", "RDMOF"]
         created_folders = []
-        
-        # Create base output folder
         if not os.path.exists(self.output_base_folder):
             os.makedirs(self.output_base_folder)
             print(f"📁 Created base folder: {self.output_base_folder}")
-        
-        # Create category folders
+
         for folder in folders:
             folder_path = os.path.join(self.output_base_folder, folder)
             if not os.path.exists(folder_path):
                 os.makedirs(folder_path)
                 created_folders.append(folder)
                 print(f"📁 Created folder: {folder_path}")
-        
+
         if created_folders:
             print(f"✅ Created {len(created_folders)} category folders")
-        
+
         return True
+
+    def generate_schema_sql(self, table_name: str, columns: List[Tuple[str, str]], category: str) -> str:
         if not columns:
             return f"-- No columns found for {table_name}"
-        
         sql = f"-- {category} - {table_name} Table Schema\n"
         sql += f"CREATE TABLE IF NOT EXISTS external_catalog.EDM_Reporting.{table_name} (\n"
         sql += ",\n".join([f"    [{col}] {dtype}" for col, dtype in columns])
@@ -174,67 +150,54 @@ class DatabricksSchemaGenerator:
 
     def run(self):
         print("🚀 Starting schema generation by Physical Table Names...")
-        
-        # Create folder structure
         self.create_folder_structure()
-        
         df = self.load_excel_data()
         if df is None:
             return
 
         tables_by_category = self.extract_tables_by_physical_name(df)
-        
         total_tables = 0
         category_stats = {}
 
         for category, tables in tables_by_category.items():
             category_tables = 0
             category_stats[category] = {}
-            
             print(f"\n{'='*60}")
             print(f"📊 {category} CATEGORY")
             print(f"{'='*60}")
-            
             if not tables:
                 print(f"⚠️ No tables found for {category}")
                 continue
-            
-            # Create category folder path
+
             category_folder = os.path.join(self.output_base_folder, category)
-            
+
             for table_name, columns in tables.items():
-                if columns:  # Only process tables with columns
+                if columns:
                     sql = self.generate_schema_sql(table_name, columns, category)
                     print(f"\n📄 {table_name} ({len(columns)} columns):\n{sql}")
-                    
-                    # Save to category-specific folder
                     filename = f"{table_name.lower()}.sql"
                     file_path = os.path.join(category_folder, filename)
-                    
                     with open(file_path, "w") as f:
                         f.write(sql)
                     print(f"✅ Saved to: {file_path}")
-                    
                     category_tables += 1
                     category_stats[category][table_name] = len(columns)
                 else:
                     print(f"⚠️ No columns found for {table_name} - skipping")
-            
+
             total_tables += category_tables
             print(f"\n📈 {category} Summary: {category_tables} tables created in {category_folder}")
 
         self.tables_created = total_tables
-        
-        # Print final summary
+
         print(f"\n{'='*60}")
         print(f"🎯 FINAL SUMMARY")
         print(f"{'='*60}")
         print(f"🏗️  Total tables created: {self.tables_created}")
         print(f"📁 Total SQL files generated: {self.tables_created}")
-        print(f"📂 Output folder: {self.output_base_folder}")
-        
-        # Print folder structure
-        print(f"\n📂 Folder Structure:")
+        print(f"📂 Output folder: {self.output_base_folder}\n")
+
+        print(f"📂 Folder Structure:")
         print(f"   {self.output_base_folder}/")
         for category, tables in category_stats.items():
             if tables:
@@ -243,24 +206,22 @@ class DatabricksSchemaGenerator:
                     print(f"   │   ├── {table_name.lower()}.sql ({column_count} columns)")
             else:
                 print(f"   ├── {category}/ (empty)")
-        
         print(f"{'='*60}")
 
     def get_table_count(self) -> int:
-        """Return the number of tables created"""
         return self.tables_created
 
 
 # Usage
 def main():
-    excel_path = "your_excel_file.xlsx"  # Replace with your actual Excel path
-    output_folder = "generated_schemas"   # You can customize this folder name
-    
+    excel_path = "your_excel_file.xlsx"  # Replace with your actual Excel file path
+    output_folder = "generated_schemas"  # Replace with desired output folder
+
     generator = DatabricksSchemaGenerator(excel_path, output_folder)
     generator.run()
-    
-    # You can also get the count separately
+
     print(f"\n🔢 Total tables created: {generator.get_table_count()}")
+
 
 if __name__ == "__main__":
     main()
