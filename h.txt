@@ -269,3 +269,67 @@ def test_schema_creation(spark):
     # Clean up (optional)
     spark.sql(f"DROP TABLE IF EXISTS {db}.{table_name}")
 
+
+########################3
+import os
+import glob
+import pytest
+from sqlalchemy import create_engine, text
+from sqlalchemy.exc import SQLAlchemyError
+
+@pytest.fixture(scope="module")
+def engine():
+    """Create an in-memory SQLite engine"""
+    return create_engine("sqlite:///:memory:")
+
+def run_sql_file(engine, sql_file_path):
+    with open(sql_file_path, "r") as f:
+        sql = f.read()
+
+    with engine.connect() as conn:
+        try:
+            conn.execute(text(sql))
+            return True, None
+        except SQLAlchemyError as e:
+            return False, str(e)
+
+def get_created_table_name(sql_file_path: str) -> str:
+    """Extract table name from SQL file"""
+    with open(sql_file_path, "r") as f:
+        for line in f:
+            if "CREATE TABLE" in line.upper():
+                # Example: CREATE TABLE IF NOT EXISTS my_table (
+                parts = line.replace("(", "").split()
+                if "TABLE" in parts:
+                    idx = parts.index("TABLE")
+                    return parts[idx + 1].replace("[", "").replace("]", "").strip()
+    return None
+
+def describe_table(engine, table_name):
+    """Print table schema"""
+    with engine.connect() as conn:
+        try:
+            result = conn.execute(text(f"PRAGMA table_info({table_name})"))
+            rows = result.fetchall()
+            print(f"\n🧾 Schema for table `{table_name}`:")
+            for row in rows:
+                print(f" - {row['name']} ({row['type']})")
+        except Exception as e:
+            print(f"❌ Error describing table {table_name}: {e}")
+
+@pytest.mark.parametrize("sql_file", glob.glob("generated_schemas/**/*.sql", recursive=True))
+def test_sql_execution_and_describe(engine, sql_file):
+    assert os.path.exists(sql_file), f"❌ SQL file not found: {sql_file}"
+
+    # Run the SQL file
+    success, error = run_sql_file(engine, sql_file)
+    assert success, f"❌ Failed to execute SQL file '{sql_file}':\n{error}"
+    print(f"✅ Successfully executed: {sql_file}")
+
+    # Extract and describe table
+    table_name = get_created_table_name(sql_file)
+    assert table_name, f"❌ Could not extract table name from {sql_file}"
+
+    describe_table(engine, table_name)
+pip install sqlalchemy pytest
+
