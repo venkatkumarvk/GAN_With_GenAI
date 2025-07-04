@@ -225,3 +225,47 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+
+#test (pyspark and pytest)
+import os
+import pytest
+from pyspark.sql import SparkSession
+
+@pytest.fixture(scope="module")
+def spark():
+    spark = SparkSession.builder \
+        .appName("SchemaValidationTest") \
+        .master("local[*]") \
+        .config("spark.sql.catalogImplementation", "in-memory") \
+        .getOrCreate()
+    yield spark
+    spark.stop()
+
+
+def run_sql_file(spark, file_path):
+    with open(file_path, "r") as f:
+        sql_query = f.read()
+    spark.sql(sql_query)
+
+
+def test_schema_creation(spark):
+    # Replace with a valid path to one of your generated .sql files
+    sql_file_path = "generated_schemas/RDMOF/sample_table.sql"
+    assert os.path.exists(sql_file_path), f"SQL file not found: {sql_file_path}"
+
+    run_sql_file(spark, sql_file_path)
+
+    # Extract table name from file name
+    table_name = os.path.basename(sql_file_path).replace(".sql", "")
+    db = "external_catalog.edm_reporting"
+
+    # Validate the table exists
+    tables = spark.sql(f"SHOW TABLES IN {db}").collect()
+    found = any(row.tableName.lower() == table_name.lower() for row in tables)
+
+    assert found, f"Table '{table_name}' not found in database '{db}'"
+
+    # Clean up (optional)
+    spark.sql(f"DROP TABLE IF EXISTS {db}.{table_name}")
+
