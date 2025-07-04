@@ -359,3 +359,58 @@ def test_sql_execution_and_describe(engine, sql_file):
     describe_table(engine, table_name)
 pip install sqlalchemy pytest
 
+
+###############333
+import os
+import sqlite3
+import re
+import pytest
+
+
+def sanitize_sql(sql_text: str) -> str:
+    """
+    Convert Databricks/ANSI SQL to SQLite-compatible SQL.
+    Removes brackets, changes VARCHAR to TEXT, and removes catalog/schema names.
+    """
+    sql_text = re.sub(r'\[([^\]]+)\]', r'\1', sql_text)  # [col] -> col
+    sql_text = re.sub(r'\bVARCHAR\(\d+\)', 'TEXT', sql_text, flags=re.IGNORECASE)
+    sql_text = re.sub(r'\bDECIMAL\(\d+,\d+\)', 'REAL', sql_text, flags=re.IGNORECASE)
+    sql_text = re.sub(r'\bBIGINT\b', 'INTEGER', sql_text, flags=re.IGNORECASE)
+    sql_text = re.sub(r'\bINT\b', 'INTEGER', sql_text, flags=re.IGNORECASE)
+    sql_text = re.sub(r'\bSTRING\b', 'TEXT', sql_text, flags=re.IGNORECASE)
+    sql_text = re.sub(r'\bBINARY\b', 'BLOB', sql_text, flags=re.IGNORECASE)
+    sql_text = re.sub(r'\bTIMESTAMP\b', 'TEXT', sql_text, flags=re.IGNORECASE)
+    sql_text = re.sub(r'\bDATE\b', 'TEXT', sql_text, flags=re.IGNORECASE)
+    sql_text = re.sub(r'CREATE TABLE IF NOT EXISTS\s+[^\s]+\.', 'CREATE TABLE IF NOT EXISTS ', sql_text, flags=re.IGNORECASE)
+    return sql_text
+
+
+def get_sql_files(folder_path: str):
+    """Recursively collect .sql files from the schema output folder."""
+    sql_files = []
+    for root, _, files in os.walk(folder_path):
+        for file in files:
+            if file.endswith(".sql"):
+                sql_files.append(os.path.join(root, file))
+    return sql_files
+
+
+@pytest.mark.parametrize("sql_file", get_sql_files("generated_schemas"))
+def test_sql_file_execution(sql_file):
+    """Test if each SQL file can be executed in SQLite (after sanitization)."""
+    with open(sql_file, "r") as f:
+        sql = f.read()
+
+    sanitized_sql = sanitize_sql(sql)
+
+    try:
+        conn = sqlite3.connect(":memory:")
+        cursor = conn.cursor()
+        cursor.executescript(sanitized_sql)
+        print(f"✅ Validated: {sql_file}")
+    except sqlite3.Error as e:
+        pytest.fail(f"❌ SQL file failed: {sql_file}\nError: {e}")
+    finally:
+        conn.close()
+
+
