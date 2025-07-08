@@ -4,12 +4,10 @@ import sys
 from helper import DatabricksSchemaGenerator, load_config_from_file
 
 def main():
-    # Method 1: Config file via CLI
     if len(sys.argv) > 2 and sys.argv[1] == "--config":
         config_file = sys.argv[2]
         config = load_config_from_file(config_file)
     else:
-        # Default config file
         config_file = "config.json"
         if not os.path.exists(config_file):
             print("Configuration file not found.")
