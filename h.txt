@@ -53,12 +53,12 @@ class DatabricksSchemaGenerator:
     def load_excel_data(self) -> pd.DataFrame:
         try:
             df = pd.read_excel(self.excel_file_path, sheet_name=self.sheet_name)
-            return df
+            return df.ffill()  # Forward-fill missing schema/table names
         except Exception as e:
             print(f"Error loading Excel file: {e}")
             return pd.DataFrame()
 
-    def extract_tables(self, df: pd.DataFrame) -> Dict[str, Dict[str, List[Tuple[str, str]]]]:
+    def extract_tables(self, df: pd.DataFrame) -> Dict[str, Dict[Tuple[str, str], List[Tuple[str, str]]]]:
         result = {}
         for cat, cfg in self.categories_config.items():
             schema_col = cfg.get('schema_col')
@@ -70,15 +70,15 @@ class DatabricksSchemaGenerator:
             seen = defaultdict(set)
 
             for _, row in df.iterrows():
-                schema = str(row.get(schema_col, '')).strip()
+                schema = str(row.get(schema_col, '')).strip() or 'default_schema'
                 table = str(row.get(table_col, '')).strip()
                 column = str(row.get(column_col, '')).strip()
                 dtype_val = row.get(datatype_col, '') if datatype_col else ''
 
-                if table and column and column.lower() not in seen[table]:
+                if table and column and column.lower() not in seen[(schema, table)]:
                     dtype = self.map_datatype(dtype_val) if dtype_val else 'VARCHAR(255)'
                     tables[(schema, table)].append((column, dtype))
-                    seen[table].add(column.lower())
+                    seen[(schema, table)].add(column.lower())
 
             result[cat] = tables
         return result
