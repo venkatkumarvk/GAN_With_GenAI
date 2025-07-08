@@ -3,37 +3,20 @@ import pandas as pd
 import re
 import os
 import json
-from typing import List, Tuple, Dict, Set, Optional
+from typing import List, Tuple, Dict, Set, Optional, Union
 from collections import defaultdict
 
-
-def load_config_from_file(config_file: str) -> dict:
-    """Load configuration from JSON file."""
-    try:
-        with open(config_file, 'r') as f:
-            config = json.load(f)
-        print(f"✅ Configuration loaded from: {config_file}")
-        return config
-    except Exception as e:
-        print(f"❌ Error loading config file: {e}")
-        return {}
-
-
-def normalize_categories(categories: List[str]) -> List[str]:
-    """Normalize categories by replacing spaces with underscores and converting to uppercase."""
-    return [cat.strip().replace(" ", "_").upper() for cat in categories]
-
-
 class DatabricksSchemaGenerator:
-    def __init__(self,
-                 excel_file_path: str,
+    def __init__(self, 
+                 excel_file_path: str, 
                  output_base_folder: str = "generated_schemas",
                  sheet_name: Optional[str] = None,
-                 categories: Optional[List[str]] = None):
+                 categories: Optional[Dict[str, Dict[str, str]]] = None):
         self.excel_file_path = excel_file_path
         self.output_base_folder = output_base_folder
         self.sheet_name = sheet_name
-        self.predefined_categories = set(categories) if categories else None
+        self.custom_category_config = categories or {}
+        self.predefined_categories = set(self.custom_category_config.keys())
         self.tables_created = 0
         self.categories = set()
 
@@ -41,16 +24,14 @@ class DatabricksSchemaGenerator:
         try:
             excel_file = pd.ExcelFile(self.excel_file_path)
             sheets = excel_file.sheet_names
-            print(f"📄 Available sheets: {sheets}")
-
-            sheet = self.sheet_name if self.sheet_name in sheets else sheets[0]
-            print(f"🔍 Using sheet: {sheet}")
-
+            if self.sheet_name and self.sheet_name in sheets:
+                sheet = self.sheet_name
+            else:
+                sheet = sheets[0]
             df = pd.read_excel(excel_file, sheet_name=sheet)
-            print(f"✅ Loaded {df.shape[0]} rows and {df.shape[1]} columns.")
             return df
         except Exception as e:
-            print(f"❌ Error loading Excel file: {e}")
+            print(f"Error loading Excel file: {e}")
             return None
 
     def map_datatype(self, datatype: str) -> str:
@@ -78,58 +59,37 @@ class DatabricksSchemaGenerator:
             return 'BINARY'
         return 'VARCHAR(255)'
 
-    def detect_categories_from_columns(self, df: pd.DataFrame) -> Dict[str, Dict[str, str]]:
-        categories = {}
-        if self.predefined_categories:
-            print(f"🎯 Using predefined categories: {list(self.predefined_categories)}")
-            self.categories = self.predefined_categories.copy()
-
-        for col in df.columns:
-            col_upper = col.upper()
-            if ' - ' in col_upper:
-                category_match = col_upper.split(' - ')[0].strip().replace(' ', '_').upper()
-
-                if not self.predefined_categories or category_match in self.predefined_categories:
-                    if 'PHYSICAL' in col_upper and 'TABLE' in col_upper:
-                        categories.setdefault(category_match, {})['table_col'] = col
-                        self.categories.add(category_match)
-                    elif 'COLUMN' in col_upper and 'NAME' in col_upper:
-                        categories.setdefault(category_match, {})['column_col'] = col
-                        self.categories.add(category_match)
-                    elif 'DATA' in col_upper and 'TYPE' in col_upper:
-                        categories.setdefault(category_match, {})['datatype_col'] = col
-                        self.categories.add(category_match)
-
-        print(f"🔍 Final categories to process: {list(self.categories)}")
-        print(f"🔍 Category column mapping: {categories}")
-        return categories
-
-    def extract_tables_by_physical_name(self, df: pd.DataFrame) -> Dict[str, Dict[str, List[Tuple[str, str]]]]:
-        categories_config = self.detect_categories_from_columns(df)
+    def extract_tables_by_physical_name(self, df: pd.DataFrame) -> Dict[str, Dict[Tuple[str, str], List[Tuple[str, str]]]]:
         result = {}
         seen_columns = {}
 
-        for category in self.categories:
+        for category, config in self.custom_category_config.items():
             result[category] = defaultdict(list)
             seen_columns[category] = defaultdict(set)
 
         for _, row in df.iterrows():
-            for category in self.categories:
-                if category not in categories_config:
-                    continue
-                config = categories_config[category]
-                table_name = row.get(config.get('table_col'))
-                column_name = row.get(config.get('column_col'))
-                datatype_value = row.get(config.get('datatype_col'))
+            for category, config in self.custom_category_config.items():
+                schema_col = config.get('schema_col')
+                table_col = config.get('table_col')
+                column_col = config.get('column_col')
+                datatype_col = config.get('datatype_col')
 
-                if pd.notna(table_name) and pd.notna(column_name):
+                schema_name = row.get(schema_col, 'EDM_Reporting')
+                table_name = row.get(table_col)
+                column_name = row.get(column_col)
+                datatype_value = row.get(datatype_col)
+
+                if pd.notna(schema_name) and pd.notna(table_name) and pd.notna(column_name):
+                    schema_name = str(schema_name).strip()
                     table_name = str(table_name).strip()
                     column_name = str(column_name).strip()
-                    if column_name.lower() not in seen_columns[category][table_name]:
-                        dtype = self.map_datatype(datatype_value)
-                        result[category][table_name].append((column_name, dtype))
-                        seen_columns[category][table_name].add(column_name.lower())
 
+                    if column_name.lower() not in seen_columns[category][(schema_name, table_name)]:
+                        dtype = self.map_datatype(datatype_value) if pd.notna(datatype_value) else 'VARCHAR(255)'
+                        result[category][(schema_name, table_name)].append((column_name, dtype))
+                        seen_columns[category][(schema_name, table_name)].add(column_name.lower())
+
+        self.categories = set(result.keys())
         return result
 
     def create_folder_structure(self):
@@ -137,30 +97,38 @@ class DatabricksSchemaGenerator:
         if not os.path.exists(self.output_base_folder):
             os.makedirs(self.output_base_folder)
         for folder in folders:
-            os.makedirs(os.path.join(self.output_base_folder, folder), exist_ok=True)
+            folder_path = os.path.join(self.output_base_folder, folder)
+            if not os.path.exists(folder_path):
+                os.makedirs(folder_path)
 
-    def generate_schema_sql(self, table_name: str, columns: List[Tuple[str, str]], category: str) -> str:
+    def generate_schema_sql(self, schema_name: str, table_name: str, columns: List[Tuple[str, str]], category: str) -> str:
+        if not columns:
+            return f"-- No columns found for {table_name}"
         sql = f"-- {category} - {table_name} Table Schema\n"
-        sql += f"CREATE TABLE IF NOT EXISTS external_catalog.EDM_Reporting.{table_name} (\n"
+        sql += f"CREATE TABLE IF NOT EXISTS external_catalog.{schema_name}.{table_name} (\n"
         sql += ",\n".join([f"    [{col}] {dtype}" for col, dtype in columns])
         sql += "\n);"
         return sql
 
-    def generate_category_consolidated_schema(self, category: str, tables: Dict[str, List[Tuple[str, str]]]) -> str:
-        consolidated_sql = f"-- {category} CATEGORY - CONSOLIDATED SCHEMA\n\n"
-        for table_name, columns in tables.items():
-            sql = self.generate_schema_sql(table_name, columns, category)
+    def generate_category_consolidated_schema(self, category: str, tables: Dict[Tuple[str, str], List[Tuple[str, str]]]) -> str:
+        consolidated_sql = f"-- {category} CATEGORY - CONSOLIDATED SCHEMA\n"
+        for (schema_name, table_name), columns in tables.items():
+            sql = self.generate_schema_sql(schema_name, table_name, columns, category)
             consolidated_sql += sql + "\n\n"
+        consolidated_sql += f"-- Total tables in {category} consolidated schema: {len(tables)}\n"
         return consolidated_sql
 
-    def generate_master_consolidated_schema(self, tables_by_category: Dict[str, Dict[str, List[Tuple[str, str]]]]) -> str:
-        master_sql = "-- MASTER CONSOLIDATED SCHEMA\n\n"
+    def generate_master_consolidated_schema(self, tables_by_category: Dict[str, Dict[Tuple[str, str], List[Tuple[str, str]]]]) -> str:
+        consolidated_sql = "-- MASTER CONSOLIDATED SCHEMA\n\n"
+        total_tables = 0
         for category, tables in tables_by_category.items():
-            master_sql += f"-- {category} CATEGORY\n\n"
-            for table_name, columns in tables.items():
-                sql = self.generate_schema_sql(table_name, columns, category)
-                master_sql += sql + "\n\n"
-        return master_sql
+            consolidated_sql += f"-- {category} CATEGORY\n\n"
+            for (schema_name, table_name), columns in tables.items():
+                sql = self.generate_schema_sql(schema_name, table_name, columns, category)
+                consolidated_sql += sql + "\n\n"
+                total_tables += 1
+        consolidated_sql += f"-- Total tables in master consolidated schema: {total_tables}\n"
+        return consolidated_sql
 
     def run(self):
         df = self.load_excel_data()
@@ -173,25 +141,31 @@ class DatabricksSchemaGenerator:
         total_tables = 0
         for category, tables in tables_by_category.items():
             folder = os.path.join(self.output_base_folder, category)
-            for table_name, columns in tables.items():
-                sql = self.generate_schema_sql(table_name, columns, category)
+            for (schema_name, table_name), columns in tables.items():
+                sql = self.generate_schema_sql(schema_name, table_name, columns, category)
                 with open(os.path.join(folder, f"{table_name.lower()}.sql"), "w") as f:
                     f.write(sql)
                 total_tables += 1
 
-            consolidated = self.generate_category_consolidated_schema(category, tables)
-            with open(os.path.join(folder, f"{category.lower()}_consolidated.sql"), "w") as f:
-                f.write(consolidated)
+            table_count = len(tables)
+            consolidated_filename = f"{category.lower()}_consolidated_{table_count}.sql"
+            consolidated_path = os.path.join(folder, consolidated_filename)
+            consolidated_sql = self.generate_category_consolidated_schema(category, tables)
+            with open(consolidated_path, "w") as f:
+                f.write(consolidated_sql)
 
         master_sql = self.generate_master_consolidated_schema(tables_by_category)
-        with open(os.path.join(self.output_base_folder, "consolidated", "all_tables_master_consolidated.sql"), "w") as f:
+        master_path = os.path.join(self.output_base_folder, "consolidated", "all_tables_master_consolidated.sql")
+        with open(master_path, "w") as f:
             f.write(master_sql)
-
         self.tables_created = total_tables
-        print(f"✅ Completed: {total_tables} tables processed.")
 
-    def get_table_count(self) -> int:
-        return self.tables_created
 
-    def get_detected_categories(self) -> Set[str]:
-        return self.categories
+def load_config_from_file(config_file: str) -> Dict:
+    try:
+        with open(config_file, 'r') as f:
+            config = json.load(f)
+        return config
+    except Exception as e:
+        print(f"Error loading config file: {e}")
+        return {}```
