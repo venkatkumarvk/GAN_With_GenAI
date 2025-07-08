@@ -18,12 +18,56 @@ class DatabricksSchemaGenerator:
                  excel_file_path: str,
                  output_base_folder: str = "generated_schemas",
                  sheet_name: Optional[str] = None,
-                 categories: Optional[Dict[str, Dict[str, str]]] = None):
+                 categories: Optional[Dict[str, Dict[str, str]]] = None,
+                 category_list: Optional[List[str]] = None,
+                 default_datatype_col_suffix: str = " - Data Type"):
         self.excel_file_path = excel_file_path
         self.output_base_folder = output_base_folder
         self.sheet_name = sheet_name
-        self.categories_config = categories or {}
+        self.default_datatype_col_suffix = default_datatype_col_suffix
+        
+        # If category_list is provided, auto-generate categories config
+        if category_list:
+            self.categories_config = self._generate_categories_config(category_list)
+        else:
+            self.categories_config = categories or {}
+        
         self.tables_created = 0
+
+    def _generate_categories_config(self, category_list: List[str]) -> Dict[str, Dict[str, str]]:
+        """Auto-generate categories config based on category names and column patterns"""
+        config = {}
+        
+        for category in category_list:
+            config[category] = {
+                "schema_col": f"{category} - Schema",
+                "table_col": f"{category} - Physical Table Name", 
+                "column_col": f"{category} - Physical Column Name",
+                "datatype_col": f"{category}{self.default_datatype_col_suffix}"
+            }
+            
+        return config
+
+    def _find_matching_columns(self, df: pd.DataFrame, category: str) -> Dict[str, str]:
+        """Find matching columns in the dataframe for a given category"""
+        available_cols = df.columns.tolist()
+        found_cols = {}
+        
+        # Expected column patterns
+        patterns = {
+            "schema_col": [f"{category} - Schema", f"{category}- Schema"],
+            "table_col": [f"{category} - Physical Table Name", f"{category}- Physical Table Name"],
+            "column_col": [f"{category} - Physical Column Name", f"{category}- Physical Column Name"],
+            "datatype_col": [f"{category} - Data Type", f"{category}- Data Type", f"{category}{self.default_datatype_col_suffix}"]
+        }
+        
+        for col_type, possible_names in patterns.items():
+            for possible_name in possible_names:
+                if possible_name in available_cols:
+                    found_cols[col_type] = possible_name
+                    break
+        
+        return found_cols
 
     def map_datatype(self, datatype: str) -> str:
         if pd.isna(datatype) or not datatype or str(datatype).strip() == '':
@@ -91,11 +135,14 @@ class DatabricksSchemaGenerator:
     def extract_tables(self, df: pd.DataFrame) -> Dict[str, Dict[Tuple[str, str], List[Tuple[str, str]]]]:
         result = {}
         
-        for cat, cfg in self.categories_config.items():
-            schema_col = cfg.get('schema_col')
-            table_col = cfg.get('table_col')
-            column_col = cfg.get('column_col')
-            datatype_col = cfg.get('datatype_col', '')
+        for cat in self.categories_config.keys():
+            # Find matching columns in the dataframe
+            found_cols = self._find_matching_columns(df, cat)
+            
+            schema_col = found_cols.get('schema_col')
+            table_col = found_cols.get('table_col')
+            column_col = found_cols.get('column_col')
+            datatype_col = found_cols.get('datatype_col')  # This might be None
 
             print(f"\nProcessing category: {cat}")
             print(f"  Schema column: {schema_col}")
@@ -106,8 +153,8 @@ class DatabricksSchemaGenerator:
             # Check if required columns exist
             missing_cols = []
             for col_name, col_val in [('schema_col', schema_col), ('table_col', table_col), ('column_col', column_col)]:
-                if not col_val or col_val not in df.columns:
-                    missing_cols.append(f"{col_name}: {col_val}")
+                if not col_val:
+                    missing_cols.append(col_name)
             
             if missing_cols:
                 print(f"  WARNING: Missing columns for {cat}: {missing_cols}")
@@ -140,6 +187,8 @@ class DatabricksSchemaGenerator:
                     dtype_val = row.get(datatype_col, '')
                 else:
                     dtype_val = ''
+                    if not datatype_col:
+                        print(f"  INFO: No datatype column found for {cat}, using default VARCHAR(255)")
 
                 # Skip if any required field is empty
                 if not schema or not table or not column:
