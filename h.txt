@@ -2,7 +2,7 @@ import os
 import json
 import pandas as pd
 import re
-from typing import List, Dict, Tuple, Optional
+from typing import List, Dict, Tuple, Optional, Union
 from collections import defaultdict
 
 def load_config_from_file(config_file: str) -> Dict:
@@ -18,12 +18,46 @@ class DatabricksSchemaGenerator:
                  excel_file_path: str,
                  output_base_folder: str = "generated_schemas",
                  sheet_name: Optional[str] = None,
-                 categories: Optional[Dict[str, Dict[str, str]]] = None):
+                 categories: Optional[Union[List[str], Dict[str, Dict[str, str]]]] = None,
+                 default_datatype_col_suffix: str = " - Data Type"): # New parameter for default suffix
         self.excel_file_path = excel_file_path
         self.output_base_folder = output_base_folder
         self.sheet_name = sheet_name
-        self.categories_config = categories or {}
+        
+        # New logic to handle simplified categories list
+        self.categories_config = self._process_categories_input(categories, default_datatype_col_suffix)
+        
         self.tables_created = 0
+
+    def _process_categories_input(self, categories_input: Optional[Union[List[str], Dict[str, Dict[str, str]]]], default_datatype_col_suffix: str) -> Dict[str, Dict[str, str]]:
+        """
+        Processes the categories input.
+        If it's a list of strings, it infers the column names.
+        If it's already a dictionary (old format), it uses it as is.
+        """
+        processed_config = {}
+        if isinstance(categories_input, list):
+            for category_name in categories_input:
+                # Standardize category name for column inference (e.g., "Original SSR" -> "Original SSR")
+                base_name = category_name.strip()
+
+                cfg = {
+                    "schema_col": f"{base_name} - Schema",
+                    "table_col": f"{base_name} - Physical Table Name",
+                    "column_col": f"{base_name} - Physical Column Name"
+                }
+                
+                # Check for an explicit datatype column if a suffix is provided
+                # We'll need to check if this column actually exists in the DataFrame later
+                cfg["datatype_col"] = f"{base_name}{default_datatype_col_suffix}"
+                
+                processed_config[category_name] = cfg
+        elif isinstance(categories_input, dict):
+            # If the old dictionary format is provided, use it directly
+            processed_config = categories_input
+        else:
+            print("Warning: 'categories' in config.json is neither a list nor a dictionary. No categories will be processed.")
+        return processed_config
 
     def map_datatype(self, datatype: str) -> str:
         if pd.isna(datatype) or not str(datatype).strip(): # Check for NaN and empty strings
@@ -52,38 +86,34 @@ class DatabricksSchemaGenerator:
 
     def load_excel_data(self) -> pd.DataFrame:
         try:
-            # Load the entire sheet first
             df = pd.read_excel(self.excel_file_path, sheet_name=self.sheet_name)
             
-            # Forward-fill missing schema/table names across all relevant columns before filtering
-            # Identify all columns that might need ffill based on categories config
-            cols_to_ffill = set()
+            # Collect all expected column names from all categories
+            all_expected_cols = set()
             for cfg in self.categories_config.values():
-                cols_to_ffill.add(cfg.get("schema_col"))
-                cols_to_ffill.add(cfg.get("table_col"))
-                cols_to_ffill.add(cfg.get("column_col"))
-                cols_to_ffill.add(cfg.get("datatype_col")) # Even if not present in config, handle gracefully
+                all_expected_cols.add(cfg.get("schema_col"))
+                all_expected_cols.add(cfg.get("table_col"))
+                all_expected_cols.add(cfg.get("column_col"))
+                if cfg.get("datatype_col"): # Only add if it's explicitly set in the inferred config
+                    all_expected_cols.add(cfg.get("datatype_col"))
 
-            # Ensure columns exist before ffill
-            cols_to_ffill = [col for col in cols_to_ffill if col and col in df.columns]
-            df[cols_to_ffill] = df[cols_to_ffill].ffill()
-
-            # Filter out rows where any of the *schema columns* are 'NA' for any category
-            initial_rows = len(df)
-            for cfg in self.categories_config.values():
-                schema_col = cfg.get("schema_col")
-                if schema_col and schema_col in df.columns:
-                    # Filter based on the specific schema column for each category
-                    df = df[df[schema_col].astype(str).str.upper() != "NA"]
+            # Filter out None and ensure columns exist in DataFrame
+            cols_to_ffill = [col for col in all_expected_cols if col and col in df.columns]
             
-            # Add a check for rows that have all crucial information missing
-            # A row is considered valid if it has at least one set of schema/table/column for any category
+            # Apply ffill only to the columns that actually exist and are relevant
+            if cols_to_ffill:
+                df[cols_to_ffill] = df[cols_to_ffill].ffill()
+
+            # Filter out rows that are entirely empty across all crucial columns
+            initial_rows = len(df)
             valid_rows_mask = pd.Series([False] * len(df), index=df.index)
-            for cfg in self.categories_config.values():
+
+            for cat, cfg in self.categories_config.items():
                 schema_col = cfg.get("schema_col")
                 table_col = cfg.get("table_col")
                 column_col = cfg.get("column_col")
 
+                # Check if all critical columns for this category are present in the DataFrame
                 if all(col in df.columns for col in [schema_col, table_col, column_col] if col):
                     current_category_mask = (df[schema_col].notna()) & \
                                             (df[table_col].notna()) & \
@@ -92,12 +122,24 @@ class DatabricksSchemaGenerator:
                                             (df[table_col].astype(str).str.upper() != "NA") & \
                                             (df[column_col].astype(str).str.upper() != "NA")
                     valid_rows_mask = valid_rows_mask | current_category_mask
-            
+                else:
+                    print(f"Warning: Category '{cat}''s essential columns ({schema_col}, {table_col}, {column_col}) not fully found in Excel. Data for this category might be incomplete or skipped.")
+
             df = df[valid_rows_mask]
             
             if len(df) < initial_rows:
-                print(f"Warning: {initial_rows - len(df)} rows were dropped due to 'NA' or missing critical information.")
+                print(f"Info: {initial_rows - len(df)} rows were dropped due to missing essential data across all configured categories.")
+            
+            if df.empty:
+                print("Warning: After filtering, the DataFrame is empty. No schemas will be generated.")
+
             return df
+        except FileNotFoundError:
+            print(f"Error: Excel file not found at '{self.excel_file_path}'. Please check the path in config.json.")
+            return pd.DataFrame()
+        except KeyError as e:
+            print(f"Error: A column expected by config was not found in the Excel file: {e}. Please check your Excel headers and config.json.")
+            return pd.DataFrame()
         except Exception as e:
             print(f"Error loading Excel file: {e}")
             return pd.DataFrame()
@@ -108,24 +150,26 @@ class DatabricksSchemaGenerator:
             schema_col = cfg.get('schema_col')
             table_col = cfg.get('table_col')
             column_col = cfg.get('column_col')
-            datatype_col = cfg.get('datatype_col') # This will be None if not in config
+            datatype_col = cfg.get('datatype_col') # This will be the inferred name like "RDMOF - Data Type"
 
             tables = defaultdict(list)
             seen = defaultdict(set)
 
-            # Check if essential columns exist in the DataFrame for the current category
-            if not all(col in df.columns for col in [schema_col, table_col, column_col] if col):
-                print(f"Warning: Skipping category '{cat}' due to missing essential columns in Excel file. Expected: {schema_col}, {table_col}, {column_col}")
-                continue
+            # Essential columns must exist for the category to be processed
+            if not all(col and col in df.columns for col in [schema_col, table_col, column_col]):
+                print(f"Warning: Skipping category '{cat}' because not all essential columns ({schema_col}, {table_col}, {column_col}) were found in the loaded Excel data.")
+                continue # Skip this category if its essential columns are missing
 
+            # Filter df specifically for this category's relevant rows if needed (though global filter tries to catch most)
+            # This inner loop iterates over the *entire* filtered df, relying on get() to return '' if data is not in columns
+            # or if the data is irrelevant to the current category.
             for _, row in df.iterrows():
                 schema = str(row.get(schema_col, '')).strip()
                 table = str(row.get(table_col, '')).strip()
                 column = str(row.get(column_col, '')).strip()
                 
-                # If datatype_col is configured and exists in the row, use its value.
-                # Otherwise, pass an empty string, which map_datatype will handle.
-                dtype_val = str(row.get(datatype_col, '')) if datatype_col and datatype_col in row else ''
+                # Only use datatype_col if it exists in the DataFrame, otherwise default to empty string
+                dtype_val = str(row.get(datatype_col, '')) if datatype_col and datatype_col in df.columns else ''
 
                 # Ensure schema, table, and column are not empty or 'NA' after stripping
                 if not schema or schema.upper() == "NA":
@@ -183,12 +227,14 @@ class DatabricksSchemaGenerator:
         return sql
 
     def run(self):
+        print(f"Loading Excel data from: {self.excel_file_path}, sheet: {self.sheet_name}...")
         df = self.load_excel_data()
         if df.empty:
-            print("No data loaded or all relevant rows were filtered out. Please check your Excel file and config.")
+            print("No data processed. Exiting.")
             return
 
         self.create_folder_structure()
+        print("Extracting table schemas from DataFrame...")
         all_tables = self.extract_tables(df)
         total_tables_generated = 0
 
@@ -213,7 +259,7 @@ class DatabricksSchemaGenerator:
                         print(f"Error writing file {file_path}: {e}")
             
             consolidated_sql, cat_count = self.generate_category_consolidated_schema(cat, tables)
-            consolidated_file_path = os.path.join(folder, f"{cat.lower()}_consolidated_{cat_count}.sql")
+            consolidated_file_path = os.path.join(folder, f"{cat.replace(' ', '_').lower()}_consolidated_{cat_count}.sql") # Handle spaces in category names
             try:
                 with open(consolidated_file_path, "w") as f:
                     f.write(consolidated_sql)
