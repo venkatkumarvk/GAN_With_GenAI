@@ -26,7 +26,7 @@ class DatabricksSchemaGenerator:
         self.tables_created = 0
 
     def map_datatype(self, datatype: str) -> str:
-        if pd.isna(datatype):
+        if pd.isna(datatype) or not str(datatype).strip(): # Check for NaN and empty strings
             return 'VARCHAR(255)'
         dtype = str(datatype).upper().strip()
 
@@ -52,13 +52,51 @@ class DatabricksSchemaGenerator:
 
     def load_excel_data(self) -> pd.DataFrame:
         try:
+            # Load the entire sheet first
             df = pd.read_excel(self.excel_file_path, sheet_name=self.sheet_name)
-            df = df.ffill()  # Forward-fill missing schema/table names
-            # Drop rows where any schema column is 'NA'
+            
+            # Forward-fill missing schema/table names across all relevant columns before filtering
+            # Identify all columns that might need ffill based on categories config
+            cols_to_ffill = set()
+            for cfg in self.categories_config.values():
+                cols_to_ffill.add(cfg.get("schema_col"))
+                cols_to_ffill.add(cfg.get("table_col"))
+                cols_to_ffill.add(cfg.get("column_col"))
+                cols_to_ffill.add(cfg.get("datatype_col")) # Even if not present in config, handle gracefully
+
+            # Ensure columns exist before ffill
+            cols_to_ffill = [col for col in cols_to_ffill if col and col in df.columns]
+            df[cols_to_ffill] = df[cols_to_ffill].ffill()
+
+            # Filter out rows where any of the *schema columns* are 'NA' for any category
+            initial_rows = len(df)
             for cfg in self.categories_config.values():
                 schema_col = cfg.get("schema_col")
                 if schema_col and schema_col in df.columns:
+                    # Filter based on the specific schema column for each category
                     df = df[df[schema_col].astype(str).str.upper() != "NA"]
+            
+            # Add a check for rows that have all crucial information missing
+            # A row is considered valid if it has at least one set of schema/table/column for any category
+            valid_rows_mask = pd.Series([False] * len(df), index=df.index)
+            for cfg in self.categories_config.values():
+                schema_col = cfg.get("schema_col")
+                table_col = cfg.get("table_col")
+                column_col = cfg.get("column_col")
+
+                if all(col in df.columns for col in [schema_col, table_col, column_col] if col):
+                    current_category_mask = (df[schema_col].notna()) & \
+                                            (df[table_col].notna()) & \
+                                            (df[column_col].notna()) & \
+                                            (df[schema_col].astype(str).str.upper() != "NA") & \
+                                            (df[table_col].astype(str).str.upper() != "NA") & \
+                                            (df[column_col].astype(str).str.upper() != "NA")
+                    valid_rows_mask = valid_rows_mask | current_category_mask
+            
+            df = df[valid_rows_mask]
+            
+            if len(df) < initial_rows:
+                print(f"Warning: {initial_rows - len(df)} rows were dropped due to 'NA' or missing critical information.")
             return df
         except Exception as e:
             print(f"Error loading Excel file: {e}")
@@ -70,19 +108,35 @@ class DatabricksSchemaGenerator:
             schema_col = cfg.get('schema_col')
             table_col = cfg.get('table_col')
             column_col = cfg.get('column_col')
-            datatype_col = cfg.get('datatype_col', '')
+            datatype_col = cfg.get('datatype_col') # This will be None if not in config
 
             tables = defaultdict(list)
             seen = defaultdict(set)
 
+            # Check if essential columns exist in the DataFrame for the current category
+            if not all(col in df.columns for col in [schema_col, table_col, column_col] if col):
+                print(f"Warning: Skipping category '{cat}' due to missing essential columns in Excel file. Expected: {schema_col}, {table_col}, {column_col}")
+                continue
+
             for _, row in df.iterrows():
-                schema = str(row.get(schema_col, '')).strip() or 'default_schema'
+                schema = str(row.get(schema_col, '')).strip()
                 table = str(row.get(table_col, '')).strip()
                 column = str(row.get(column_col, '')).strip()
-                dtype_val = row.get(datatype_col, '') if datatype_col else ''
+                
+                # If datatype_col is configured and exists in the row, use its value.
+                # Otherwise, pass an empty string, which map_datatype will handle.
+                dtype_val = str(row.get(datatype_col, '')) if datatype_col and datatype_col in row else ''
 
-                if table and column and column.lower() not in seen[(schema, table)]:
-                    dtype = self.map_datatype(dtype_val) if dtype_val else 'VARCHAR(255)'
+                # Ensure schema, table, and column are not empty or 'NA' after stripping
+                if not schema or schema.upper() == "NA":
+                    schema = 'default_schema' # Assign default if schema is invalid
+                if not table or table.upper() == "NA":
+                    continue # Skip if table name is missing or 'NA'
+                if not column or column.upper() == "NA":
+                    continue # Skip if column name is missing or 'NA'
+
+                if column.lower() not in seen[(schema, table)]:
+                    dtype = self.map_datatype(dtype_val)
                     tables[(schema, table)].append((column, dtype))
                     seen[(schema, table)].add(column.lower())
 
@@ -90,9 +144,10 @@ class DatabricksSchemaGenerator:
         return result
 
     def generate_schema_sql(self, schema: str, table: str, columns: List[Tuple[str, str]], category: str) -> str:
-        sql = f"-- {category} - {table} Table Schema\n"
+        sql = f"-- Category: {category}\n"
+        sql += f"-- Table: {schema}.{table}\n"
         sql += f"CREATE TABLE IF NOT EXISTS external_catalog.{schema}.{table} (\n"
-        sql += ",\n".join([f"    [{col}] {dtype}" for col, dtype in columns])
+        sql += ",\n".join([f"    `{col}` {dtype}" for col, dtype in columns]) # Using backticks for column names
         sql += "\n);"
         return sql
 
@@ -105,7 +160,7 @@ class DatabricksSchemaGenerator:
     def generate_category_consolidated_schema(self, category: str, tables: Dict[Tuple[str, str], List[Tuple[str, str]]]) -> str:
         sql = f"-- {category} CATEGORY - CONSOLIDATED SCHEMA\n\n"
         count = 0
-        for (schema, table), cols in tables.items():
+        for (schema, table), cols in sorted(tables.items()): # Sort for consistent output
             if cols:
                 sql += self.generate_schema_sql(schema, table, cols, category) + "\n\n"
                 count += 1
@@ -115,41 +170,66 @@ class DatabricksSchemaGenerator:
     def generate_master_consolidated_schema(self, all_tables: Dict[str, Dict[Tuple[str, str], List[Tuple[str, str]]]]) -> str:
         sql = "-- MASTER CONSOLIDATED SCHEMA\n\n"
         total = 0
-        for cat, tables in all_tables.items():
-            sql += f"-- {cat} CATEGORY\n\n"
-            for (schema, table), cols in tables.items():
-                if cols:
-                    sql += self.generate_schema_sql(schema, table, cols, cat) + "\n\n"
-                    total += 1
+        # Sort categories and then tables for consistent output
+        for cat in sorted(all_tables.keys()):
+            tables = all_tables[cat]
+            if tables:
+                sql += f"-- CATEGORY: {cat}\n\n"
+                for (schema, table), cols in sorted(tables.items()):
+                    if cols:
+                        sql += self.generate_schema_sql(schema, table, cols, cat) + "\n\n"
+                        total += 1
         sql += f"-- Total tables in master consolidated schema: {total}\n"
         return sql
 
     def run(self):
         df = self.load_excel_data()
         if df.empty:
-            print("No data loaded.")
+            print("No data loaded or all relevant rows were filtered out. Please check your Excel file and config.")
             return
 
         self.create_folder_structure()
         all_tables = self.extract_tables(df)
-        total_tables = 0
+        total_tables_generated = 0
 
         for cat, tables in all_tables.items():
+            if not tables:
+                print(f"No tables found for category '{cat}'. Skipping individual and consolidated schema generation for this category.")
+                continue
+
             folder = os.path.join(self.output_base_folder, cat)
-            count = 0
+            current_category_table_count = 0
             for (schema, table), cols in tables.items():
                 if cols:
                     sql = self.generate_schema_sql(schema, table, cols, cat)
-                    with open(os.path.join(folder, f"{table.lower()}.sql"), "w") as f:
-                        f.write(sql)
-                    count += 1
+                    # Ensure table name is safe for filename
+                    safe_table_name = re.sub(r'[^\w\-_\.]', '_', table).lower() 
+                    file_path = os.path.join(folder, f"{safe_table_name}.sql")
+                    try:
+                        with open(file_path, "w") as f:
+                            f.write(sql)
+                        current_category_table_count += 1
+                    except IOError as e:
+                        print(f"Error writing file {file_path}: {e}")
+            
             consolidated_sql, cat_count = self.generate_category_consolidated_schema(cat, tables)
-            with open(os.path.join(folder, f"{cat.lower()}_consolidated_{cat_count}.sql"), "w") as f:
-                f.write(consolidated_sql)
-            total_tables += count
+            consolidated_file_path = os.path.join(folder, f"{cat.lower()}_consolidated_{cat_count}.sql")
+            try:
+                with open(consolidated_file_path, "w") as f:
+                    f.write(consolidated_sql)
+            except IOError as e:
+                print(f"Error writing consolidated file {consolidated_file_path}: {e}")
+
+            total_tables_generated += current_category_table_count
+            print(f"Processed {current_category_table_count} tables for category '{cat}'.")
 
         master_sql = self.generate_master_consolidated_schema(all_tables)
-        with open(os.path.join(self.output_base_folder, "consolidated", "all_tables_master_consolidated.sql"), "w") as f:
-            f.write(master_sql)
+        master_consolidated_folder = os.path.join(self.output_base_folder, "consolidated")
+        master_consolidated_file_path = os.path.join(master_consolidated_folder, "all_tables_master_consolidated.sql")
+        try:
+            with open(master_consolidated_file_path, "w") as f:
+                f.write(master_sql)
+        except IOError as e:
+            print(f"Error writing master consolidated file {master_consolidated_file_path}: {e}")
 
-        print(f"Total tables created: {total_tables}")
+        print(f"\nSchema generation complete. Total tables generated across all categories: {total_tables_generated}")
