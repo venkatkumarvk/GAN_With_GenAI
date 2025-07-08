@@ -1,38 +1,29 @@
-# helper.py
-import pandas as pd
-import re
 import os
 import json
-from typing import List, Tuple, Dict, Set, Optional, Union
+import pandas as pd
+import re
+from typing import List, Dict, Tuple, Optional
 from collections import defaultdict
 
+def load_config_from_file(config_file: str) -> Dict:
+    try:
+        with open(config_file, 'r') as f:
+            return json.load(f)
+    except Exception as e:
+        print(f"Error loading config file: {e}")
+        return {}
+
 class DatabricksSchemaGenerator:
-    def __init__(self, 
-                 excel_file_path: str, 
+    def __init__(self,
+                 excel_file_path: str,
                  output_base_folder: str = "generated_schemas",
                  sheet_name: Optional[str] = None,
                  categories: Optional[Dict[str, Dict[str, str]]] = None):
         self.excel_file_path = excel_file_path
         self.output_base_folder = output_base_folder
         self.sheet_name = sheet_name
-        self.custom_category_config = categories or {}
-        self.predefined_categories = set(self.custom_category_config.keys())
+        self.categories_config = categories or {}
         self.tables_created = 0
-        self.categories = set()
-
-    def load_excel_data(self) -> Optional[pd.DataFrame]:
-        try:
-            excel_file = pd.ExcelFile(self.excel_file_path)
-            sheets = excel_file.sheet_names
-            if self.sheet_name and self.sheet_name in sheets:
-                sheet = self.sheet_name
-            else:
-                sheet = sheets[0]
-            df = pd.read_excel(excel_file, sheet_name=sheet)
-            return df
-        except Exception as e:
-            print(f"Error loading Excel file: {e}")
-            return None
 
     def map_datatype(self, datatype: str) -> str:
         if pd.isna(datatype):
@@ -59,113 +50,100 @@ class DatabricksSchemaGenerator:
             return 'BINARY'
         return 'VARCHAR(255)'
 
-    def extract_tables_by_physical_name(self, df: pd.DataFrame) -> Dict[str, Dict[Tuple[str, str], List[Tuple[str, str]]]]:
+    def load_excel_data(self) -> pd.DataFrame:
+        try:
+            df = pd.read_excel(self.excel_file_path, sheet_name=self.sheet_name)
+            return df
+        except Exception as e:
+            print(f"Error loading Excel file: {e}")
+            return pd.DataFrame()
+
+    def extract_tables(self, df: pd.DataFrame) -> Dict[str, Dict[str, List[Tuple[str, str]]]]:
         result = {}
-        seen_columns = {}
+        for cat, cfg in self.categories_config.items():
+            schema_col = cfg.get('schema_col')
+            table_col = cfg.get('table_col')
+            column_col = cfg.get('column_col')
+            datatype_col = cfg.get('datatype_col', '')
 
-        for category, config in self.custom_category_config.items():
-            result[category] = defaultdict(list)
-            seen_columns[category] = defaultdict(set)
+            tables = defaultdict(list)
+            seen = defaultdict(set)
 
-        for _, row in df.iterrows():
-            for category, config in self.custom_category_config.items():
-                schema_col = config.get('schema_col')
-                table_col = config.get('table_col')
-                column_col = config.get('column_col')
-                datatype_col = config.get('datatype_col')
+            for _, row in df.iterrows():
+                schema = str(row.get(schema_col, '')).strip()
+                table = str(row.get(table_col, '')).strip()
+                column = str(row.get(column_col, '')).strip()
+                dtype_val = row.get(datatype_col, '') if datatype_col else ''
 
-                schema_name = row.get(schema_col, 'EDM_Reporting')
-                table_name = row.get(table_col)
-                column_name = row.get(column_col)
-                datatype_value = row.get(datatype_col)
+                if table and column and column.lower() not in seen[table]:
+                    dtype = self.map_datatype(dtype_val) if dtype_val else 'VARCHAR(255)'
+                    tables[(schema, table)].append((column, dtype))
+                    seen[table].add(column.lower())
 
-                if pd.notna(schema_name) and pd.notna(table_name) and pd.notna(column_name):
-                    schema_name = str(schema_name).strip()
-                    table_name = str(table_name).strip()
-                    column_name = str(column_name).strip()
-
-                    if column_name.lower() not in seen_columns[category][(schema_name, table_name)]:
-                        dtype = self.map_datatype(datatype_value) if pd.notna(datatype_value) else 'VARCHAR(255)'
-                        result[category][(schema_name, table_name)].append((column_name, dtype))
-                        seen_columns[category][(schema_name, table_name)].add(column_name.lower())
-
-        self.categories = set(result.keys())
+            result[cat] = tables
         return result
 
-    def create_folder_structure(self):
-        folders = list(self.categories) + ["consolidated"]
-        if not os.path.exists(self.output_base_folder):
-            os.makedirs(self.output_base_folder)
-        for folder in folders:
-            folder_path = os.path.join(self.output_base_folder, folder)
-            if not os.path.exists(folder_path):
-                os.makedirs(folder_path)
-
-    def generate_schema_sql(self, schema_name: str, table_name: str, columns: List[Tuple[str, str]], category: str) -> str:
-        if not columns:
-            return f"-- No columns found for {table_name}"
-        sql = f"-- {category} - {table_name} Table Schema\n"
-        sql += f"CREATE TABLE IF NOT EXISTS external_catalog.{schema_name}.{table_name} (\n"
+    def generate_schema_sql(self, schema: str, table: str, columns: List[Tuple[str, str]], category: str) -> str:
+        sql = f"-- {category} - {table} Table Schema\n"
+        sql += f"CREATE TABLE IF NOT EXISTS external_catalog.{schema}.{table} (\n"
         sql += ",\n".join([f"    [{col}] {dtype}" for col, dtype in columns])
         sql += "\n);"
         return sql
 
-    def generate_category_consolidated_schema(self, category: str, tables: Dict[Tuple[str, str], List[Tuple[str, str]]]) -> str:
-        consolidated_sql = f"-- {category} CATEGORY - CONSOLIDATED SCHEMA\n"
-        for (schema_name, table_name), columns in tables.items():
-            sql = self.generate_schema_sql(schema_name, table_name, columns, category)
-            consolidated_sql += sql + "\n\n"
-        consolidated_sql += f"-- Total tables in {category} consolidated schema: {len(tables)}\n"
-        return consolidated_sql
+    def create_folder_structure(self):
+        folders = list(self.categories_config.keys()) + ["consolidated"]
+        os.makedirs(self.output_base_folder, exist_ok=True)
+        for folder in folders:
+            os.makedirs(os.path.join(self.output_base_folder, folder), exist_ok=True)
 
-    def generate_master_consolidated_schema(self, tables_by_category: Dict[str, Dict[Tuple[str, str], List[Tuple[str, str]]]]) -> str:
-        consolidated_sql = "-- MASTER CONSOLIDATED SCHEMA\n\n"
-        total_tables = 0
-        for category, tables in tables_by_category.items():
-            consolidated_sql += f"-- {category} CATEGORY\n\n"
-            for (schema_name, table_name), columns in tables.items():
-                sql = self.generate_schema_sql(schema_name, table_name, columns, category)
-                consolidated_sql += sql + "\n\n"
-                total_tables += 1
-        consolidated_sql += f"-- Total tables in master consolidated schema: {total_tables}\n"
-        return consolidated_sql
+    def generate_category_consolidated_schema(self, category: str, tables: Dict[Tuple[str, str], List[Tuple[str, str]]]) -> str:
+        sql = f"-- {category} CATEGORY - CONSOLIDATED SCHEMA\n\n"
+        count = 0
+        for (schema, table), cols in tables.items():
+            if cols:
+                sql += self.generate_schema_sql(schema, table, cols, category) + "\n\n"
+                count += 1
+        sql += f"-- Total tables in {category} consolidated schema: {count}\n"
+        return sql, count
+
+    def generate_master_consolidated_schema(self, all_tables: Dict[str, Dict[Tuple[str, str], List[Tuple[str, str]]]]) -> str:
+        sql = "-- MASTER CONSOLIDATED SCHEMA\n\n"
+        total = 0
+        for cat, tables in all_tables.items():
+            sql += f"-- {cat} CATEGORY\n\n"
+            for (schema, table), cols in tables.items():
+                if cols:
+                    sql += self.generate_schema_sql(schema, table, cols, cat) + "\n\n"
+                    total += 1
+        sql += f"-- Total tables in master consolidated schema: {total}\n"
+        return sql
 
     def run(self):
         df = self.load_excel_data()
-        if df is None:
+        if df.empty:
+            print("No data loaded.")
             return
 
-        tables_by_category = self.extract_tables_by_physical_name(df)
         self.create_folder_structure()
-
+        all_tables = self.extract_tables(df)
         total_tables = 0
-        for category, tables in tables_by_category.items():
-            folder = os.path.join(self.output_base_folder, category)
-            for (schema_name, table_name), columns in tables.items():
-                sql = self.generate_schema_sql(schema_name, table_name, columns, category)
-                with open(os.path.join(folder, f"{table_name.lower()}.sql"), "w") as f:
-                    f.write(sql)
-                total_tables += 1
 
-            table_count = len(tables)
-            consolidated_filename = f"{category.lower()}_consolidated_{table_count}.sql"
-            consolidated_path = os.path.join(folder, consolidated_filename)
-            consolidated_sql = self.generate_category_consolidated_schema(category, tables)
-            with open(consolidated_path, "w") as f:
+        for cat, tables in all_tables.items():
+            folder = os.path.join(self.output_base_folder, cat)
+            count = 0
+            for (schema, table), cols in tables.items():
+                if cols:
+                    sql = self.generate_schema_sql(schema, table, cols, cat)
+                    with open(os.path.join(folder, f"{table.lower()}.sql"), "w") as f:
+                        f.write(sql)
+                    count += 1
+            consolidated_sql, cat_count = self.generate_category_consolidated_schema(cat, tables)
+            with open(os.path.join(folder, f"{cat.lower()}_consolidated_{cat_count}.sql"), "w") as f:
                 f.write(consolidated_sql)
+            total_tables += count
 
-        master_sql = self.generate_master_consolidated_schema(tables_by_category)
-        master_path = os.path.join(self.output_base_folder, "consolidated", "all_tables_master_consolidated.sql")
-        with open(master_path, "w") as f:
+        master_sql = self.generate_master_consolidated_schema(all_tables)
+        with open(os.path.join(self.output_base_folder, "consolidated", "all_tables_master_consolidated.sql"), "w") as f:
             f.write(master_sql)
-        self.tables_created = total_tables
 
-
-def load_config_from_file(config_file: str) -> Dict:
-    try:
-        with open(config_file, 'r') as f:
-            config = json.load(f)
-        return config
-    except Exception as e:
-        print(f"Error loading config file: {e}")
-        return {}```
+        print(f"Total tables created: {total_tables}")
