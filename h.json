@@ -21,3 +21,15 @@
     }
   }
 }
+
+{
+  "excel_file_path": "your_excel_file.xlsx",
+  "sheet_name": "Sheet1",
+  "output_folder": "generated_schemas",
+  "categories": [
+    "RDMOF",
+    "EDL",
+    "Original SSR"
+  ],
+  "default_datatype_col_suffix": " - Data Type"
+}
