@@ -1,0 +1,467 @@
+import pandas as pd
+import re
+import os
+import sys
+import json
+from typing import List, Tuple, Dict, Set, Optional, Union
+from collections import defaultdict
+
+
+class DatabricksSchemaGenerator:
+    def __init__(self, 
+                 excel_file_path: str, 
+                 output_base_folder: str = "generated_schemas",
+                 sheet_name: Optional[str] = None,
+                 categories: Optional[List[str]] = None):
+        """
+        Initialize the schema generator with dynamic parameters
+        
+        Args:
+            excel_file_path: Path to the Excel file
+            output_base_folder: Output folder for generated schemas
+            sheet_name: Specific sheet name to process (optional)
+            categories: List of categories to process (optional, will auto-detect if not provided)
+        """
+        self.excel_file_path = excel_file_path
+        self.output_base_folder = output_base_folder
+        self.sheet_name = sheet_name
+        self.predefined_categories = set(categories) if categories else None
+        self.tables_created = 0
+        self.categories = set()  # Dynamic categories
+
+    def load_excel_data(self) -> pd.DataFrame:
+        try:
+            excel_file = pd.ExcelFile(self.excel_file_path)
+            sheets = excel_file.sheet_names
+            print(f"📄 Available sheets: {sheets}")
+            
+            # Use provided sheet name or auto-detect
+            if self.sheet_name:
+                if self.sheet_name in sheets:
+                    sheet = self.sheet_name
+                    print(f"🎯 Using provided sheet: {sheet}")
+                else:
+                    print(f"⚠️ Sheet '{self.sheet_name}' not found. Available sheets: {sheets}")
+                    return None
+            else:
+                # Auto-detect sheet (fallback to original logic)
+                sheet = next((s for s in sheets if 'BROKER_GROUP_RELATION' in s.upper()), sheets[0])
+                print(f"🔍 Auto-detected sheet: {sheet}")
+            
+            df = pd.read_excel(excel_file, sheet_name=sheet)
+            print(f"✅ Loaded sheet: {sheet} with {df.shape[0]} rows and {df.shape[1]} columns.")
+            return df
+        except Exception as e:
+            print(f"❌ Error loading Excel file: {e}")
+            return None
+
+    def map_datatype(self, datatype: str) -> str:
+        if pd.isna(datatype):
+            return 'VARCHAR(255)'
+        dtype = str(datatype).upper().strip()
+
+        if m := re.match(r'VARCHAR2\((\d+)\s*BYTE\)', dtype):
+            return f'VARCHAR({m.group(1)})'
+        if m := re.match(r'VARCHAR2\((\d+)\)', dtype):
+            return f'VARCHAR({m.group(1)})'
+        if m := re.match(r'NUMBER\((\d+),\s*(\d+)\)', dtype):
+            return f'DECIMAL({m.group(1)},{m.group(2)})'
+        if m := re.match(r'NUMBER\((\d+)\)', dtype):
+            return 'INT' if int(m.group(1)) <= 10 else 'BIGINT'
+        if 'TIMESTAMP' in dtype:
+            return 'TIMESTAMP'
+        if 'DATE' in dtype:
+            return 'DATE'
+        if 'CHAR' in dtype:
+            return 'VARCHAR(1)'
+        if 'CLOB' in dtype:
+            return 'STRING'
+        if 'BLOB' in dtype:
+            return 'BINARY'
+        return 'VARCHAR(255)'
+
+    def detect_categories_from_columns(self, df: pd.DataFrame) -> Dict[str, Dict[str, str]]:
+        """
+        Dynamically detect categories from column names or use predefined categories
+        Returns: {category: {table_col: col_name, column_col: col_name, datatype_col: col_name}}
+        """
+        categories = {}
+        
+        # If predefined categories are provided, use them
+        if self.predefined_categories:
+            print(f"🎯 Using predefined categories: {list(self.predefined_categories)}")
+            self.categories = self.predefined_categories.copy()
+        
+        for col in df.columns:
+            col_upper = col.upper()
+            
+            # Extract category name from column headers
+            if 'PHYSICAL' in col_upper and 'TABLE' in col_upper:
+                category_match = col_upper.split(' - ')[0].strip()
+                if category_match:
+                    category = category_match.replace(' ', '_')
+                    
+                    # Only process if it's in predefined categories (if provided) or if auto-detecting
+                    if not self.predefined_categories or category in self.predefined_categories:
+                        if category not in categories:
+                            categories[category] = {}
+                        categories[category]['table_col'] = col
+                        self.categories.add(category)
+            
+            elif 'COLUMN' in col_upper and 'NAME' in col_upper:
+                category_match = col_upper.split(' - ')[0].strip()
+                if category_match:
+                    category = category_match.replace(' ', '_')
+                    
+                    if not self.predefined_categories or category in self.predefined_categories:
+                        if category not in categories:
+                            categories[category] = {}
+                        categories[category]['column_col'] = col
+                        self.categories.add(category)
+            
+            elif 'DATA' in col_upper and 'TYPE' in col_upper:
+                category_match = col_upper.split(' - ')[0].strip()
+                if category_match:
+                    category = category_match.replace(' ', '_')
+                    
+                    if not self.predefined_categories or category in self.predefined_categories:
+                        if category not in categories:
+                            categories[category] = {}
+                        categories[category]['datatype_col'] = col
+                        self.categories.add(category)
+
+        print(f"🔍 Final categories to process: {list(self.categories)}")
+        print(f"🔍 Category column mapping: {categories}")
+        return categories
+
+    def extract_tables_by_physical_name(self, df: pd.DataFrame) -> Dict[str, Dict[str, List[Tuple[str, str]]]]:
+        """
+        Extract tables grouped by Physical Table Name for each detected category
+        Returns: {category: {table_name: [(column_name, datatype), ...]}}
+        """
+        categories_config = self.detect_categories_from_columns(df)
+        result = {}
+        seen_columns = {}
+        
+        # Initialize result structure for detected categories
+        for category in self.categories:
+            result[category] = defaultdict(list)
+            seen_columns[category] = defaultdict(set)
+
+        for _, row in df.iterrows():
+            for category in self.categories:
+                if category not in categories_config:
+                    continue
+                
+                config = categories_config[category]
+                
+                # Get table name
+                table_name = row.get(config.get('table_col'), None)
+                column_name = row.get(config.get('column_col'), None)
+                datatype_value = row.get(config.get('datatype_col'), None)
+                
+                if pd.notna(table_name) and pd.notna(column_name):
+                    table_name = str(table_name).strip()
+                    column_name = str(column_name).strip()
+                    
+                    if column_name.lower() not in seen_columns[category][table_name]:
+                        # Use datatype if available, otherwise default to VARCHAR(255)
+                        if pd.notna(datatype_value):
+                            dtype = self.map_datatype(datatype_value)
+                        else:
+                            dtype = 'VARCHAR(255)'
+                        
+                        result[category][table_name].append((column_name, dtype))
+                        seen_columns[category][table_name].add(column_name.lower())
+
+        return result
+
+    def create_folder_structure(self):
+        """Create folder structure for organizing SQL files including consolidated folder"""
+        folders = list(self.categories) + ["consolidated"]
+        created_folders = []
+        
+        # Create base output folder
+        if not os.path.exists(self.output_base_folder):
+            os.makedirs(self.output_base_folder)
+            print(f"📁 Created base folder: {self.output_base_folder}")
+        
+        # Create category folders + consolidated folder
+        for folder in folders:
+            folder_path = os.path.join(self.output_base_folder, folder)
+            if not os.path.exists(folder_path):
+                os.makedirs(folder_path)
+                created_folders.append(folder)
+                print(f"📁 Created folder: {folder_path}")
+        
+        if created_folders:
+            print(f"✅ Created {len(created_folders)} folders")
+        
+        return True
+
+    def generate_schema_sql(self, table_name: str, columns: List[Tuple[str, str]], category: str) -> str:
+        if not columns:
+            return f"-- No columns found for {table_name}"
+        
+        sql = f"-- {category} - {table_name} Table Schema\n"
+        sql += f"CREATE TABLE IF NOT EXISTS external_catalog.EDM_Reporting.{table_name} (\n"
+        sql += ",\n".join([f"    [{col}] {dtype}" for col, dtype in columns])
+        sql += "\n);"
+        return sql
+
+    def generate_master_consolidated_schema(self, tables_by_category: Dict[str, Dict[str, List[Tuple[str, str]]]]) -> str:
+        """Generate master consolidated schema with all tables from all categories"""
+        consolidated_sql = "-- MASTER CONSOLIDATED SCHEMA - ALL TABLES FROM ALL CATEGORIES\n"
+        consolidated_sql += "-- Generated from all detected categories\n\n"
+        
+        table_count = 0
+        for category, tables in tables_by_category.items():
+            if not tables:
+                continue
+                
+            consolidated_sql += f"-- ========================================\n"
+            consolidated_sql += f"-- {category} CATEGORY TABLES\n"
+            consolidated_sql += f"-- ========================================\n\n"
+            
+            for table_name, columns in tables.items():
+                if columns:
+                    sql = self.generate_schema_sql(table_name, columns, category)
+                    consolidated_sql += sql + "\n\n"
+                    table_count += 1
+        
+        consolidated_sql += f"-- Total tables in master consolidated schema: {table_count}\n"
+        return consolidated_sql
+
+    def generate_category_consolidated_schema(self, category: str, tables: Dict[str, List[Tuple[str, str]]]) -> str:
+        """Generate consolidated schema for a single category"""
+        if not tables:
+            return f"-- No tables found for {category} category"
+        
+        consolidated_sql = f"-- {category} CATEGORY - CONSOLIDATED SCHEMA\n"
+        consolidated_sql += f"-- All tables from {category} category\n\n"
+        
+        table_count = 0
+        for table_name, columns in tables.items():
+            if columns:
+                sql = self.generate_schema_sql(table_name, columns, category)
+                consolidated_sql += sql + "\n\n"
+                table_count += 1
+        
+        consolidated_sql += f"-- Total tables in {category} consolidated schema: {table_count}\n"
+        return consolidated_sql
+
+    def run(self):
+        print("🚀 Starting dynamic schema generation...")
+        print(f"📂 Excel file: {self.excel_file_path}")
+        print(f"📄 Sheet: {self.sheet_name if self.sheet_name else 'Auto-detect'}")
+        print(f"🏷️  Categories: {list(self.predefined_categories) if self.predefined_categories else 'Auto-detect'}")
+        print(f"📁 Output folder: {self.output_base_folder}")
+        
+        df = self.load_excel_data()
+        if df is None:
+            return
+
+        tables_by_category = self.extract_tables_by_physical_name(df)
+        
+        # Create folder structure after detecting categories
+        self.create_folder_structure()
+        
+        total_tables = 0
+        category_stats = {}
+        consolidated_files_created = 0
+
+        # Generate individual category schemas AND consolidated files
+        for category, tables in tables_by_category.items():
+            category_tables = 0
+            category_stats[category] = {}
+            
+            print(f"\n{'='*60}")
+            print(f"📊 {category} CATEGORY")
+            print(f"{'='*60}")
+            
+            if not tables:
+                print(f"⚠️ No tables found for {category}")
+                continue
+            
+            # Create category folder path
+            category_folder = os.path.join(self.output_base_folder, category)
+            
+            # Generate individual table files
+            for table_name, columns in tables.items():
+                if columns:  # Only process tables with columns
+                    sql = self.generate_schema_sql(table_name, columns, category)
+                    print(f"\n📄 {table_name} ({len(columns)} columns):\n{sql}")
+                    
+                    # Save to category-specific folder
+                    filename = f"{table_name.lower()}.sql"
+                    file_path = os.path.join(category_folder, filename)
+                    
+                    with open(file_path, "w") as f:
+                        f.write(sql)
+                    print(f"✅ Saved to: {file_path}")
+                    
+                    category_tables += 1
+                    category_stats[category][table_name] = len(columns)
+                else:
+                    print(f"⚠️ No columns found for {table_name} - skipping")
+            
+            # Generate consolidated file for this category
+            if category_tables > 0:
+                consolidated_sql = self.generate_category_consolidated_schema(category, tables)
+                consolidated_filename = f"{category.lower()}_consolidated.sql"
+                consolidated_path = os.path.join(category_folder, consolidated_filename)
+                
+                with open(consolidated_path, "w") as f:
+                    f.write(consolidated_sql)
+                
+                print(f"✅ {category} consolidated schema saved to: {consolidated_path}")
+                print(f"📄 Contains {category_tables} tables from {category} category")
+                consolidated_files_created += 1
+            
+            total_tables += category_tables
+            print(f"\n📈 {category} Summary: {category_tables} tables + 1 consolidated file created in {category_folder}")
+
+        # Generate master consolidated schema (all categories combined)
+        print(f"\n{'='*60}")
+        print(f"📊 GENERATING MASTER CONSOLIDATED SCHEMA")
+        print(f"{'='*60}")
+        
+        master_consolidated_sql = self.generate_master_consolidated_schema(tables_by_category)
+        master_consolidated_path = os.path.join(self.output_base_folder, "consolidated", "all_tables_master_consolidated.sql")
+        
+        with open(master_consolidated_path, "w") as f:
+            f.write(master_consolidated_sql)
+        
+        print(f"✅ Master consolidated schema saved to: {master_consolidated_path}")
+        print(f"📄 Contains {total_tables} tables from all {len(self.categories)} categories")
+
+        self.tables_created = total_tables
+        
+        # Print final summary
+        print(f"\n{'='*60}")
+        print(f"🎯 FINAL SUMMARY")
+        print(f"{'='*60}")
+        print(f"🏗️  Total tables created: {self.tables_created}")
+        print(f"📁 Total individual SQL files: {self.tables_created}")
+        print(f"📋 Total category consolidated files: {consolidated_files_created}")
+        print(f"📋 Master consolidated file: 1")
+        print(f"📂 Output folder: {self.output_base_folder}")
+        print(f"🏷️  Processed categories: {', '.join(sorted(self.categories))}")
+        
+        # Print folder structure
+        print(f"\n📂 Folder Structure:")
+        print(f"   {self.output_base_folder}/")
+        print(f"   ├── consolidated/")
+        print(f"   │   └── all_tables_master_consolidated.sql ({total_tables} tables from all categories)")
+        
+        for category, tables in category_stats.items():
+            if tables:
+                print(f"   ├── {category}/")
+                print(f"   │   ├── {category.lower()}_consolidated.sql ({len(tables)} tables)")
+                for table_name, column_count in tables.items():
+                    print(f"   │   ├── {table_name.lower()}.sql ({column_count} columns)")
+            else:
+                print(f"   ├── {category}/ (empty)")
+        
+        print(f"{'='*60}")
+
+    def get_table_count(self) -> int:
+        """Return the number of tables created"""
+        return self.tables_created
+
+    def get_detected_categories(self) -> Set[str]:
+        """Return the set of detected categories"""
+        return self.categories
+
+
+def load_config_from_file(config_file: str) -> Dict:
+    """Load configuration from JSON file"""
+    try:
+        with open(config_file, 'r') as f:
+            config = json.load(f)
+        print(f"✅ Configuration loaded from: {config_file}")
+        return config
+    except Exception as e:
+        print(f"❌ Error loading config file: {e}")
+        return {}
+
+
+def create_sample_config(config_file: str = "schema_config.json"):
+    """Create a sample configuration file"""
+    sample_config = {
+        "excel_file_path": "your_excel_file.xlsx",
+        "sheet_name": "Sheet1",
+        "output_folder": "generated_schemas",
+        "categories": ["SOURCE", "TARGET", "MAPPING"]
+    }
+    
+    with open(config_file, 'w') as f:
+        json.dump(sample_config, f, indent=4)
+    print(f"📄 Sample configuration created: {config_file}")
+    return sample_config
+
+
+def main():
+    """
+    Main function with multiple ways to provide parameters:
+    1. Command line arguments
+    2. Configuration file
+    3. Direct parameters
+    4. Interactive input
+    """
+    
+    # Method 1: Command line arguments
+    if len(sys.argv) > 1:
+        if sys.argv[1] == "--create-config":
+            create_sample_config()
+            return
+        
+        if sys.argv[1] == "--config" and len(sys.argv) > 2:
+            config = load_config_from_file(sys.argv[2])
+            if config:
+                generator = DatabricksSchemaGenerator(
+                    excel_file_path=config.get('excel_file_path', 'your_excel_file.xlsx'),
+                    sheet_name=config.get('sheet_name'),
+                    output_base_folder=config.get('output_folder', 'generated_schemas'),
+                    categories=config.get('categories')
+                )
+                generator.run()
+                return
+    
+    # Method 2: Look for default config file
+    default_config_file = "schema_config.json"
+    if os.path.exists(default_config_file):
+        print(f"📄 Found configuration file: {default_config_file}")
+        config = load_config_from_file(default_config_file)
+        if config:
+            generator = DatabricksSchemaGenerator(
+                excel_file_path=config.get('excel_file_path', 'your_excel_file.xlsx'),
+                sheet_name=config.get('sheet_name'),
+                output_base_folder=config.get('output_folder', 'generated_schemas'),
+                categories=config.get('categories')
+            )
+            generator.run()
+            return
+    
+    # Method 3: Interactive input
+    print("🔧 No configuration found. Please provide parameters:")
+    excel_path = input("📂 Excel file path: ")
+    sheet_name = input("📄 Sheet name (press Enter for auto-detect): ").strip() or None
+    output_folder = input("📁 Output folder (press Enter for 'generated_schemas'): ").strip() or "generated_schemas"
+    categories_input = input("🏷️  Categories (comma-separated, press Enter for auto-detect): ").strip()
+    
+    categories = None
+    if categories_input:
+        categories = [cat.strip() for cat in categories_input.split(',')]
+    
+    generator = DatabricksSchemaGenerator(
+        excel_file_path=excel_path,
+        sheet_name=sheet_name,
+        output_base_folder=output_folder,
+        categories=categories
+    )
+    generator.run()
+
+
+if __name__ == "__main__":
+    main()
