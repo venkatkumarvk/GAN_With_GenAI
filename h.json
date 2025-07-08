@@ -2,22 +2,10 @@
   "excel_file_path": "your_excel_file.xlsx",
   "sheet_name": "Sheet1",
   "output_folder": "generated_schemas",
-  "categories": {
-    "RDMOF": {
-      "schema_col": "RDMOF - Schema",
-      "table_col": "RDMOF - Physical Table Name",
-      "column_col": "RDMOF - Physical Column Name",
-      "datatype_col": "RDMOF - Data Type"
-    },
-    "EDL": {
-      "schema_col": "EDL- Schema",
-      "table_col": "EDL - Physical Table Name",
-      "column_col": "EDL - Physical Column Name"
-    },
-    "Original_SSR": {
-      "schema_col": "Original SSR - Schema",
-      "table_col": "Original SSR - Physical Table Name",
-      "column_col": "Original SSR - Physical Column Name"
-    }
-  }
+  "categories": [
+    "RDMOF",
+    "EDL",
+    "Original SSR"
+  ],
+  "default_datatype_col_suffix": " - Data Type"
 }
