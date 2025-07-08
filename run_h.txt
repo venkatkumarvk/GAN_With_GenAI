@@ -1,26 +1,37 @@
-from schema_generator import DatabricksSchemaGenerator
-import json
-import sys
+# main.py
 import os
+import sys
+import json
+from helper import DatabricksSchemaGenerator, load_config_from_file, normalize_categories
 
-def run_with_config_file(config_file: str):
-    """Method 2: Configuration file"""
-    
-    try:
-        with open(config_file, 'r') as f:
-            config = json.load(f)
-        
-        generator = DatabricksSchemaGenerator(
-            excel_file_path=config.get('excel_file_path'),
-            sheet_name=config.get('sheet_name'),
-            output_base_folder=config.get('output_folder', 'generated_schemas'),
-            categories=config.get('categories')
-        )
-        
-        generator.run()
-        
-        print(f"\n🔢 Total tables created: {generator.get_table_count()}")
-        print(f"🏷️  Categories processed: {', '.join(sorted(generator.get_detected_categories()))}")
-        
-    except Exception as e:
-        print(f"❌ Error loading config: {e}")
+
+def main():
+    config_file = "config.json"
+
+    # Optional: allow --config path.json from command line
+    if len(sys.argv) > 2 and sys.argv[1] == "--config":
+        config_file = sys.argv[2]
+
+    if not os.path.exists(config_file):
+        print(f"❌ Config file not found: {config_file}")
+        return
+
+    config = load_config_from_file(config_file)
+    if not config:
+        return
+
+    # Normalize categories like "Original SSR" → "ORIGINAL_SSR"
+    if "categories" in config and config["categories"]:
+        config["categories"] = normalize_categories(config["categories"])
+
+    generator = DatabricksSchemaGenerator(
+        excel_file_path=config.get("excel_file_path", ""),
+        sheet_name=config.get("sheet_name"),
+        output_base_folder=config.get("output_folder", "generated_schemas"),
+        categories=config.get("categories")
+    )
+    generator.run()
+
+
+if __name__ == "__main__":
+    main()
