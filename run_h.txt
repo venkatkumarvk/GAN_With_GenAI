@@ -10,8 +10,7 @@ def main():
         excel_file_path=config.get("excel_file_path"),
         output_base_folder=config.get("output_folder", "generated_schemas"),
         sheet_name=config.get("sheet_name"),
-        categories=config.get("categories"),
-        default_datatype_col_suffix=config.get("default_datatype_col_suffix", " - Data Type") # Pass new parameter
+        categories=config.get("categories")
     )
     generator.run()
 
