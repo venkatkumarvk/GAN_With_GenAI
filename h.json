@@ -4,3 +4,29 @@
     "output_folder": "generated_schemas",
     "categories": ["SOURCE", "TARGET", "MAPPING"]
 }
+
+rom schema_generator import DatabricksSchemaGenerator
+import json
+import sys
+import os
+
+def run_with_parameters():
+    """Method 1: Direct parameters"""
+    
+    # CUSTOMIZE THESE PARAMETERS
+    excel_file_path = "data/your_excel_file.xlsx"
+    sheet_name = "Sheet1"  # or None for auto-detect
+    output_folder = "generated_schemas"
+    categories = ["SOURCE", "TARGET", "MAPPING"]  # or None for auto-detect
+    
+    generator = DatabricksSchemaGenerator(
+        excel_file_path=excel_file_path,
+        sheet_name=sheet_name,
+        output_base_folder=output_folder,
+        categories=categories
+    )
+    
+    generator.run()
+    
+    print(f"\n🔢 Total tables created: {generator.get_table_count()}")
+    print(f"🏷️  Categories processed: {', '.join(sorted(generator.get_detected_categories()))}")
