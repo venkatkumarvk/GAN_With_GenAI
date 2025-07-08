@@ -1,0 +1,26 @@
+from schema_generator import DatabricksSchemaGenerator
+import json
+import sys
+import os
+
+def run_with_config_file(config_file: str):
+    """Method 2: Configuration file"""
+    
+    try:
+        with open(config_file, 'r') as f:
+            config = json.load(f)
+        
+        generator = DatabricksSchemaGenerator(
+            excel_file_path=config.get('excel_file_path'),
+            sheet_name=config.get('sheet_name'),
+            output_base_folder=config.get('output_folder', 'generated_schemas'),
+            categories=config.get('categories')
+        )
+        
+        generator.run()
+        
+        print(f"\n🔢 Total tables created: {generator.get_table_count()}")
+        print(f"🏷️  Categories processed: {', '.join(sorted(generator.get_detected_categories()))}")
+        
+    except Exception as e:
+        print(f"❌ Error loading config: {e}")
