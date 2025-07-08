@@ -1,24 +1,16 @@
-# main.py
-import os
-import sys
 from helper import DatabricksSchemaGenerator, load_config_from_file
 
 def main():
-    if len(sys.argv) > 2 and sys.argv[1] == "--config":
-        config_file = sys.argv[2]
-        config = load_config_from_file(config_file)
-    else:
-        config_file = "config.json"
-        if not os.path.exists(config_file):
-            print("Configuration file not found.")
-            return
-        config = load_config_from_file(config_file)
+    config = load_config_from_file("schema_config.json")
+    if not config:
+        print("Invalid or missing config.")
+        return
 
     generator = DatabricksSchemaGenerator(
-        excel_file_path=config.get('excel_file_path', 'your_excel_file.xlsx'),
-        sheet_name=config.get('sheet_name'),
-        output_base_folder=config.get('output_folder', 'generated_schemas'),
-        categories=config.get('categories')
+        excel_file_path=config.get("excel_file_path"),
+        output_base_folder=config.get("output_folder", "generated_schemas"),
+        sheet_name=config.get("sheet_name"),
+        categories=config.get("categories")
     )
     generator.run()
 
