@@ -1,0 +1,6 @@
+{
+    "excel_file_path": "data/broker_group_relation.xlsx",
+    "sheet_name": "BROKER_GROUP_RELATION",
+    "output_folder": "generated_schemas",
+    "categories": ["SOURCE", "TARGET", "MAPPING"]
+}
