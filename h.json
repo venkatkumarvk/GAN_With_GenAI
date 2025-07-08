@@ -1,6 +1,28 @@
 {
-    "excel_file_path": "your_excel_file.xlsx",
-    "sheet_name": "Sheet1",
-    "output_folder": "generated_schemas",
-    "categories": ["EDL", "RDMOF", "Original SSR"]
+  "excel_file_path": "your_excel_file.xlsx",
+  "sheet_name": "Sheet1",
+  "output_folder": "generated_schemas",
+  "categories": {
+    "EDL": {
+      "full_name": "Enterprise Data Layer",
+      "schema_col": "EDL - Schema Name",
+      "table_col": "EDL - Physical Table Name",
+      "column_col": "EDL - Column Name",
+      "datatype_col": "EDL - Data Type"
+    },
+    "RDMOF": {
+      "full_name": "Reference Data Master Output Format",
+      "schema_col": "RDMOF - Schema Name",
+      "table_col": "RDMOF - Physical Table",
+      "column_col": "RDMOF - Column Name",
+      "datatype_col": "RDMOF - Data Type"
+    },
+    "ORIGINAL_SSR": {
+      "full_name": "Original SSR",
+      "schema_col": "Original SSR - Schema Name",
+      "table_col": "Original SSR - Table Name",
+      "column_col": "Original SSR - Column Name",
+      "datatype_col": "Original SSR - Data Type"
+    }
+  }
 }
