@@ -1,4 +1,4 @@
-helper.py
+# helper.py
 
 import os
 import json
@@ -21,14 +21,12 @@ class DatabricksSchemaGenerator:
                  output_base_folder: str = "generated_schemas",
                  sheet_name: Optional[str] = None,
                  categories: Optional[Dict[str, Dict[str, str]]] = None,
-                 generate_drop_statements: bool = False,
-                 generate_json_output: bool = False):
+                 generate_drop_statements: bool = False):
         self.excel_file_path = excel_file_path
         self.output_base_folder = output_base_folder
         self.sheet_name = sheet_name
         self.categories_config = categories or {}
         self.generate_drop_statements = generate_drop_statements
-        self.generate_json_output = generate_json_output
         self.tables_created = 0
 
     def map_datatype(self, datatype: str) -> str:
@@ -162,71 +160,16 @@ class DatabricksSchemaGenerator:
                 print(f"    {schema}.{table}: {len(cols)} columns")
 
             result[cat] = tables
-
-    def generate_category_consolidated_schema(self, category: str, tables: Dict[Tuple[str, str], List[Tuple[str, str]]], operation: str = "create") -> str:
-
-    def generate_drop_json(self, schema: str, table: str, category: str) -> Dict:
-        """Generate DROP TABLE statement in JSON format"""
-        return {
-            "operation": "drop",
-            "category": category,
-            "catalog": "external_catalog",
-            "schema": schema,
-            "table": table,
-            "full_table_name": f"external_catalog.{schema}.{table}",
-            "sql_statement": f"DROP TABLE IF EXISTS external_catalog.{schema}.{table};",
-            "description": f"{category} - Drop {table} Table"
-        }
-
-    def generate_create_json(self, schema: str, table: str, columns: List[Tuple[str, str]], category: str) -> Dict:
-        """Generate CREATE TABLE statement in JSON format"""
-        column_definitions = []
-        for col, dtype in columns:
-            column_definitions.append({
-                "column_name": col,
-                "data_type": dtype,
-                "sql_definition": f"[{col}] {dtype}"
-            })
         
-        return {
-            "operation": "create",
-            "category": category,
-            "catalog": "external_catalog",
-            "schema": schema,
-            "table": table,
-            "full_table_name": f"external_catalog.{schema}.{table}",
-            "columns": column_definitions,
-            "column_count": len(columns),
-            "sql_statement": self.generate_schema_sql(schema, table, columns, category),
-            "description": f"{category} - {table} Table Schema"
-        }
-
-    def generate_combined_json(self, schema: str, table: str, columns: List[Tuple[str, str]], category: str) -> Dict:
-        """Generate both DROP and CREATE statements in JSON format"""
-        drop_json = self.generate_drop_json(schema, table, category)
-        create_json = self.generate_create_json(schema, table, columns, category)
-        
-        return {
-            "operation": "combined",
-            "category": category,
-            "catalog": "external_catalog",
-            "schema": schema,
-            "table": table,
-            "full_table_name": f"external_catalog.{schema}.{table}",
-            "drop_statement": drop_json,
-            "create_statement": create_json,
-            "sql_statements": [
-                drop_json["sql_statement"],
-                create_json["sql_statement"]
-            ],
-            "description": f"{category} - Drop and Create {table} Table"
-        }
+        return result
 
     def generate_drop_sql(self, schema: str, table: str, category: str) -> str:
         """Generate DROP TABLE statement"""
         sql = f"-- {category} - Drop {table} Table\n"
         sql += f"DROP TABLE IF EXISTS external_catalog.{schema}.{table};\n"
         return sql
+
+    def generate_schema_sql(self, schema: str, table: str, columns: List[Tuple[str, str]], category: str) -> str:
         """Generate CREATE TABLE statement"""
         sql = f"-- {category} - {table} Table Schema\n"
         sql += f"CREATE TABLE IF NOT EXISTS external_catalog.{schema}.{table} (\n"
@@ -244,87 +187,21 @@ class DatabricksSchemaGenerator:
         folders = list(self.categories_config.keys()) + ["consolidated"]
         
         # Add subfolders for create, drop, and combined if needed
-        if self.generate_drop_statements or self.generate_json_output:
+        if self.generate_drop_statements:
             extended_folders = []
             for folder in folders:
-                if self.generate_drop_statements:
-                    extended_folders.extend([
-                        os.path.join(folder, "create"),
-                        os.path.join(folder, "drop"),
-                        os.path.join(folder, "combined")
-                    ])
-                if self.generate_json_output:
-                    extended_folders.extend([
-                        os.path.join(folder, "json", "create"),
-                        os.path.join(folder, "json", "drop"),
-                        os.path.join(folder, "json", "combined")
-                    ])
+                extended_folders.extend([
+                    os.path.join(folder, "create"),
+                    os.path.join(folder, "drop"),
+                    os.path.join(folder, "combined")
+                ])
             folders.extend(extended_folders)
         
         os.makedirs(self.output_base_folder, exist_ok=True)
         for folder in folders:
             os.makedirs(os.path.join(self.output_base_folder, folder), exist_ok=True)
 
-    def generate_category_consolidated_json(self, category: str, tables: Dict[Tuple[str, str], List[Tuple[str, str]]], operation: str = "create") -> Dict:
-        """Generate consolidated JSON for a category with specified operation"""
-        result = {
-            "category": category,
-            "operation": operation,
-            "generated_timestamp": pd.Timestamp.now().isoformat(),
-            "tables": [],
-            "summary": {
-                "total_tables": 0,
-                "total_columns": 0
-            }
-        }
-        
-        total_columns = 0
-        for (schema, table), cols in tables.items():
-            if cols:
-                if operation == "drop":
-                    table_json = self.generate_drop_json(schema, table, category)
-                elif operation == "create":
-                    table_json = self.generate_create_json(schema, table, cols, category)
-                    total_columns += len(cols)
-                elif operation == "combined":
-                    table_json = self.generate_combined_json(schema, table, cols, category)
-                    total_columns += len(cols)
-                
-                result["tables"].append(table_json)
-        
-        result["summary"]["total_tables"] = len(result["tables"])
-        result["summary"]["total_columns"] = total_columns
-        
-        return result
-
-    def generate_master_consolidated_json(self, all_tables: Dict[str, Dict[Tuple[str, str], List[Tuple[str, str]]]], operation: str = "create") -> Dict:
-        """Generate master consolidated JSON with specified operation"""
-        result = {
-            "operation": operation,
-            "generated_timestamp": pd.Timestamp.now().isoformat(),
-            "categories": {},
-            "summary": {
-                "total_categories": 0,
-                "total_tables": 0,
-                "total_columns": 0
-            }
-        }
-        
-        total_tables = 0
-        total_columns = 0
-        
-        for cat, tables in all_tables.items():
-            if tables:
-                category_json = self.generate_category_consolidated_json(cat, tables, operation)
-                result["categories"][cat] = category_json
-                total_tables += category_json["summary"]["total_tables"]
-                total_columns += category_json["summary"]["total_columns"]
-        
-        result["summary"]["total_categories"] = len(result["categories"])
-        result["summary"]["total_tables"] = total_tables
-        result["summary"]["total_columns"] = total_columns
-        
-        return result
+    def generate_category_consolidated_schema(self, category: str, tables: Dict[Tuple[str, str], List[Tuple[str, str]]], operation: str = "create") -> Tuple[str, int]:
         """Generate consolidated schema for a category with specified operation"""
         operation_upper = operation.upper()
         sql = f"-- {category} CATEGORY - CONSOLIDATED {operation_upper} SCHEMA\n\n"
@@ -388,16 +265,10 @@ class DatabricksSchemaGenerator:
             else:
                 create_folder = os.path.join(self.output_base_folder, cat)
             
-            if self.generate_json_output:
-                json_create_folder = os.path.join(self.output_base_folder, cat, "json", "create")
-                json_drop_folder = os.path.join(self.output_base_folder, cat, "json", "drop")
-                json_combined_folder = os.path.join(self.output_base_folder, cat, "json", "combined")
-            
             for (schema, table), cols in tables.items():
                 if cols:
                     base_filename = f"{schema}_{table}".lower()
                     sql_filename = f"{base_filename}.sql"
-                    json_filename = f"{base_filename}.json"
                     
                     if self.generate_drop_statements:
                         # Generate SQL CREATE files
@@ -419,23 +290,6 @@ class DatabricksSchemaGenerator:
                         create_sql = self.generate_schema_sql(schema, table, cols, cat)
                         with open(os.path.join(create_folder, sql_filename), "w") as f:
                             f.write(create_sql)
-                    
-                    # Generate JSON files if enabled
-                    if self.generate_json_output:
-                        # Generate JSON CREATE files
-                        create_json = self.generate_create_json(schema, table, cols, cat)
-                        with open(os.path.join(json_create_folder, json_filename), "w") as f:
-                            json.dump(create_json, f, indent=2)
-                        
-                        # Generate JSON DROP files
-                        drop_json = self.generate_drop_json(schema, table, cat)
-                        with open(os.path.join(json_drop_folder, json_filename), "w") as f:
-                            json.dump(drop_json, f, indent=2)
-                        
-                        # Generate JSON COMBINED files
-                        combined_json = self.generate_combined_json(schema, table, cols, cat)
-                        with open(os.path.join(json_combined_folder, json_filename), "w") as f:
-                            json.dump(combined_json, f, indent=2)
                     
                     count += 1
 
@@ -460,35 +314,16 @@ class DatabricksSchemaGenerator:
                     with open(os.path.join(create_folder, f"{cat.lower()}_consolidated_{cat_count}.sql"), "w") as f:
                         f.write(consolidated_sql)
                 
-                # Generate JSON consolidated files if enabled
-                if self.generate_json_output:
-                    consolidated_create_json = self.generate_category_consolidated_json(cat, tables, "create")
-                    with open(os.path.join(json_create_folder, f"{cat.lower()}_consolidated_create_{cat_count}.json"), "w") as f:
-                        json.dump(consolidated_create_json, f, indent=2)
-                    
-                    consolidated_drop_json = self.generate_category_consolidated_json(cat, tables, "drop")
-                    with open(os.path.join(json_drop_folder, f"{cat.lower()}_consolidated_drop_{cat_count}.json"), "w") as f:
-                        json.dump(consolidated_drop_json, f, indent=2)
-                    
-                    consolidated_combined_json = self.generate_category_consolidated_json(cat, tables, "combined")
-                    with open(os.path.join(json_combined_folder, f"{cat.lower()}_consolidated_combined_{cat_count}.json"), "w") as f:
-                        json.dump(consolidated_combined_json, f, indent=2)
-                
                 # Update print statements
                 files_msg = f"Created {count} individual table files"
                 if self.generate_drop_statements:
                     files_msg += " (CREATE/DROP/COMBINED)"
-                if self.generate_json_output:
-                    files_msg += " in SQL and JSON formats"
                 
                 consolidated_msg = ""
                 if self.generate_drop_statements:
                     consolidated_msg = "3 consolidated files"
                 else:
                     consolidated_msg = "1 consolidated file"
-                
-                if self.generate_json_output:
-                    consolidated_msg += " in SQL and JSON formats"
                 
                 print(f"{files_msg} and {consolidated_msg} for {cat}")
             else:
@@ -518,20 +353,6 @@ class DatabricksSchemaGenerator:
             with open(os.path.join(consolidated_folder, "all_tables_master_consolidated.sql"), "w") as f:
                 f.write(master_sql)
         
-        # Generate JSON master files if enabled
-        if self.generate_json_output:
-            master_create_json = self.generate_master_consolidated_json(all_tables, "create")
-            with open(os.path.join(consolidated_folder, "all_tables_master_consolidated_create.json"), "w") as f:
-                json.dump(master_create_json, f, indent=2)
-            
-            master_drop_json = self.generate_master_consolidated_json(all_tables, "drop")
-            with open(os.path.join(consolidated_folder, "all_tables_master_consolidated_drop.json"), "w") as f:
-                json.dump(master_drop_json, f, indent=2)
-            
-            master_combined_json = self.generate_master_consolidated_json(all_tables, "combined")
-            with open(os.path.join(consolidated_folder, "all_tables_master_consolidated_combined.json"), "w") as f:
-                json.dump(master_combined_json, f, indent=2)
-        
         # Update print statements
         master_msg = "Generated master consolidated files:"
         if self.generate_drop_statements:
@@ -539,13 +360,10 @@ class DatabricksSchemaGenerator:
         else:
             master_msg += " CREATE"
         
-        if self.generate_json_output:
-            master_msg += " in SQL and JSON formats"
-        
         print(f"\n{master_msg}")
-
         print(f"\nTotal tables created: {total_tables}")
         print(f"Files generated in: {self.output_base_folder}")
+
 
 # main.py
 from helper import DatabricksSchemaGenerator, load_config_from_file
@@ -561,13 +379,13 @@ def main():
         output_base_folder=config.get("output_folder", "generated_schemas"),
         sheet_name=config.get("sheet_name"),
         categories=config.get("categories"),
-        generate_drop_statements=config.get("generate_drop_statements", False),
-        generate_json_output=config.get("generate_json_output", False)
+        generate_drop_statements=config.get("generate_drop_statements", False)
     )
     generator.run()
 
 if __name__ == "__main__":
     main()
+
 
 # Updated schema_config.json
 {
@@ -575,7 +393,6 @@ if __name__ == "__main__":
   "sheet_name": "Sheet1",
   "output_folder": "generated_schemas",
   "generate_drop_statements": true,
-  "generate_json_output": true,
   "categories": {
     "RDMOF": {
       "schema_col": "RDMOF - Schema",
