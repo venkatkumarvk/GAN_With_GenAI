@@ -1,0 +1,420 @@
+# 1. ARGUMENT PARSER - Add new argument for blob moving
+def main():
+    parser = argparse.ArgumentParser(description="Process PDF files using Azure OpenAI")
+    parser.add_argument("--apitype", choices=["general", "batch"], required=True, 
+                      help="API type to use (general or batch)")
+    parser.add_argument("--source", choices=["azure", "local"], required=True,
+                      help="Source location of PDF files (azure or local)")
+    parser.add_argument("--folder", required=True, 
+                      help="Folder path (in Azure Blob Storage or local filesystem)")
+    parser.add_argument("--config", default="config.json", 
+                      help="Path to configuration file")
+    parser.add_argument("--log-level", choices=["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"],
+                     default="INFO", help="Set the logging level")
+    # NEW ARGUMENT FOR BLOB MOVING
+    parser.add_argument("--blobmoveon", choices=["true", "false"], default="false",
+                      help="Move processed files to archive folder and create zip (true/false)")
+    
+    args = parser.parse_args()
+    
+    try:
+        # Load configuration
+        config = load_config(args.config)
+        
+        # Set up logger
+        log_level = getattr(logging, args.log_level)
+        logger = setup_logger(config, log_level)
+        
+        # Convert string to boolean
+        blobmoveon_bool = args.blobmoveon.lower() == "true"
+        
+        logger.info(f"Starting PDF processing with source: {args.source}, folder: {args.folder}, API type: {args.apitype}")
+        logger.info(f"Blob move enabled: {blobmoveon_bool}")
+        
+        # Process PDF files from either Azure or local folder
+        if args.source == "azure":
+            process_azure_pdf_files(config, args.apitype, args.folder, logger, blobmoveon_bool)
+        else:  # local
+            process_local_pdf_files(config, args.apitype, args.folder, logger, blobmoveon_bool)
+        
+    except Exception as e:
+        if 'logger' in locals():
+            logger.error(f"Unhandled error: {str(e)}", exc_info=True)
+        else:
+            print(f"Error: {str(e)}")
+        return 1
+    
+    return 0
+
+# 2. AZURE STORAGE HELPER - Add methods for moving and zipping
+import zipfile
+import io
+from azure.storage.blob import BlobServiceClient
+
+class AzureStorageHelper:
+    def __init__(self, connection_string, input_container, output_container, logger=None):
+        self.connection_string = connection_string
+        self.input_container = input_container
+        self.output_container = output_container
+        self.logger = logger or logging.getLogger("pdf_processor")
+        self.blob_service_client = BlobServiceClient.from_connection_string(connection_string)
+        
+        if self.logger:
+            self.logger.info(f"Initialized AzureStorageHelper with input container: {input_container}, output container: {output_container}")
+    
+    # ADD THESE NEW METHODS
+    def move_blob_to_archive(self, source_blob_name, archive_folder_name, processed_status):
+        """
+        Move a blob from input container to archive folder
+        
+        Parameters:
+        - source_blob_name: Name of the blob to move
+        - archive_folder_name: Archive folder name (with timestamp)
+        - processed_status: 'processed' or 'unprocessed'
+        """
+        try:
+            # Define destination path
+            destination_blob_name = f"{archive_folder_name}/{processed_status}/{source_blob_name.split('/')[-1]}"
+            
+            # Get source blob client
+            source_blob_client = self.blob_service_client.get_blob_client(
+                container=self.input_container, 
+                blob=source_blob_name
+            )
+            
+            # Get destination blob client
+            dest_blob_client = self.blob_service_client.get_blob_client(
+                container=self.input_container, 
+                blob=destination_blob_name
+            )
+            
+            # Copy blob to new location
+            dest_blob_client.start_copy_from_url(source_blob_client.url)
+            
+            # Delete original blob
+            source_blob_client.delete_blob()
+            
+            if self.logger:
+                self.logger.info(f"Moved blob {source_blob_name} to {destination_blob_name}")
+            
+            return True
+            
+        except Exception as e:
+            if self.logger:
+                self.logger.error(f"Error moving blob {source_blob_name}: {str(e)}")
+            return False
+    
+    def create_archive_zip(self, archive_folder_name, zip_blob_name):
+        """
+        Create a zip file from archive folder and upload to blob storage
+        
+        Parameters:
+        - archive_folder_name: Folder name to zip
+        - zip_blob_name: Name for the zip blob
+        """
+        try:
+            # Create zip file in memory
+            zip_buffer = io.BytesIO()
+            
+            with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zip_file:
+                # List all blobs in the archive folder
+                container_client = self.blob_service_client.get_container_client(self.input_container)
+                blobs = container_client.list_blobs(name_starts_with=archive_folder_name)
+                
+                for blob in blobs:
+                    # Download blob content
+                    blob_client = self.blob_service_client.get_blob_client(
+                        container=self.input_container, 
+                        blob=blob.name
+                    )
+                    blob_data = blob_client.download_blob().readall()
+                    
+                    # Add to zip with relative path
+                    archive_path = blob.name.replace(archive_folder_name + "/", "")
+                    zip_file.writestr(archive_path, blob_data)
+            
+            # Upload zip to blob storage
+            zip_buffer.seek(0)
+            zip_blob_client = self.blob_service_client.get_blob_client(
+                container=self.input_container, 
+                blob=zip_blob_name
+            )
+            zip_blob_client.upload_blob(zip_buffer.getvalue(), overwrite=True)
+            
+            if self.logger:
+                self.logger.info(f"Created archive zip: {zip_blob_name}")
+            
+            return True
+            
+        except Exception as e:
+            if self.logger:
+                self.logger.error(f"Error creating archive zip: {str(e)}")
+            return False
+    
+    def cleanup_archive_folder(self, archive_folder_name):
+        """
+        Delete the archive folder after zipping
+        
+        Parameters:
+        - archive_folder_name: Folder name to delete
+        """
+        try:
+            container_client = self.blob_service_client.get_container_client(self.input_container)
+            blobs = container_client.list_blobs(name_starts_with=archive_folder_name)
+            
+            for blob in blobs:
+                blob_client = self.blob_service_client.get_blob_client(
+                    container=self.input_container, 
+                    blob=blob.name
+                )
+                blob_client.delete_blob()
+            
+            if self.logger:
+                self.logger.info(f"Cleaned up archive folder: {archive_folder_name}")
+            
+        except Exception as e:
+            if self.logger:
+                self.logger.error(f"Error cleaning up archive folder: {str(e)}")
+
+# 3. MAIN PROCESSING FUNCTION - Modify to accept blobmoveon parameter
+def process_azure_pdf_files(config, api_type, azure_folder, logger, blobmoveon=False):
+    """
+    Process PDF files from Azure Blob Storage.
+    
+    Parameters:
+    - config: Configuration dictionary
+    - api_type: 'batch' or 'general'
+    - azure_folder: Folder path in Azure Blob Storage
+    - logger: Logger instance
+    - blobmoveon: Whether to move files to archive after processing
+    """
+    # Initialize helpers
+    logger.info(f"Initializing Azure Storage Helper with container: {config['azure_storage']['input_container']}")
+    storage_helper = AzureStorageHelper(
+        config["azure_storage"]["connection_string"],
+        config["azure_storage"]["input_container"],
+        config["azure_storage"]["output_container"],
+        logger
+    )
+    
+    pdf_processor = PDFProcessor(config, logger)
+    
+    logger.info(f"Initializing Azure OpenAI Client with {api_type} API")
+    ai_client = AzureOpenAIClient(config, logger)
+    
+    # List PDF blobs in the specified folder
+    logger.info(f"Listing PDF files in Azure folder: {azure_folder}")
+    pdf_blobs = storage_helper.list_blobs_in_folder(azure_folder)
+    
+    if not pdf_blobs:
+        logger.warning(f"No PDF files found in folder: {azure_folder}")
+        return
+    
+    logger.info(f"Found {len(pdf_blobs)} PDF files to process")
+    
+    # Track processing results for moving files later
+    processing_results = []
+    
+    # Process each PDF
+    for i, blob_name in enumerate(pdf_blobs):
+        processed_successfully = False
+        try:
+            logger.info(f"Processing file {i+1}/{len(pdf_blobs)}: {blob_name}")
+            
+            # Download blob to memory
+            logger.debug(f"Downloading blob: {blob_name}")
+            blob_content = storage_helper.download_blob_to_memory(blob_name)
+            
+            if blob_content is None:
+                logger.error(f"Could not download blob: {blob_name}")
+                processing_results.append((blob_name, False))
+                continue
+            
+            # Extract pages as base64 strings
+            filename = blob_name.split('/')[-1]
+            logger.info(f"Extracting pages from {filename}")
+            pages = pdf_processor.extract_pdf_pages(blob_content)
+            
+            if not pages:
+                logger.warning(f"No pages extracted from {filename}")
+                processing_results.append((blob_name, False))
+                continue
+            
+            logger.info(f"Extracted {len(pages)} pages from {filename}")
+            
+            # Prepare batches for processing
+            batch_size = config["processing"]["batch_size"]
+            
+            all_results = []
+            for batch_start in range(0, len(pages), batch_size):
+                batch_end = min(batch_start + batch_size, len(pages))
+                batch_pages = pages[batch_start:batch_end]
+                
+                # Split into page numbers and base64 strings
+                page_nums = [p[0] for p in batch_pages]
+                base64_strings = [p[1] for p in batch_pages]
+                
+                # Create prompts
+                prompts = [pdf_processor.create_extraction_prompt() for _ in range(len(batch_pages))]
+                
+                logger.info(f"Processing batch of {len(batch_pages)} pages (pages {batch_start+1}-{batch_end})")
+                
+                # Process batch using specified API type
+                try:
+                    if api_type == "batch":
+                        logger.debug("Using batch API for processing")
+                        raw_results = ai_client.process_batch(base64_strings, prompts)
+                    else:
+                        logger.debug("Using general API for processing")
+                        raw_results = ai_client.process_general(base64_strings, prompts)
+                    
+                    # Process the results
+                    logger.debug("Processing batch results")
+                    processed_results = pdf_processor.process_batch_results(raw_results, page_nums)
+                    all_results.extend(processed_results)
+                    
+                    logger.info(f"Processed batch {batch_start+1}-{batch_end}")
+                except Exception as batch_error:
+                    logger.error(f"Error processing batch: {str(batch_error)}")
+            
+            # Log classification results
+            for page_num, category, _ in all_results:
+                logger.info(f"Page {page_num+1} classified as: {category}")
+            
+            # Create CSV and determine confidence level
+            logger.info("Creating CSV from extraction results")
+            csv_content, invoice_number, total_amount = pdf_processor.create_csv_for_results(
+                all_results, filename
+            )
+            
+            if csv_content:
+                # Determine confidence level for folder structure
+                is_high_confidence = pdf_processor.has_high_confidence(all_results)
+                
+                # Determine folder path based on confidence
+                if is_high_confidence:
+                    folder_path = config["azure_storage"]["high_confidence_folder"]
+                    logger.info(f"{filename} has HIGH confidence (≥{config['processing']['confidence_threshold']}%)")
+                else:
+                    folder_path = config["azure_storage"]["low_confidence_folder"]
+                    logger.info(f"{filename} has LOW confidence (<{config['processing']['confidence_threshold']}%)")
+                
+                # Prepare filenames for upload
+                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                base_filename = os.path.splitext(filename)[0]
+                
+                # Upload CSV to blob storage
+                csv_blob_name = f"{folder_path}{base_filename}_{invoice_number}_{total_amount}_{timestamp}.csv"
+                logger.info(f"Uploading CSV to {csv_blob_name}")
+                csv_success, csv_url = storage_helper.upload_to_storage(
+                    csv_blob_name,
+                    csv_content,
+                    "text/csv"
+                )
+                
+                # Upload original PDF to appropriate folder
+                source_folder = "source_documents/" + folder_path
+                source_blob_name = f"{source_folder}{filename}"
+                logger.info(f"Uploading source PDF to {source_blob_name}")
+                source_success, source_url = storage_helper.upload_to_storage(
+                    source_blob_name,
+                    blob_content,
+                    "application/pdf"
+                )
+                
+                logger.info(f"CSV upload: {'Success' if csv_success else 'Failed'}")
+                logger.info(f"Source PDF upload: {'Success' if source_success else 'Failed'}")
+                
+                if csv_success:
+                    logger.info(f"CSV URL: {csv_url}")
+                if source_success:
+                    logger.info(f"Source PDF URL: {source_url}")
+                
+                processed_successfully = True
+            else:
+                logger.warning(f"No extractable content found in {filename}")
+        
+        except Exception as e:
+            logger.error(f"Error processing {blob_name}: {str(e)}", exc_info=True)
+        
+        # Track processing result
+        processing_results.append((blob_name, processed_successfully))
+    
+    # HANDLE BLOB MOVING AND ZIPPING
+    if blobmoveon:
+        logger.info("Starting blob moving and archiving process...")
+        
+        # Get archive configuration from config
+        archive_config = config.get("archive", {})
+        archive_base_folder = archive_config.get("base_folder", "archive")
+        processed_subfolder = archive_config.get("processed_folder", "processed")
+        unprocessed_subfolder = archive_config.get("unprocessed_folder", "unprocessed")
+        zip_base_folder = archive_config.get("zip_folder", "archives")
+        
+        # Create archive folder name with timestamp
+        archive_timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        archive_folder_name = f"{archive_base_folder}_{azure_folder.replace('/', '_')}_{archive_timestamp}"
+        
+        # Log archive configuration
+        logger.info(f"Archive folder: {archive_folder_name}")
+        logger.info(f"Processed subfolder: {processed_subfolder}")
+        logger.info(f"Unprocessed subfolder: {unprocessed_subfolder}")
+        logger.info(f"Zip folder: {zip_base_folder}")
+        
+        # Move files based on processing results
+        for blob_name, was_processed in processing_results:
+            if was_processed:
+                storage_helper.move_blob_to_archive(blob_name, archive_folder_name, processed_subfolder)
+            else:
+                storage_helper.move_blob_to_archive(blob_name, archive_folder_name, unprocessed_subfolder)
+        
+        # Create zip file name
+        zip_blob_name = f"{zip_base_folder}/{archive_folder_name}.zip"
+        
+        # Create and upload zip
+        if storage_helper.create_archive_zip(archive_folder_name, zip_blob_name):
+            logger.info(f"Archive created successfully: {zip_blob_name}")
+            
+            # Optional: Clean up the archive folder after zipping
+            if archive_config.get("cleanup_after_zip", True):
+                storage_helper.cleanup_archive_folder(archive_folder_name)
+                logger.info("Archive folder cleaned up after zipping")
+            else:
+                logger.info("Archive folder kept (cleanup disabled in config)")
+        else:
+            logger.error("Failed to create archive zip")
+    
+    logger.info("Processing complete!")
+
+# 4. LOCAL PROCESSING FUNCTION - Also modify to accept blobmoveon parameter
+def process_local_pdf_files(config, api_type, local_folder, logger, blobmoveon=False):
+    """
+    Process PDF files from a local folder.
+    
+    Parameters:
+    - config: Configuration dictionary
+    - api_type: 'batch' or 'general'
+    - local_folder: Folder path in local filesystem
+    - logger: Logger instance
+    - blobmoveon: Whether to move files to archive after processing (not applicable for local)
+    """
+    # Note: blobmoveon is not applicable for local processing
+    if blobmoveon:
+        logger.warning("Blob moving is not applicable for local file processing. Ignoring --blobmoveon true flag.")
+    
+    # [Rest of the existing local processing code remains the same...]
+    # Initialize helpers
+    logger.info(f"Initializing Azure Storage Helper with output container: {config['azure_storage']['output_container']}")
+    storage_helper = AzureStorageHelper(
+        config["azure_storage"]["connection_string"],
+        config["azure_storage"]["input_container"],
+        config["azure_storage"]["output_container"],
+        logger
+    )
+    
+    pdf_processor = PDFProcessor(config, logger)
+    
+    logger.info(f"Initializing Azure OpenAI Client with {api_type} API")
+    ai_client = AzureOpenAIClient(config, logger)
+    
+    # [Rest of the existing code remains unchanged...]
