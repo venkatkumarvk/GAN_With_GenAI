@@ -1,0 +1,29 @@
+{
+  "azure_openai": {
+    "api_key": "your_api_key",
+    "api_version": "2024-02-01",
+    "azure_endpoint": "https://your-resource.openai.azure.com/",
+    "deployment_name": "your-deployment-name"
+  },
+  "azure_storage": {
+    "connection_string": "your_connection_string",
+    "input_container": "input-pdfs",
+    "output_container": "output-results",
+    "high_confidence_folder": "high_confidence/",
+    "low_confidence_folder": "low_confidence/"
+  },
+  "processing": {
+    "batch_size": 10,
+    "confidence_threshold": 85,
+    "timeout_seconds": 300,
+    "zoom_factor": 2.0,
+    "extraction_fields": ["invoice_number", "total_amount", "date"]
+  },
+  "archive": {
+    "base_folder": "archive",
+    "processed_folder": "processed",
+    "unprocessed_folder": "unprocessed", 
+    "zip_folder": "archives",
+    "cleanup_after_zip": true
+  }
+}
