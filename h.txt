@@ -62,6 +62,115 @@ class AzureStorageHelper:
         if self.logger:
             self.logger.info(f"Initialized AzureStorageHelper with input container: {input_container}, output container: {output_container}")
     
+    def list_blobs_in_folder(self, folder_path):
+        """
+        List all PDF blobs in a specific folder
+        
+        Parameters:
+        - folder_path: Folder path in blob storage (e.g., "inbounded/invoices/")
+        
+        Returns:
+        - List of blob names that are PDF files
+        """
+        try:
+            # Normalize folder path - ensure it ends with '/' if not empty
+            if folder_path and not folder_path.endswith('/'):
+                folder_path += '/'
+            
+            container_client = self.blob_service_client.get_container_client(self.input_container)
+            
+            # List all blobs with the folder prefix
+            blobs = container_client.list_blobs(name_starts_with=folder_path)
+            
+            pdf_blobs = []
+            for blob in blobs:
+                # Check if it's a PDF file (not a folder)
+                if blob.name.lower().endswith('.pdf'):
+                    pdf_blobs.append(blob.name)
+                    if self.logger:
+                        self.logger.debug(f"Found PDF blob: {blob.name}")
+            
+            if self.logger:
+                self.logger.info(f"Found {len(pdf_blobs)} PDF files in folder: {folder_path}")
+                if len(pdf_blobs) == 0:
+                    self.logger.warning(f"No PDF files found in folder: {folder_path}")
+                    # List all blobs to help debug
+                    all_blobs = list(container_client.list_blobs(name_starts_with=folder_path))
+                    self.logger.info(f"Total blobs in folder: {len(all_blobs)}")
+                    for blob in all_blobs:
+                        self.logger.info(f"  - {blob.name}")
+            
+            return pdf_blobs
+            
+        except Exception as e:
+            if self.logger:
+                self.logger.error(f"Error listing blobs in folder {folder_path}: {str(e)}")
+            return []
+    
+    def download_blob_to_memory(self, blob_name):
+        """
+        Download a blob to memory
+        
+        Parameters:
+        - blob_name: Full blob name/path
+        
+        Returns:
+        - Blob content as bytes or None if failed
+        """
+        try:
+            blob_client = self.blob_service_client.get_blob_client(
+                container=self.input_container, 
+                blob=blob_name
+            )
+            
+            blob_data = blob_client.download_blob().readall()
+            
+            if self.logger:
+                self.logger.debug(f"Downloaded blob: {blob_name} ({len(blob_data)} bytes)")
+            
+            return blob_data
+            
+        except Exception as e:
+            if self.logger:
+                self.logger.error(f"Error downloading blob {blob_name}: {str(e)}")
+            return None
+    
+    def upload_to_storage(self, blob_name, content, content_type):
+        """
+        Upload content to blob storage
+        
+        Parameters:
+        - blob_name: Destination blob name
+        - content: Content to upload
+        - content_type: MIME type
+        
+        Returns:
+        - Tuple of (success, url)
+        """
+        try:
+            blob_client = self.blob_service_client.get_blob_client(
+                container=self.output_container,
+                blob=blob_name
+            )
+            
+            blob_client.upload_blob(
+                content,
+                overwrite=True,
+                content_settings={'content_type': content_type}
+            )
+            
+            blob_url = blob_client.url
+            
+            if self.logger:
+                self.logger.info(f"Uploaded blob: {blob_name}")
+            
+            return True, blob_url
+            
+        except Exception as e:
+            if self.logger:
+                self.logger.error(f"Error uploading blob {blob_name}: {str(e)}")
+            return False, None
+    
     # ADD THESE NEW METHODS
     def move_blob_to_archive(self, source_blob_name, archive_folder_name, processed_status):
         """
