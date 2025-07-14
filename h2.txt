@@ -1,0 +1,498 @@
+import os
+import sys
+import json
+import argparse
+from pathlib import Path
+from datetime import datetime
+import logging
+
+from helper import AzureStorageHelper, PDFProcessor
+from llm import AzureOpenAIClient
+from logger import setup_logger
+
+
+def load_config(config_path):
+    """Load configuration from a JSON file."""
+    with open(config_path, 'r') as f:
+        return json.load(f)
+
+
+def process_azure_pdf_files(config, api_type, azure_folder, logger):
+    """
+    Process PDF files from Azure Blob Storage with archiving support.
+    
+    Parameters:
+    - config: Configuration dictionary
+    - api_type: 'batch' or 'general'
+    - azure_folder: Folder path in Azure Blob Storage
+    - logger: Logger instance
+    """
+    # Initialize helpers with archive container
+    archive_container = config["azure_storage"].get("input_archive_container")
+    logger.info(f"Initializing Azure Storage Helper with containers:")
+    logger.info(f"  Input: {config['azure_storage']['input_container']}")
+    logger.info(f"  Output: {config['azure_storage']['output_container']}")
+    logger.info(f"  Archive: {archive_container}")
+    
+    storage_helper = AzureStorageHelper(
+        config["azure_storage"]["connection_string"],
+        config["azure_storage"]["input_container"],
+        config["azure_storage"]["output_container"],
+        archive_container,
+        logger
+    )
+    
+    pdf_processor = PDFProcessor(config, logger)
+    
+    logger.info(f"Initializing Azure OpenAI Client with {api_type} API")
+    ai_client = AzureOpenAIClient(config, logger)
+    
+    # List PDF blobs in the specified folder
+    logger.info(f"Listing PDF files in Azure folder: {azure_folder}")
+    pdf_blobs = storage_helper.list_blobs_in_folder(azure_folder)
+    
+    if not pdf_blobs:
+        logger.warning(f"No PDF files found in folder: {azure_folder}")
+        return
+    
+    logger.info(f"Found {len(pdf_blobs)} PDF files to process")
+    
+    # Track processed and unprocessed files for archiving
+    processed_files = []
+    unprocessed_files = []
+    
+    # Process each PDF
+    for i, blob_name in enumerate(pdf_blobs):
+        file_processed_successfully = False
+        
+        try:
+            logger.info(f"Processing file {i+1}/{len(pdf_blobs)}: {blob_name}")
+            
+            # Download blob to memory
+            logger.debug(f"Downloading blob: {blob_name}")
+            blob_content = storage_helper.download_blob_to_memory(blob_name)
+            
+            if blob_content is None:
+                logger.error(f"Could not download blob: {blob_name}")
+                unprocessed_files.append(blob_name)
+                continue
+            
+            # Extract pages as base64 strings
+            filename = blob_name.split('/')[-1]
+            logger.info(f"Extracting pages from {filename}")
+            pages = pdf_processor.extract_pdf_pages(blob_content)
+            
+            if not pages:
+                logger.warning(f"No pages extracted from {filename}")
+                unprocessed_files.append(blob_name)
+                continue
+            
+            logger.info(f"Extracted {len(pages)} pages from {filename}")
+            
+            # Prepare batches for processing
+            batch_size = config["processing"]["batch_size"]
+            
+            all_results = []
+            batch_processing_successful = True
+            
+            for batch_start in range(0, len(pages), batch_size):
+                batch_end = min(batch_start + batch_size, len(pages))
+                batch_pages = pages[batch_start:batch_end]
+                
+                # Split into page numbers and base64 strings
+                page_nums = [p[0] for p in batch_pages]
+                base64_strings = [p[1] for p in batch_pages]
+                
+                # Create prompts
+                prompts = [pdf_processor.create_extraction_prompt() for _ in range(len(batch_pages))]
+                
+                logger.info(f"Processing batch of {len(batch_pages)} pages (pages {batch_start+1}-{batch_end})")
+                
+                # Process batch using specified API type
+                try:
+                    if api_type == "batch":
+                        logger.debug("Using batch API for processing")
+                        raw_results = ai_client.process_batch(base64_strings, prompts)
+                    else:
+                        logger.debug("Using general API for processing")
+                        raw_results = ai_client.process_general(base64_strings, prompts)
+                    
+                    # Process the results
+                    logger.debug("Processing batch results")
+                    processed_results = pdf_processor.process_batch_results(raw_results, page_nums)
+                    all_results.extend(processed_results)
+                    
+                    logger.info(f"Processed batch {batch_start+1}-{batch_end}")
+                except Exception as batch_error:
+                    logger.error(f"Error processing batch: {str(batch_error)}")
+                    batch_processing_successful = False
+                    break
+            
+            # Check if batch processing was successful
+            if not batch_processing_successful:
+                unprocessed_files.append(blob_name)
+                continue
+            
+            # Log classification results
+            for page_num, category, _ in all_results:
+                logger.info(f"Page {page_num+1} classified as: {category}")
+            
+            # Create CSV and determine confidence level
+            logger.info("Creating CSV from extraction results")
+            csv_content, invoice_number, total_amount = pdf_processor.create_csv_for_results(
+                all_results, filename
+            )
+            
+            if csv_content:
+                # Determine confidence level for folder structure
+                is_high_confidence = pdf_processor.has_high_confidence(all_results)
+                
+                # Determine folder path based on confidence
+                if is_high_confidence:
+                    folder_path = config["azure_storage"]["high_confidence_folder"]
+                    logger.info(f"{filename} has HIGH confidence (≥{config['processing']['confidence_threshold']}%)")
+                else:
+                    folder_path = config["azure_storage"]["low_confidence_folder"]
+                    logger.info(f"{filename} has LOW confidence (<{config['processing']['confidence_threshold']}%)")
+                
+                # Prepare filenames for upload
+                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                base_filename = os.path.splitext(filename)[0]
+                
+                # Upload CSV to blob storage
+                csv_blob_name = f"{folder_path}{base_filename}_{invoice_number}_{total_amount}_{timestamp}.csv"
+                logger.info(f"Uploading CSV to {csv_blob_name}")
+                csv_success, csv_url = storage_helper.upload_to_storage(
+                    csv_blob_name,
+                    csv_content,
+                    "text/csv"
+                )
+                
+                # Upload original PDF to appropriate folder
+                source_folder = "source_documents/" + folder_path
+                source_blob_name = f"{source_folder}{filename}"
+                logger.info(f"Uploading source PDF to {source_blob_name}")
+                source_success, source_url = storage_helper.upload_to_storage(
+                    source_blob_name,
+                    blob_content,
+                    "application/pdf"
+                )
+                
+                logger.info(f"CSV upload: {'Success' if csv_success else 'Failed'}")
+                logger.info(f"Source PDF upload: {'Success' if source_success else 'Failed'}")
+                
+                if csv_success and source_success:
+                    file_processed_successfully = True
+                    processed_files.append(blob_name)
+                    
+                    if csv_success:
+                        logger.info(f"CSV URL: {csv_url}")
+                    if source_success:
+                        logger.info(f"Source PDF URL: {source_url}")
+                else:
+                    unprocessed_files.append(blob_name)
+            else:
+                logger.warning(f"No extractable content found in {filename}")
+                unprocessed_files.append(blob_name)
+        
+        except Exception as e:
+            logger.error(f"Error processing {blob_name}: {str(e)}", exc_info=True)
+            unprocessed_files.append(blob_name)
+    
+    # Handle archiving based on configuration
+    blob_input_move_on = config.get("archive", {}).get("blob_input_move_on", False)
+    
+    if blob_input_move_on:
+        logger.info("Starting archiving process...")
+        logger.info(f"Files to archive - Processed: {len(processed_files)}, Unprocessed: {len(unprocessed_files)}")
+        
+        if processed_files or unprocessed_files:
+            archive_config = config.get("archive", {})
+            success, archive_url = storage_helper.move_files_to_archive(
+                processed_files, 
+                unprocessed_files, 
+                archive_config
+            )
+            
+            if success:
+                logger.info(f"Successfully archived all files to: {archive_url}")
+            else:
+                logger.error("Failed to archive files")
+        else:
+            logger.info("No files to archive")
+    else:
+        logger.info("Archiving is disabled (blob_input_move_on = False)")
+    
+    # Summary
+    logger.info("Processing complete!")
+    logger.info(f"Summary:")
+    logger.info(f"  Total files processed: {len(pdf_blobs)}")
+    logger.info(f"  Successfully processed: {len(processed_files)}")
+    logger.info(f"  Failed to process: {len(unprocessed_files)}")
+    
+    if processed_files:
+        logger.info(f"  Successfully processed files: {', '.join([f.split('/')[-1] for f in processed_files])}")
+    if unprocessed_files:
+        logger.info(f"  Failed files: {', '.join([f.split('/')[-1] for f in unprocessed_files])}")
+
+
+def process_local_pdf_files(config, api_type, local_folder, logger):
+    """
+    Process PDF files from a local folder.
+    Note: Local processing doesn't support archiving since files are local.
+    
+    Parameters:
+    - config: Configuration dictionary
+    - api_type: 'batch' or 'general'
+    - local_folder: Folder path in local filesystem
+    - logger: Logger instance
+    """
+    # Initialize helpers (no archiving for local files)
+    logger.info(f"Initializing Azure Storage Helper with output container: {config['azure_storage']['output_container']}")
+    storage_helper = AzureStorageHelper(
+        config["azure_storage"]["connection_string"],
+        config["azure_storage"]["input_container"],
+        config["azure_storage"]["output_container"],
+        logger=logger
+    )
+    
+    pdf_processor = PDFProcessor(config, logger)
+    
+    logger.info(f"Initializing Azure OpenAI Client with {api_type} API")
+    ai_client = AzureOpenAIClient(config, logger)
+    
+    # Check if folder exists
+    folder_path = Path(local_folder)
+    if not folder_path.exists() or not folder_path.is_dir():
+        logger.error(f"Folder not found: {local_folder}")
+        return
+    
+    # Find all PDF files in the folder
+    logger.info(f"Scanning local folder: {local_folder}")
+    pdf_files = list(folder_path.glob("*.pdf"))
+    
+    if not pdf_files:
+        logger.warning(f"No PDF files found in folder: {local_folder}")
+        return
+    
+    logger.info(f"Found {len(pdf_files)} PDF files to process")
+    
+    # Track processed and unprocessed files
+    processed_files = []
+    unprocessed_files = []
+    
+    # Process each PDF
+    for i, pdf_file in enumerate(pdf_files):
+        file_processed_successfully = False
+        
+        try:
+            logger.info(f"Processing file {i+1}/{len(pdf_files)}: {pdf_file.name}")
+            
+            # Read file content
+            logger.debug(f"Reading file: {pdf_file}")
+            with open(pdf_file, 'rb') as f:
+                file_content = f.read()
+            
+            # Extract pages as base64 strings
+            filename = pdf_file.name
+            logger.info(f"Extracting pages from {filename}")
+            pages = pdf_processor.extract_pdf_pages(file_content)
+            
+            if not pages:
+                logger.warning(f"No pages extracted from {filename}")
+                unprocessed_files.append(filename)
+                continue
+            
+            logger.info(f"Extracted {len(pages)} pages from {filename}")
+            
+            # Prepare batches for processing
+            batch_size = config["processing"]["batch_size"]
+            
+            all_results = []
+            batch_processing_successful = True
+            
+            for batch_start in range(0, len(pages), batch_size):
+                batch_end = min(batch_start + batch_size, len(pages))
+                batch_pages = pages[batch_start:batch_end]
+                
+                # Split into page numbers and base64 strings
+                page_nums = [p[0] for p in batch_pages]
+                base64_strings = [p[1] for p in batch_pages]
+                
+                # Create prompts
+                prompts = [pdf_processor.create_extraction_prompt() for _ in range(len(batch_pages))]
+                
+                logger.info(f"Processing batch of {len(batch_pages)} pages (pages {batch_start+1}-{batch_end})")
+                
+                # Process batch using specified API type
+                try:
+                    if api_type == "batch":
+                        logger.debug("Using batch API for processing")
+                        raw_results = ai_client.process_batch(base64_strings, prompts)
+                    else:
+                        logger.debug("Using general API for processing")
+                        raw_results = ai_client.process_general(base64_strings, prompts)
+                    
+                    # Process the results
+                    logger.debug("Processing batch results")
+                    processed_results = pdf_processor.process_batch_results(raw_results, page_nums)
+                    all_results.extend(processed_results)
+                    
+                    logger.info(f"Processed batch {batch_start+1}-{batch_end}")
+                except Exception as batch_error:
+                    logger.error(f"Error processing batch: {str(batch_error)}")
+                    batch_processing_successful = False
+                    break
+            
+            # Check if batch processing was successful
+            if not batch_processing_successful:
+                unprocessed_files.append(filename)
+                continue
+            
+            # Log classification results
+            for page_num, category, _ in all_results:
+                logger.info(f"Page {page_num+1} classified as: {category}")
+            
+            # Create CSV and determine confidence level
+            logger.info("Creating CSV from extraction results")
+            csv_content, invoice_number, total_amount = pdf_processor.create_csv_for_results(
+                all_results, filename
+            )
+            
+            if csv_content:
+                # Determine confidence level for folder structure
+                is_high_confidence = pdf_processor.has_high_confidence(all_results)
+                
+                # Determine folder path based on confidence
+                if is_high_confidence:
+                    folder_path = config["azure_storage"]["high_confidence_folder"]
+                    logger.info(f"{filename} has HIGH confidence (≥{config['processing']['confidence_threshold']}%)")
+                else:
+                    folder_path = config["azure_storage"]["low_confidence_folder"]
+                    logger.info(f"{filename} has LOW confidence (<{config['processing']['confidence_threshold']}%)")
+                
+                # Prepare filenames for upload
+                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                base_filename = os.path.splitext(filename)[0]
+                
+                # Upload CSV to blob storage
+                csv_blob_name = f"{folder_path}{base_filename}_{invoice_number}_{total_amount}_{timestamp}.csv"
+                logger.info(f"Uploading CSV to {csv_blob_name}")
+                csv_success, csv_url = storage_helper.upload_to_storage(
+                    csv_blob_name,
+                    csv_content,
+                    "text/csv"
+                )
+                
+                # Upload original PDF to appropriate folder
+                source_folder = "source_documents/" + folder_path
+                source_blob_name = f"{source_folder}{filename}"
+                logger.info(f"Uploading source PDF to {source_blob_name}")
+                source_success, source_url = storage_helper.upload_to_storage(
+                    source_blob_name,
+                    file_content,
+                    "application/pdf"
+                )
+                
+                logger.info(f"CSV upload: {'Success' if csv_success else 'Failed'}")
+                logger.info(f"Source PDF upload: {'Success' if source_success else 'Failed'}")
+                
+                if csv_success and source_success:
+                    file_processed_successfully = True
+                    processed_files.append(filename)
+                    
+                    if csv_success:
+                        logger.info(f"CSV URL: {csv_url}")
+                    if source_success:
+                        logger.info(f"Source PDF URL: {source_url}")
+                else:
+                    unprocessed_files.append(filename)
+                
+                # Also save the CSV locally
+                output_dir = Path("output")
+                output_dir.mkdir(exist_ok=True)
+                
+                confidence_dir = output_dir / ("high_confidence" if is_high_confidence else "low_confidence")
+                confidence_dir.mkdir(exist_ok=True)
+                
+                output_path = confidence_dir / f"{base_filename}_{invoice_number}_{total_amount}_{timestamp}.csv"
+                with open(output_path, "w") as f:
+                    f.write(csv_content)
+                
+                logger.info(f"CSV saved locally to: {output_path}")
+            else:
+                logger.warning(f"No extractable content found in {filename}")
+                unprocessed_files.append(filename)
+        
+        except Exception as e:
+            logger.error(f"Error processing {pdf_file.name}: {str(e)}", exc_info=True)
+            unprocessed_files.append(filename)
+    
+    # Summary for local processing
+    logger.info("Processing complete!")
+    logger.info(f"Summary:")
+    logger.info(f"  Total files processed: {len(pdf_files)}")
+    logger.info(f"  Successfully processed: {len(processed_files)}")
+    logger.info(f"  Failed to process: {len(unprocessed_files)}")
+    logger.info("Note: Local file archiving is not supported. Files remain in original location.")
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Process PDF files using Azure OpenAI with archiving support")
+    parser.add_argument("--apitype", choices=["general", "batch"], required=True, 
+                      help="API type to use (general or batch)")
+    parser.add_argument("--source", choices=["azure", "local"], required=True,
+                      help="Source location of PDF files (azure or local)")
+    parser.add_argument("--folder", required=True, 
+                      help="Folder path (in Azure Blob Storage or local filesystem)")
+    parser.add_argument("--config", default="config.json", 
+                      help="Path to configuration file")
+    parser.add_argument("--log-level", choices=["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"],
+                     default="INFO", help="Set the logging level")
+    parser.add_argument("--no-archive", action="store_true",
+                     help="Disable archiving regardless of config setting")
+    
+    args = parser.parse_args()
+    
+    try:
+        # Load configuration
+        config = load_config(args.config)
+        
+        # Override archive setting if --no-archive is specified
+        if args.no_archive:
+            if "archive" not in config:
+                config["archive"] = {}
+            config["archive"]["blob_input_move_on"] = False
+        
+        # Set up logger
+        log_level = getattr(logging, args.log_level)
+        logger = setup_logger(config, log_level)
+        
+        logger.info(f"Starting PDF processing with source: {args.source}, folder: {args.folder}, API type: {args.apitype}")
+        
+        # Log archiving configuration
+        archive_enabled = config.get("archive", {}).get("blob_input_move_on", False)
+        if args.source == "azure":
+            logger.info(f"Archiving enabled: {archive_enabled}")
+            if archive_enabled:
+                archive_container = config["azure_storage"].get("input_archive_container")
+                logger.info(f"Archive container: {archive_container}")
+        
+        # Process PDF files from either Azure or local folder
+        if args.source == "azure":
+            process_azure_pdf_files(config, args.apitype, args.folder, logger)
+        else:  # local
+            process_local_pdf_files(config, args.apitype, args.folder, logger)
+        
+    except Exception as e:
+        if 'logger' in locals():
+            logger.error(f"Unhandled error: {str(e)}", exc_info=True)
+        else:
+            print(f"Error: {str(e)}")
+        return 1
+    
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
