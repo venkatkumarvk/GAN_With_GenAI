@@ -1,0 +1,84 @@
+import os
+import logging
+from datetime import datetime
+from pathlib import Path
+
+def setup_logger(config, log_level=logging.INFO):
+    """
+    Set up and configure a logger with archiving information.
+    
+    Parameters:
+    - config: Configuration dictionary
+    - log_level: Logging level (default: INFO)
+    
+    Returns:
+    - Configured logger
+    """
+    # Create logs directory if it doesn't exist
+    log_dir = Path("logs")
+    log_dir.mkdir(exist_ok=True)
+    
+    # Create a timestamp for the log file
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    
+    # Set up file handler
+    log_file = log_dir / f"pdf_processing_{timestamp}.log"
+    
+    # Configure logging
+    logging.basicConfig(
+        level=log_level,
+        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+        handlers=[
+            logging.FileHandler(log_file),
+            logging.StreamHandler()  # Also print to console
+        ]
+    )
+    
+    # Create logger
+    logger = logging.getLogger("pdf_processor")
+    
+    # Log configuration details
+    logger.info("="*60)
+    logger.info("Starting PDF processing with archiving support")
+    logger.info("="*60)
+    logger.info(f"Log file: {log_file}")
+    
+    # Azure OpenAI configuration
+    logger.info("Azure OpenAI Configuration:")
+    logger.info(f"  API version: {config['azure_openai']['api_version']}")
+    logger.info(f"  Deployment: {config['azure_openai']['deployment_name']}")
+    logger.info(f"  Endpoint: {config['azure_openai']['azure_endpoint']}")
+    
+    # Processing configuration
+    logger.info("Processing Configuration:")
+    logger.info(f"  Batch size: {config['processing']['batch_size']}")
+    logger.info(f"  Confidence threshold: {config['processing']['confidence_threshold']}%")
+    logger.info(f"  Timeout: {config['processing']['timeout_seconds']} seconds")
+    logger.info(f"  Zoom factor: {config['processing']['zoom_factor']}")
+    
+    # Storage configuration
+    logger.info("Storage Configuration:")
+    logger.info(f"  Input container: {config['azure_storage']['input_container']}")
+    logger.info(f"  Output container: {config['azure_storage']['output_container']}")
+    logger.info(f"  High confidence folder: {config['azure_storage']['high_confidence_folder']}")
+    logger.info(f"  Low confidence folder: {config['azure_storage']['low_confidence_folder']}")
+    
+    # Archive configuration
+    archive_config = config.get("archive", {})
+    archive_enabled = archive_config.get("blob_input_move_on", False)
+    
+    logger.info("Archive Configuration:")
+    logger.info(f"  Archiving enabled: {archive_enabled}")
+    
+    if archive_enabled:
+        archive_container = config["azure_storage"].get("input_archive_container")
+        logger.info(f"  Archive container: {archive_container}")
+        logger.info(f"  Archive name format: {archive_config.get('archive_name_format', 'archive_{timestamp}.zip')}")
+        logger.info(f"  Processed folder in archive: {archive_config.get('processed_folder', 'processed/')}")
+        logger.info(f"  Unprocessed folder in archive: {archive_config.get('unprocessed_folder', 'unprocessed/')}")
+    else:
+        logger.info("  Archive container: Not configured (archiving disabled)")
+    
+    logger.info("="*60)
+    
+    return logger
