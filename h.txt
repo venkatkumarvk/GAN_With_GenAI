@@ -1,0 +1,34 @@
+def list_blobs_in_folder(self, folder_path):
+    """List all PDF blobs in a specific folder."""
+    try:
+        container_client = self.blob_service_client.get_container_client(self.input_container)
+        blob_list = []
+        
+        # Handle root folder case
+        if folder_path in ["", "/", None]:
+            self.logger.info("Scanning container root for PDFs")
+            for blob in container_client.list_blobs():
+                if blob.name.lower().endswith('.pdf') and '/' not in blob.name:
+                    blob_list.append(blob.name)
+        else:
+            # Ensure folder path ends with /
+            if not folder_path.endswith('/'):
+                folder_path += '/'
+            
+            self.logger.info(f"Scanning folder: {folder_path}")
+            for blob in container_client.list_blobs(name_starts_with=folder_path):
+                if blob.name.lower().endswith('.pdf'):
+                    blob_list.append(blob.name)
+        
+        self.logger.info(f"Found {len(blob_list)} PDF files in folder: {folder_path}")
+        
+        # Log first few files for debugging
+        if blob_list:
+            self.logger.info("Sample files found:")
+            for i, blob_name in enumerate(blob_list[:3]):
+                self.logger.info(f"  {i+1}. {blob_name}")
+        
+        return blob_list
+    except Exception as e:
+        self.logger.error(f"Error listing blobs in folder {folder_path}: {str(e)}")
+        return []
