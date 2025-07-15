@@ -69,6 +69,7 @@ class InsertSQLGenerator:
         }
 
         all_insert_sqls = []
+        total_insert_count = 0
 
         for i in range(len(self.category_order) - 1):
             cat_src = self.category_order[i]
@@ -78,23 +79,27 @@ class InsertSQLGenerator:
             tgt_map = mappings_per_cat[cat_tgt]
 
             insert_statements = []
+            insert_count = 0
 
             for src_table, src_columns in src_map.items():
                 for tgt_table, tgt_columns in tgt_map.items():
+                    # Use min length to avoid mismatch
                     for src_col, tgt_col in zip(src_columns, tgt_columns):
                         sql = self.generate_insert_sql(src_table, src_col, tgt_table, tgt_col)
                         insert_statements.append(sql)
                         all_insert_sqls.append(sql)
+                        insert_count += 1
+                        total_insert_count += 1
 
-            # Save individual category pair file
             file_name = f"{cat_src}_to_{cat_tgt}.sql"
             with open(os.path.join(self.output_folder, file_name), "w") as f:
                 f.write("\n".join(insert_statements))
 
-            print(f"Generated insert SQLs: {cat_src} ➝ {cat_tgt}")
+            print(f"✅ Generated {insert_count} INSERT statements for: {cat_src} → {cat_tgt}")
 
         # Save master insert file
         with open(os.path.join(self.output_folder, "all_insert_statements.sql"), "w") as f:
             f.write("\n".join(all_insert_sqls))
 
-        print(f"\n✅ All INSERT statements generated in: {self.output_folder}")
+        print(f"\n📦 Total INSERT statements generated: {total_insert_count}")
+        print(f"📁 Output folder: {self.output_folder}")
