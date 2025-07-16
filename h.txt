@@ -2,6 +2,12 @@
   "store_csv": true,
   "store_sql": false
 }
+
+"sql_server": {
+  "connection_string": "Driver={ODBC Driver 17 for SQL Server};Server=YOUR_SERVER_NAME;Database=YOUR_DB_NAME;UID=your_user;PWD=your_password;",
+  "table_name": "FileLogs"
+}
+
 --------------
 
   # logger_helpers.py
