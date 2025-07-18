@@ -1,32 +1,55 @@
 # logger_helpers.py
+# logger_helpers.py
 
-import pandas as pd
 import pyodbc
+import pandas as pd
 from pathlib import Path
 
 LOG_CSV_PATH = Path("logs/process_log.csv")
 
-def log_file_status(
-    document_id,
-    filename,
-    source_path,
-    target_path,
-    archive_path,
-    status,
-    status_desc="",
-    config=None
-):
-    log_config = config.get("logging", {}) if config else {}
+
+def log_file_status_begin(filename, source_path, target_path, archive_path, status, status_desc, config):
+    """
+    Inserts a BEGIN row and returns the generated documentProcessorKey
+    """
+    log_config = config.get("logging", {})
     store_csv = log_config.get("store_csv", True)
     store_sql = log_config.get("store_sql", False)
+    document_key_out = None
 
-    # -------------------------
-    # 1. LOG TO CSV (optional)
-    # -------------------------
+    if store_sql:
+        try:
+            sql_conf = config.get("sql_server", {})
+            conn_str = sql_conf["connection_string"]
+
+            conn = pyodbc.connect(conn_str)
+            cursor = conn.cursor()
+
+            query = """
+                DECLARE @OutputKey BIGINT;
+                EXEC [dbo].[uspXUpdateDocumentProcessor]
+                    @documentProcessorKey = NULL,
+                    @fileName = ?,
+                    @sourceFilePath = ?,
+                    @targetFilePath = ?,
+                    @archiveFilePath = ?,
+                    @status = ?,
+                    @statusDesc = ?,
+                    @documentProcessorKeyFlag = 1,
+                    @returnDocumentProcessorKey = @OutputKey OUTPUT;
+                SELECT @OutputKey;
+            """
+            document_key_out = cursor.execute(query, filename, source_path, target_path, archive_path, status, status_desc).fetchval()
+
+            cursor.close()
+            conn.close()
+        except Exception as e:
+            print(f"[SQL LOGGING ERROR - BEGIN] {e}")
+
     if store_csv:
         try:
             log_entry = {
-                "DocumentID": document_id,
+                "DocumentProcessorKey": document_key_out,
                 "FileName": filename,
                 "SourceFilePath": source_path,
                 "TargetFilePath": target_path,
@@ -43,59 +66,39 @@ def log_file_status(
         except Exception as e:
             print(f"[CSV LOGGING ERROR] {e}")
 
-    # -------------------------
-    # 2. LOG TO SQL SERVER
-    # -------------------------
+    return document_key_out
+
+
+def log_file_status_update(document_id, filename, source_path, target_path, archive_path, status, status_desc, config):
+    """
+    Updates existing log row using documentProcessorKey
+    """
+    log_config = config.get("logging", {})
+    store_sql = log_config.get("store_sql", False)
+
     if store_sql:
         try:
             sql_conf = config.get("sql_server", {})
             conn_str = sql_conf["connection_string"]
-            proc_name = sql_conf.get("procedure_name", "LogFileStatus")
 
             conn = pyodbc.connect(conn_str)
             cursor = conn.cursor()
 
-            cursor.execute(f"""
-                EXEC {proc_name} ?, ?, ?, ?, ?, ?, ?
+            cursor.execute("""
+                EXEC [dbo].[uspXUpdateDocumentProcessor]
+                    @documentProcessorKey = ?,
+                    @fileName = ?,
+                    @sourceFilePath = ?,
+                    @targetFilePath = ?,
+                    @archiveFilePath = ?,
+                    @status = ?,
+                    @statusDesc = ?,
+                    @documentProcessorKeyFlag = 0,
+                    @returnDocumentProcessorKey = NULL;
             """, document_id, filename, source_path, target_path, archive_path, status, status_desc)
 
             conn.commit()
             cursor.close()
             conn.close()
-
         except Exception as e:
-            print(f"[SQL STORED PROC ERROR] {e}")
----
-import uuid
-document_id = str(uuid.uuid4())
-
-log_file_status(
-    document_id=document_id,
-    filename=blob_name.split("/")[-1],
-    source_path=full_blob_path,
-    target_path="",
-    archive_path="",
-    status="BEGIN",
-    status_desc="Started processing",
-    config=config
-)
-log_summary.append({
-    "document_id": document_id,
-    "filename": filename,
-    "source_path": full_blob_path,
-    "target_path": csv_blob_name if file_processed_successfully else "N/A",
-    "status": "COMPLETE" if file_processed_successfully else "FAILURE",
-    "status_desc": "Successfully processed and uploaded"
-        if file_processed_successfully else "Failed to process or upload file"
-})
-
-log_file_status(
-    document_id=entry["document_id"],
-    filename=entry["filename"],
-    source_path=entry["source_path"],
-    target_path=entry["target_path"],
-    archive_path=entry["archive_path"],
-    status=entry["status"],
-    status_desc=entry["status_desc"],
-    config=config
-)
+            print(f"[SQL LOGGING ERROR - UPDATE] {e}")
