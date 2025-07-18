@@ -4,21 +4,18 @@
 }
 
 ---
-import pyodbc
-import pandas as pd
-from pathlib import Path
-
-LOG_CSV_PATH = Path("logs/process_log.csv")
-
 def log_file_status(filename, source_path, target_path, archive_path, status, status_desc="", config=None):
+    # Load config
     log_config = config.get("logging", {}) if config else {}
     store_csv = log_config.get("store_csv", True)
     store_sql = log_config.get("store_sql", False)
 
-    # CSV log
+    # CSV log (optional)
     if store_csv:
         try:
-            row = {
+            import pandas as pd
+            from pathlib import Path
+            log_entry = {
                 "FileName": filename,
                 "SourceFilePath": source_path,
                 "TargetFilePath": target_path,
@@ -26,8 +23,9 @@ def log_file_status(filename, source_path, target_path, archive_path, status, st
                 "Status": status,
                 "StatusDesc": status_desc
             }
-            df = pd.DataFrame([row])
-            LOG_CSV_PATH.parent.mkdir(parents=True, exist_ok=True)
+            df = pd.DataFrame([log_entry])
+            LOG_CSV_PATH = Path("logs/process_log.csv")
+            LOG_CSV_PATH.parent.mkdir(exist_ok=True)
             if not LOG_CSV_PATH.exists():
                 df.to_csv(LOG_CSV_PATH, index=False)
             else:
@@ -35,9 +33,10 @@ def log_file_status(filename, source_path, target_path, archive_path, status, st
         except Exception as e:
             print(f"[CSV LOGGING ERROR] {e}")
 
-    # SQL via stored procedure
+    # SQL log using named parameters
     if store_sql:
         try:
+            import pyodbc
             sql_conf = config.get("sql_server", {})
             conn_str = sql_conf["connection_string"]
             proc_name = sql_conf.get("procedure_name", "LogFileStatus")
@@ -45,12 +44,20 @@ def log_file_status(filename, source_path, target_path, archive_path, status, st
             conn = pyodbc.connect(conn_str)
             cursor = conn.cursor()
 
-            cursor.execute(f"EXEC {proc_name} ?, ?, ?, ?, ?, ?", 
-                filename, source_path, target_path, archive_path, status, status_desc)
+            cursor.execute(f"""
+                EXEC {proc_name} 
+                    @FileName = ?, 
+                    @SourceFilePath = ?, 
+                    @TargetFilePath = ?, 
+                    @ArchiveFilePath = ?, 
+                    @Status = ?, 
+                    @StatusDesc = ?
+            """, filename, source_path, target_path, archive_path, status, status_desc)
 
             conn.commit()
             cursor.close()
             conn.close()
+
         except Exception as e:
             print(f"[SQL STORED PROC ERROR] {e}")
 
