@@ -1,0 +1,90 @@
+"sql_server": {
+  "connection_string": "Driver={ODBC Driver 17 for SQL Server};Server=localhost\\SQLEXPRESS;Database=LoggingDB;UID=sa;PWD=YourPassword123;",
+  "procedure_name": "LogFileStatus"
+}
+
+---
+import pyodbc
+import pandas as pd
+from pathlib import Path
+
+LOG_CSV_PATH = Path("logs/process_log.csv")
+
+def log_file_status(filename, source_path, target_path, archive_path, status, status_desc="", config=None):
+    log_config = config.get("logging", {}) if config else {}
+    store_csv = log_config.get("store_csv", True)
+    store_sql = log_config.get("store_sql", False)
+
+    # CSV log
+    if store_csv:
+        try:
+            row = {
+                "FileName": filename,
+                "SourceFilePath": source_path,
+                "TargetFilePath": target_path,
+                "ArchiveFilePath": archive_path,
+                "Status": status,
+                "StatusDesc": status_desc
+            }
+            df = pd.DataFrame([row])
+            LOG_CSV_PATH.parent.mkdir(parents=True, exist_ok=True)
+            if not LOG_CSV_PATH.exists():
+                df.to_csv(LOG_CSV_PATH, index=False)
+            else:
+                df.to_csv(LOG_CSV_PATH, mode='a', header=False, index=False)
+        except Exception as e:
+            print(f"[CSV LOGGING ERROR] {e}")
+
+    # SQL via stored procedure
+    if store_sql:
+        try:
+            sql_conf = config.get("sql_server", {})
+            conn_str = sql_conf["connection_string"]
+            proc_name = sql_conf.get("procedure_name", "LogFileStatus")
+
+            conn = pyodbc.connect(conn_str)
+            cursor = conn.cursor()
+
+            cursor.execute(f"EXEC {proc_name} ?, ?, ?, ?, ?, ?", 
+                filename, source_path, target_path, archive_path, status, status_desc)
+
+            conn.commit()
+            cursor.close()
+            conn.close()
+        except Exception as e:
+            print(f"[SQL STORED PROC ERROR] {e}")
+
+---
+
+log_file_status(
+    filename=blob_name.split("/")[-1],
+    source_path=blob_name,
+    target_path="",
+    archive_path="",
+    status="BEGIN",
+    status_desc="Started processing file",
+    config=config
+)
+
+---
+log_summary.append({
+    "filename": blob_name.split("/")[-1],
+    "source_path": blob_name,
+    "target_path": csv_blob_name if file_processed_successfully else "N/A",
+    "status": "COMPLETE" if file_processed_successfully else "FAILURE",
+    "status_desc": "Successfully processed and uploaded" if file_processed_successfully else "Processing failed"
+})
+
+---
+for entry in log_summary:
+    entry["archive_path"] = archive_url if success else "N/A"
+    
+    log_file_status(
+        filename=entry["filename"],
+        source_path=entry["source_path"],
+        target_path=entry["target_path"],
+        archive_path=entry["archive_path"],
+        status=entry["status"],
+        status_desc=entry["status_desc"],
+        config=config
+    )
