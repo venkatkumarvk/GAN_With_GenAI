@@ -79,6 +79,16 @@ log_file_status(
     status_desc="Started processing",
     config=config
 )
+log_summary.append({
+    "document_id": document_id,
+    "filename": filename,
+    "source_path": full_blob_path,
+    "target_path": csv_blob_name if file_processed_successfully else "N/A",
+    "status": "COMPLETE" if file_processed_successfully else "FAILURE",
+    "status_desc": "Successfully processed and uploaded"
+        if file_processed_successfully else "Failed to process or upload file"
+})
+
 log_file_status(
     document_id=entry["document_id"],
     filename=entry["filename"],
