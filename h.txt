@@ -1,79 +1,21 @@
 # logger_helpers.py
-# logger_helpers.py
 
 import pyodbc
 import pandas as pd
 from pathlib import Path
+import random
 
 LOG_CSV_PATH = Path("logs/process_log.csv")
 
-
 def log_file_status_begin(filename, source_path, target_path, archive_path, status, status_desc, config):
     """
-    Inserts a BEGIN row and returns the generated documentProcessorKey
+    Inserts a BEGIN row by calling the stored procedure with NULL documentProcessorKey.
+    Generates and returns a local random BIGINT as document_id.
     """
+    document_id = random.getrandbits(63)  # Simulate a BIGINT document key locally
+
     log_config = config.get("logging", {})
     store_csv = log_config.get("store_csv", True)
-    store_sql = log_config.get("store_sql", False)
-    document_key_out = None
-
-    if store_sql:
-        try:
-            sql_conf = config.get("sql_server", {})
-            conn_str = sql_conf["connection_string"]
-
-            conn = pyodbc.connect(conn_str)
-            cursor = conn.cursor()
-
-            query = """
-                DECLARE @OutputKey BIGINT;
-                EXEC [dbo].[uspXUpdateDocumentProcessor]
-                    @documentProcessorKey = NULL,
-                    @fileName = ?,
-                    @sourceFilePath = ?,
-                    @targetFilePath = ?,
-                    @archiveFilePath = ?,
-                    @status = ?,
-                    @statusDesc = ?,
-                    @documentProcessorKeyFlag = 1,
-                    @returnDocumentProcessorKey = @OutputKey OUTPUT;
-                SELECT @OutputKey;
-            """
-            document_key_out = cursor.execute(query, filename, source_path, target_path, archive_path, status, status_desc).fetchval()
-
-            cursor.close()
-            conn.close()
-        except Exception as e:
-            print(f"[SQL LOGGING ERROR - BEGIN] {e}")
-
-    if store_csv:
-        try:
-            log_entry = {
-                "DocumentProcessorKey": document_key_out,
-                "FileName": filename,
-                "SourceFilePath": source_path,
-                "TargetFilePath": target_path,
-                "ArchiveFilePath": archive_path,
-                "Status": status,
-                "StatusDesc": status_desc
-            }
-            df = pd.DataFrame([log_entry])
-            LOG_CSV_PATH.parent.mkdir(parents=True, exist_ok=True)
-            if not LOG_CSV_PATH.exists():
-                df.to_csv(LOG_CSV_PATH, index=False)
-            else:
-                df.to_csv(LOG_CSV_PATH, mode='a', header=False, index=False)
-        except Exception as e:
-            print(f"[CSV LOGGING ERROR] {e}")
-
-    return document_key_out
-
-
-def log_file_status_update(document_id, filename, source_path, target_path, archive_path, status, status_desc, config):
-    """
-    Updates existing log row using documentProcessorKey
-    """
-    log_config = config.get("logging", {})
     store_sql = log_config.get("store_sql", False)
 
     if store_sql:
@@ -92,13 +34,64 @@ def log_file_status_update(document_id, filename, source_path, target_path, arch
                     @targetFilePath = ?,
                     @archiveFilePath = ?,
                     @status = ?,
-                    @statusDesc = ?,
-                    @documentProcessorKeyFlag = 0,
-                    @returnDocumentProcessorKey = NULL;
-            """, document_id, filename, source_path, target_path, archive_path, status, status_desc)
+                    @statusDesc = ?;
+            """, None, filename, source_path, target_path, archive_path, status, status_desc)
 
             conn.commit()
             cursor.close()
             conn.close()
+
         except Exception as e:
-            print(f"[SQL LOGGING ERROR - UPDATE] {e}")
+            print(f"[SQL LOGGING ERROR - BEGIN] {e}")
+
+    if store_csv:
+        try:
+            log_entry = {
+                "DocumentProcessorKey": document_id,
+                "FileName": filename,
+                "SourceFilePath": source_path,
+                "TargetFilePath": target_path,
+                "ArchiveFilePath": archive_path,
+                "Status": status,
+                "StatusDesc": status_desc
+            }
+            df = pd.DataFrame([log_entry])
+            LOG_CSV_PATH.parent.mkdir(parents=True, exist_ok=True)
+            if not LOG_CSV_PATH.exists():
+                df.to_csv(LOG_CSV_PATH, index=False)
+            else:
+                df.to_csv(LOG_CSV_PATH, mode='a', header=False, index=False)
+        except Exception as e:
+            print(f"[CSV LOGGING ERROR] {e}")
+
+    return document_id
+
+
+def log_file_status_update(document_id, filename, source_path, target_path, archive_path, status, status_desc, config):
+    """
+    Updates the row for this document by calling the stored procedure with a known document_id.
+    """
+    try:
+        sql_conf = config.get("sql_server", {})
+        conn_str = sql_conf["connection_string"]
+
+        conn = pyodbc.connect(conn_str)
+        cursor = conn.cursor()
+
+        cursor.execute("""
+            EXEC [dbo].[uspXUpdateDocumentProcessor]
+                @documentProcessorKey = ?,
+                @fileName = ?,
+                @sourceFilePath = ?,
+                @targetFilePath = ?,
+                @archiveFilePath = ?,
+                @status = ?,
+                @statusDesc = ?;
+        """, document_id, filename, source_path, target_path, archive_path, status, status_desc)
+
+        conn.commit()
+        cursor.close()
+        conn.close()
+
+    except Exception as e:
+        print(f"[SQL LOGGING ERROR - UPDATE] {e}")
