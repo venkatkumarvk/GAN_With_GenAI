@@ -1,97 +1,588 @@
-"sql_server": {
-  "connection_string": "Driver={ODBC Driver 17 for SQL Server};Server=localhost\\SQLEXPRESS;Database=LoggingDB;UID=sa;PWD=YourPassword123;",
-  "procedure_name": "LogFileStatus"
-}
+help
+import pyodbc
+import logging
+from datetime import datetime
+from typing import Optional, Tuple
 
----
-def log_file_status(filename, source_path, target_path, archive_path, status, status_desc="", config=None):
-    # Load config
-    log_config = config.get("logging", {}) if config else {}
-    store_csv = log_config.get("store_csv", True)
-    store_sql = log_config.get("store_sql", False)
 
-    # CSV log (optional)
-    if store_csv:
-        try:
-            import pandas as pd
-            from pathlib import Path
-            log_entry = {
-                "FileName": filename,
-                "SourceFilePath": source_path,
-                "TargetFilePath": target_path,
-                "ArchiveFilePath": archive_path,
-                "Status": status,
-                "StatusDesc": status_desc
-            }
-            df = pd.DataFrame([log_entry])
-            LOG_CSV_PATH = Path("logs/process_log.csv")
-            LOG_CSV_PATH.parent.mkdir(exist_ok=True)
-            if not LOG_CSV_PATH.exists():
-                df.to_csv(LOG_CSV_PATH, index=False)
-            else:
-                df.to_csv(LOG_CSV_PATH, mode='a', header=False, index=False)
-        except Exception as e:
-            print(f"[CSV LOGGING ERROR] {e}")
-
-    # SQL log using named parameters
-    if store_sql:
-        try:
-            import pyodbc
-            sql_conf = config.get("sql_server", {})
-            conn_str = sql_conf["connection_string"]
-            proc_name = sql_conf.get("procedure_name", "LogFileStatus")
-
-            conn = pyodbc.connect(conn_str)
-            cursor = conn.cursor()
-
-            cursor.execute(f"""
-                EXEC {proc_name} 
-                    @FileName = ?, 
-                    @SourceFilePath = ?, 
-                    @TargetFilePath = ?, 
-                    @ArchiveFilePath = ?, 
-                    @Status = ?, 
-                    @StatusDesc = ?
-            """, filename, source_path, target_path, archive_path, status, status_desc)
-
-            conn.commit()
-            cursor.close()
-            conn.close()
-
-        except Exception as e:
-            print(f"[SQL STORED PROC ERROR] {e}")
-
----
-
-log_file_status(
-    filename=blob_name.split("/")[-1],
-    source_path=blob_name,
-    target_path="",
-    archive_path="",
-    status="BEGIN",
-    status_desc="Started processing file",
-    config=config
-)
-
----
-log_summary.append({
-    "filename": blob_name.split("/")[-1],
-    "source_path": blob_name,
-    "target_path": csv_blob_name if file_processed_successfully else "N/A",
-    "status": "COMPLETE" if file_processed_successfully else "FAILURE",
-    "status_desc": "Successfully processed and uploaded" if file_processed_successfully else "Processing failed"
-})
-
----
-for entry in log_summary:
-    entry["archive_path"] = archive_url if success else "N/A"
+class SQLServerHelper:
+    """Helper class for SQL Server database operations"""
     
-    log_file_status(
-        filename=entry["filename"],
-        source_path=entry["source_path"],
-        target_path=entry["target_path"],
-        archive_path=entry["archive_path"],
-        status=entry["status"],
-        status_desc=entry["status_desc"],
-        config=config
+    def __init__(self, config: dict, logger: logging.Logger):
+        """
+        Initialize SQL Server helper
+        
+        Args:
+            config: Configuration dictionary containing database connection details
+            logger: Logger instance
+        """
+        self.config = config
+        self.logger = logger
+        self.connection_string = self._build_connection_string()
+        
+    def _build_connection_string(self) -> str:
+        """Build SQL Server connection string from config"""
+        db_config = self.config.get("database", {})
+        
+        # Support both SQL Server authentication and Windows authentication
+        if db_config.get("use_windows_auth", False):
+            connection_string = (
+                f"DRIVER={{{db_config.get('driver', 'ODBC Driver 17 for SQL Server')}}};"
+                f"SERVER={db_config.get('server')};"
+                f"DATABASE={db_config.get('database')};"
+                f"Trusted_Connection=yes;"
+            )
+        else:
+            connection_string = (
+                f"DRIVER={{{db_config.get('driver', 'ODBC Driver 17 for SQL Server')}}};"
+                f"SERVER={db_config.get('server')};"
+                f"DATABASE={db_config.get('database')};"
+                f"UID={db_config.get('username')};"
+                f"PWD={db_config.get('password')};"
+            )
+        
+        return connection_string
+    
+    def test_connection(self) -> bool:
+        """Test database connection"""
+        try:
+            with pyodbc.connect(self.connection_string, timeout=10) as conn:
+                cursor = conn.cursor()
+                cursor.execute("SELECT 1")
+                cursor.fetchone()
+                self.logger.info("Database connection test successful")
+                return True
+        except Exception as e:
+            self.logger.error(f"Database connection test failed: {str(e)}")
+            return False
+    
+    def log_file_processing(self, filename: str, source_file_path: str, 
+                           target_file_path: str = None, archive_file_path: str = None,
+                           status: str = 'BEGIN', status_desc: str = None) -> bool:
+        """
+        Log file processing status using stored procedure
+        
+        Args:
+            filename: Name of the file being processed
+            source_file_path: Source path of the PDF file
+            target_file_path: Target path where PDF is moved after processing
+            archive_file_path: Archive path where PDF is moved when archiving
+            status: Status of the processed file ('BEGIN', 'COMPLETE', 'FAILURE')
+            status_desc: Optional detailed failure message or completion message
+            
+        Returns:
+            True if successful, False otherwise
+        """
+        try:
+            with pyodbc.connect(self.connection_string) as conn:
+                cursor = conn.cursor()
+                
+                # Get stored procedure name from config
+                stored_proc = self.config.get("database", {}).get("stored_procedure", "sp_LogFileProcessing")
+                
+                # Execute stored procedure
+                cursor.execute(f"""
+                    EXEC {stored_proc} 
+                        @FileName = ?, 
+                        @SourceFilePath = ?, 
+                        @TargetFilePath = ?, 
+                        @ArchiveFilePath = ?, 
+                        @Status = ?, 
+                        @StatusDesc = ?
+                """, filename, source_file_path, target_file_path, archive_file_path, status, status_desc)
+                
+                conn.commit()
+                
+                self.logger.debug(f"Logged {status} status for {filename}")
+                return True
+                    
+        except Exception as e:
+            self.logger.error(f"Failed to log processing status for {filename}: {str(e)}")
+            return False
+    
+    def log_processing_start(self, filename: str, source_file_path: str) -> bool:
+        """
+        Log the start of file processing
+        
+        Args:
+            filename: Name of the file being processed
+            source_file_path: Source path of the PDF file
+            
+        Returns:
+            True if successful, False otherwise
+        """
+        return self.log_file_processing(
+            filename=filename,
+            source_file_path=source_file_path,
+            target_file_path=None,
+            archive_file_path=None,
+            status='BEGIN',
+            status_desc='Processing started'
+        )
+    
+    def log_processing_complete(self, filename: str, source_file_path: str,
+                              target_file_path: str = None, archive_file_path: str = None,
+                              status_desc: str = None) -> bool:
+        """
+        Log successful completion of file processing
+        
+        Args:
+            filename: Name of the file
+            source_file_path: Source path of the PDF file
+            target_file_path: Final target path of the PDF
+            archive_file_path: Final archive path of the PDF
+            status_desc: Detailed completion message
+            
+        Returns:
+            True if successful, False otherwise
+        """
+        if status_desc is None:
+            status_desc = 'File processed successfully'
+            
+        return self.log_file_processing(
+            filename=filename,
+            source_file_path=source_file_path,
+            target_file_path=target_file_path,
+            archive_file_path=archive_file_path,
+            status='COMPLETE',
+            status_desc=status_desc
+        )
+    
+    def log_processing_failure(self, filename: str, source_file_path: str,
+                             error_message: str, target_file_path: str = None, 
+                             archive_file_path: str = None) -> bool:
+        """
+        Log failure of file processing
+        
+        Args:
+            filename: Name of the file
+            source_file_path: Source path of the PDF file
+            error_message: Error message describing the failure
+            target_file_path: Target path (if available)
+            archive_file_path: Archive path (if available)
+            
+        Returns:
+            True if successful, False otherwise
+        """
+        return self.log_file_processing(
+            filename=filename,
+            source_file_path=source_file_path,
+            target_file_path=target_file_path,
+            archive_file_path=archive_file_path,
+            status='FAILURE',
+            status_desc=error_message
+        )
+
+---
+# Add this import at the top of your file
+from sql_helper import SQLServerHelper
+
+# Modified process_azure_pdf_files function - key changes highlighted
+def process_azure_pdf_files(config, api_type, azure_folder, logger):
+    """
+    Process PDF files from Azure Blob Storage with archiving support and SQL logging.
+    """
+    # Initialize SQL Server helper
+    sql_helper = None
+    if config.get("database", {}).get("enabled", False):
+        sql_helper = SQLServerHelper(config, logger)
+        if not sql_helper.test_connection():
+            logger.warning("Database connection failed. Continuing without SQL logging.")
+            sql_helper = None
+    
+    # ... existing initialization code ...
+    archive_container = config["azure_storage"].get("input_archive_container")
+    logger.info(f"Initializing Azure Storage Helper with containers:")
+    logger.info(f"  Input: {config['azure_storage']['input_container']}")
+    logger.info(f"  Output: {config['azure_storage']['output_container']}")
+    logger.info(f"  Archive: {archive_container}")
+    
+    storage_helper = AzureStorageHelper(
+        config["azure_storage"]["connection_string"],
+        config["azure_storage"]["input_container"],
+        config["azure_storage"]["output_container"],
+        archive_container,
+        logger
     )
+    
+    pdf_processor = PDFProcessor(config, logger)
+    logger.info(f"Initializing Azure OpenAI Client with {api_type} API")
+    ai_client = AzureOpenAIClient(config, logger)
+    
+    # ... existing code to list PDF blobs ...
+    logger.info(f"Listing PDF files in Azure folder: {azure_folder}")
+    pdf_blobs = storage_helper.list_blobs_in_folder(azure_folder)
+    
+    if not pdf_blobs:
+        logger.warning(f"No PDF files found in folder: {azure_folder}")
+        return
+    
+    logger.info(f"Found {len(pdf_blobs)} PDF files to process")
+    
+    # Track processed and unprocessed files for archiving
+    processed_files = []
+    unprocessed_files = []
+    
+    # Process each PDF
+    for i, blob_name in enumerate(pdf_blobs):
+        file_processed_successfully = False
+        filename = blob_name.split('/')[-1]
+        target_file_path = None
+        archive_file_path = None
+        
+        try:
+            logger.info(f"Processing file {i+1}/{len(pdf_blobs)}: {blob_name}")
+            
+            # LOG PROCESSING START
+            if sql_helper:
+                sql_helper.log_processing_start(filename, blob_name)
+            
+            # Download blob to memory
+            logger.debug(f"Downloading blob: {blob_name}")
+            blob_content = storage_helper.download_blob_to_memory(blob_name)
+            
+            if blob_content is None:
+                error_msg = f"Could not download blob: {blob_name}"
+                logger.error(error_msg)
+                unprocessed_files.append(blob_name)
+                
+                # LOG FAILURE
+                if sql_helper:
+                    sql_helper.log_processing_failure(filename, blob_name, error_msg)
+                continue
+            
+            # Extract pages as base64 strings
+            logger.info(f"Extracting pages from {filename}")
+            pages = pdf_processor.extract_pdf_pages(blob_content)
+            
+            if not pages:
+                error_msg = f"No pages extracted from {filename}"
+                logger.warning(error_msg)
+                unprocessed_files.append(blob_name)
+                
+                # LOG FAILURE
+                if sql_helper:
+                    sql_helper.log_processing_failure(filename, blob_name, error_msg)
+                continue
+            
+            logger.info(f"Extracted {len(pages)} pages from {filename}")
+            
+            # ... existing batch processing code ...
+            batch_size = config["processing"]["batch_size"]
+            all_results = []
+            batch_processing_successful = True
+            
+            for batch_start in range(0, len(pages), batch_size):
+                batch_end = min(batch_start + batch_size, len(pages))
+                batch_pages = pages[batch_start:batch_end]
+                
+                page_nums = [p[0] for p in batch_pages]
+                base64_strings = [p[1] for p in batch_pages]
+                prompts = [pdf_processor.create_extraction_prompt() for _ in range(len(batch_pages))]
+                
+                logger.info(f"Processing batch of {len(batch_pages)} pages (pages {batch_start+1}-{batch_end})")
+                
+                try:
+                    if api_type == "batch":
+                        logger.debug("Using batch API for processing")
+                        raw_results = ai_client.process_batch(base64_strings, prompts)
+                    else:
+                        logger.debug("Using general API for processing")
+                        raw_results = ai_client.process_general(base64_strings, prompts)
+                    
+                    logger.debug("Processing batch results")
+                    processed_results = pdf_processor.process_batch_results(raw_results, page_nums)
+                    all_results.extend(processed_results)
+                    
+                    logger.info(f"Processed batch {batch_start+1}-{batch_end}")
+                except Exception as batch_error:
+                    error_msg = f"Error processing batch: {str(batch_error)}"
+                    logger.error(error_msg)
+                    batch_processing_successful = False
+                    
+                    # LOG FAILURE
+                    if sql_helper:
+                        sql_helper.log_processing_failure(filename, blob_name, error_msg)
+                    break
+            
+            # Check if batch processing was successful
+            if not batch_processing_successful:
+                unprocessed_files.append(blob_name)
+                continue
+            
+            # ... existing CSV creation code ...
+            for page_num, category, _ in all_results:
+                logger.info(f"Page {page_num+1} classified as: {category}")
+            
+            logger.info("Creating CSV from extraction results")
+            csv_content, invoice_number, total_amount = pdf_processor.create_csv_for_results(
+                all_results, filename
+            )
+            
+            if csv_content:
+                # Determine confidence level for folder structure
+                is_high_confidence = pdf_processor.has_high_confidence(all_results)
+                
+                if is_high_confidence:
+                    folder_path = config["azure_storage"]["high_confidence_folder"]
+                    logger.info(f"{filename} has HIGH confidence (≥{config['processing']['confidence_threshold']}%)")
+                else:
+                    folder_path = config["azure_storage"]["low_confidence_folder"]
+                    logger.info(f"{filename} has LOW confidence (<{config['processing']['confidence_threshold']}%)")
+                
+                # Prepare filenames for upload
+                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                base_filename = os.path.splitext(filename)[0]
+                
+                # Upload CSV to blob storage
+                csv_blob_name = f"{folder_path}{base_filename}_{invoice_number}_{total_amount}_{timestamp}.csv"
+                logger.info(f"Uploading CSV to {csv_blob_name}")
+                csv_success, csv_url = storage_helper.upload_to_storage(
+                    csv_blob_name,
+                    csv_content,
+                    "text/csv"
+                )
+                
+                # Upload original PDF to appropriate folder
+                source_folder = "source_documents/" + folder_path
+                source_blob_name = f"{source_folder}{filename}"
+                target_file_path = source_blob_name  # Store for logging
+                
+                logger.info(f"Uploading source PDF to {source_blob_name}")
+                source_success, source_url = storage_helper.upload_to_storage(
+                    source_blob_name,
+                    blob_content,
+                    "application/pdf"
+                )
+                
+                logger.info(f"CSV upload: {'Success' if csv_success else 'Failed'}")
+                logger.info(f"Source PDF upload: {'Success' if source_success else 'Failed'}")
+                
+                if csv_success and source_success:
+                    file_processed_successfully = True
+                    processed_files.append(blob_name)
+                    
+                    if csv_success:
+                        logger.info(f"CSV URL: {csv_url}")
+                    if source_success:
+                        logger.info(f"Source PDF URL: {source_url}")
+                else:
+                    unprocessed_files.append(blob_name)
+                    error_msg = f"Failed to upload files - CSV: {csv_success}, PDF: {source_success}"
+                    
+                    # LOG FAILURE
+                    if sql_helper:
+                        sql_helper.log_processing_failure(filename, blob_name, error_msg, target_file_path)
+            else:
+                error_msg = f"No extractable content found in {filename}"
+                logger.warning(error_msg)
+                unprocessed_files.append(blob_name)
+                
+                # LOG FAILURE
+                if sql_helper:
+                    sql_helper.log_processing_failure(filename, blob_name, error_msg)
+        
+        except Exception as e:
+            error_msg = f"Error processing {blob_name}: {str(e)}"
+            logger.error(error_msg, exc_info=True)
+            unprocessed_files.append(blob_name)
+            
+            # LOG FAILURE
+            if sql_helper:
+                sql_helper.log_processing_failure(filename, blob_name, error_msg)
+        
+        # LOG SUCCESS (if processing was successful)
+        if file_processed_successfully and sql_helper:
+            sql_helper.log_processing_complete(
+                filename, blob_name, target_file_path, archive_file_path, 
+                'File processed successfully'
+            )
+    
+    # Handle archiving with SQL logging updates
+    blob_input_move_on = config.get("archive", {}).get("blob_input_move_on", False)
+    
+    if blob_input_move_on:
+        logger.info("Starting archiving process...")
+        logger.info(f"Files to archive - Processed: {len(processed_files)}, Unprocessed: {len(unprocessed_files)}")
+        
+        if processed_files or unprocessed_files:
+            archive_config = config.get("archive", {})
+            success, archive_url = storage_helper.move_files_to_archive(
+                processed_files, 
+                unprocessed_files, 
+                archive_config
+            )
+            
+            if success and sql_helper:
+                # Update archive paths in database for archived files
+                for blob_name in processed_files:
+                    filename = blob_name.split('/')[-1]
+                    # Get the target path for this file
+                    is_high_confidence = True  # You'll need to determine this based on your logic
+                    if is_high_confidence:
+                        folder_path = config["azure_storage"]["high_confidence_folder"]
+                    else:
+                        folder_path = config["azure_storage"]["low_confidence_folder"]
+                    
+                    source_folder = "source_documents/" + folder_path
+                    target_path = f"{source_folder}{filename}"
+                    archive_path = f"{archive_url}/{filename}"
+                    
+                    # Update with archive path
+                    sql_helper.log_processing_complete(
+                        filename, blob_name, target_path, archive_path, 
+                        'File processed and archived successfully'
+                    )
+                
+                # Update archive paths for unprocessed files too
+                for blob_name in unprocessed_files:
+                    filename = blob_name.split('/')[-1]
+                    archive_path = f"{archive_url}/{filename}"
+                    
+                    sql_helper.log_processing_failure(
+                        filename, blob_name, 'File processing failed but archived',
+                        None, archive_path
+                    )
+                    
+            if success:
+                logger.info(f"Successfully archived all files to: {archive_url}")
+            else:
+                logger.error("Failed to archive files")
+        else:
+            logger.info("No files to archive")
+    else:
+        logger.info("Archiving is disabled (blob_input_move_on = False)")
+    
+    # Summary
+    logger.info("Processing complete!")
+    logger.info(f"Summary:")
+    logger.info(f"  Total files processed: {len(pdf_blobs)}")
+    logger.info(f"  Successfully processed: {len(processed_files)}")
+    logger.info(f"  Failed to process: {len(unprocessed_files)}")
+    
+    if processed_files:
+        logger.info(f"  Successfully processed files: {', '.join([f.split('/')[-1] for f in processed_files])}")
+    if unprocessed_files:
+        logger.info(f"  Failed files: {', '.join([f.split('/')[-1] for f in unprocessed_files])}")
+
+
+# Similar modifications for process_local_pdf_files function
+def process_local_pdf_files(config, api_type, local_folder, logger):
+    """
+    Process PDF files from a local folder with SQL logging.
+    """
+    # Initialize SQL Server helper
+    sql_helper = None
+    if config.get("database", {}).get("enabled", False):
+        sql_helper = SQLServerHelper(config, logger)
+        if not sql_helper.test_connection():
+            logger.warning("Database connection failed. Continuing without SQL logging.")
+            sql_helper = None
+    
+    # ... existing initialization code ...
+    logger.info(f"Initializing Azure Storage Helper with output container: {config['azure_storage']['output_container']}")
+    storage_helper = AzureStorageHelper(
+        config["azure_storage"]["connection_string"],
+        config["azure_storage"]["input_container"],
+        config["azure_storage"]["output_container"],
+        logger=logger
+    )
+    
+    pdf_processor = PDFProcessor(config, logger)
+    logger.info(f"Initializing Azure OpenAI Client with {api_type} API")
+    ai_client = AzureOpenAIClient(config, logger)
+    
+    # Check if folder exists
+    folder_path = Path(local_folder)
+    if not folder_path.exists() or not folder_path.is_dir():
+        logger.error(f"Folder not found: {local_folder}")
+        return
+    
+    # Find all PDF files in the folder
+    logger.info(f"Scanning local folder: {local_folder}")
+    pdf_files = list(folder_path.glob("*.pdf"))
+    
+    if not pdf_files:
+        logger.warning(f"No PDF files found in folder: {local_folder}")
+        return
+    
+    logger.info(f"Found {len(pdf_files)} PDF files to process")
+    
+    # Track processed and unprocessed files
+    processed_files = []
+    unprocessed_files = []
+    
+    # Process each PDF
+    for i, pdf_file in enumerate(pdf_files):
+        file_processed_successfully = False
+        filename = pdf_file.name
+        source_file_path = str(pdf_file)
+        target_file_path = None
+        
+        try:
+            logger.info(f"Processing file {i+1}/{len(pdf_files)}: {filename}")
+            
+            # LOG PROCESSING START
+            if sql_helper:
+                sql_helper.log_processing_start(filename, source_file_path)
+            
+            # Read file content
+            logger.debug(f"Reading file: {pdf_file}")
+            with open(pdf_file, 'rb') as f:
+                file_content = f.read()
+            
+            # Extract pages as base64 strings
+            logger.info(f"Extracting pages from {filename}")
+            pages = pdf_processor.extract_pdf_pages(file_content)
+            
+            if not pages:
+                error_msg = f"No pages extracted from {filename}"
+                logger.warning(error_msg)
+                unprocessed_files.append(filename)
+                
+                # LOG FAILURE
+                if sql_helper:
+                    sql_helper.log_processing_failure(filename, source_file_path, error_msg)
+                continue
+            
+            logger.info(f"Extracted {len(pages)} pages from {filename}")
+            
+            # ... rest of the processing logic follows the same pattern as azure function ...
+            # Apply the same batch processing, CSV creation, and SQL logging as above
+            
+            # For brevity, I'll show the key SQL logging points:
+            
+            # After successful processing:
+            if file_processed_successfully and sql_helper:
+                sql_helper.log_processing_complete(
+                    filename, source_file_path, target_file_path, None, 
+                    'File processed successfully'
+                )
+            
+        except Exception as e:
+            error_msg = f"Error processing {filename}: {str(e)}"
+            logger.error(error_msg, exc_info=True)
+            unprocessed_files.append(filename)
+            
+            # LOG FAILURE
+            if sql_helper:
+                sql_helper.log_processing_failure(filename, source_file_path, error_msg)
+    
+    # Summary for local processing
+    logger.info("Processing complete!")
+    logger.info(f"Summary:")
+    logger.info(f"  Total files processed: {len(pdf_files)}")
+    logger.info(f"  Successfully processed: {len(processed_files)}")
+    logger.info(f"  Failed to process: {len(unprocessed_files)}")
+    logger.info("Note: Local file archiving is not supported. Files remain in original location.")
+----
+"database": {
+    "enabled": true,
+    "server": "your-sql-server-name",
+    "database": "your-database-name",
+    "username": "your-username",
+    "password": "your-password",
+    "driver": "ODBC Driver 17 for SQL Server",
+    "use_windows_auth": false,
+    "stored_procedure": "sp_LogFileProcessing"
+  }
