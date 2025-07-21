@@ -113,3 +113,7 @@ for entry in log_summary:
         status_desc=entry["status_desc"],
         config=config
     )
+
+ "logging": {
+    "enabled": true,
+    "table_name": "FileLogs"
