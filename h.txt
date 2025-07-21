@@ -1,26 +1,47 @@
-# logger_helpers.py
 import pyodbc
 
 def log_file_status_begin(filename, source_path, target_path, archive_path, status_desc, config):
     """
-    Inserts a BEGIN status log for a file and returns the generated DocumentProcessor_Key.
+    Inserts BEGIN row and retrieves inserted ID using output param.
     """
     try:
         conn_str = config["sql_server"]["connection_string"]
         conn = pyodbc.connect(conn_str)
         cur = conn.cursor()
 
-        result = cur.execute(
-            "{CALL dbo.uspXUpdateDocumentProcessor (?, ?, ?, ?, ?, ?, ?)}",
-            None, filename, source_path, target_path, archive_path, "BEGIN", status_desc
+        # Declare variables
+        document_id = None
+        return_flag = 1  # flag to return inserted ID
+
+        # Create output parameter
+        output_id = cur.execute(
+            """
+            DECLARE @OutputID BIGINT;
+            EXEC [dbo].[uspXUpdateDocumentProcessor]
+                @documentProcessorKey = NULL,
+                @fileName = ?,
+                @sourceFilePath = ?,
+                @targetFilePath = ?,
+                @archiveFilePath = ?,
+                @status = ?,
+                @statusDesc = ?,
+                @returnDocumentProcessorKeyFlag = ?,
+                @documentProcessorKeyOut = @OutputID OUTPUT;
+            SELECT @OutputID;
+            """,
+            filename,
+            source_path,
+            target_path,
+            archive_path,
+            "BEGIN",
+            status_desc,
+            return_flag
         ).fetchone()
 
-        document_id = result[0] if result else None
+        document_id = output_id[0] if output_id else None
 
         cur.close()
         conn.close()
-
-        print(f"[BEGIN] DocumentProcessor_Key = {document_id}")
         return document_id
 
     except Exception as e:
@@ -30,7 +51,7 @@ def log_file_status_begin(filename, source_path, target_path, archive_path, stat
 
 def log_file_status_update(document_id, filename, source_path, target_path, archive_path, status, status_desc, config):
     """
-    Updates the file's status in the SQL log using the DocumentProcessor_Key.
+    Updates the same row in SQL using existing ID.
     """
     if not document_id:
         print("[SQL UPDATE ERROR] document_id is missing")
@@ -41,54 +62,37 @@ def log_file_status_update(document_id, filename, source_path, target_path, arch
         conn = pyodbc.connect(conn_str)
         cur = conn.cursor()
 
+        return_flag = 0  # don't return a new ID on update
+
         cur.execute(
-            "{CALL dbo.uspXUpdateDocumentProcessor (?, ?, ?, ?, ?, ?, ?)}",
-            document_id, filename, source_path, target_path, archive_path, status, status_desc
+            """
+            DECLARE @DummyOut BIGINT;
+            EXEC [dbo].[uspXUpdateDocumentProcessor]
+                @documentProcessorKey = ?,
+                @fileName = ?,
+                @sourceFilePath = ?,
+                @targetFilePath = ?,
+                @archiveFilePath = ?,
+                @status = ?,
+                @statusDesc = ?,
+                @returnDocumentProcessorKeyFlag = ?,
+                @documentProcessorKeyOut = @DummyOut OUTPUT;
+            """,
+            document_id,
+            filename,
+            source_path,
+            target_path,
+            archive_path,
+            status,
+            status_desc,
+            return_flag
         )
 
         conn.commit()
         cur.close()
         conn.close()
-
-        print(f"[UPDATE] document_id {document_id} set to status {status}")
         return True
 
     except Exception as e:
         print(f"[SQL LOGGING ERROR - UPDATE] {e}")
         return False
----
-from logger_helpers import log_file_status_begin, log_file_status_update
-
-config = {
-    "sql_server": {
-        "connection_string": "DRIVER={ODBC Driver 17 for SQL Server};SERVER=localhost;DATABASE=MyDB;UID=sa;PWD=YourPassword123"
-    }
-}
-
-filename = "invoice123.pdf"
-source_path = "azure/input/invoice123.pdf"
-target_path = ""
-archive_path = ""
-
-# STEP 1: Log BEGIN
-document_id = log_file_status_begin(
-    filename=filename,
-    source_path=source_path,
-    target_path=target_path,
-    archive_path=archive_path,
-    status_desc="Started test processing",
-    config=config
-)
-
-# STEP 2: Simulate update
-if document_id:
-    log_file_status_update(
-        document_id=document_id,
-        filename=filename,
-        source_path=source_path,
-        target_path="output/final/invoice123.csv",
-        archive_path="archive/processed/invoice123.pdf",
-        status="COMPLETED",
-        status_desc="Successfully processed and archived",
-        config=config
-    )
