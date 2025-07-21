@@ -1,108 +1,64 @@
-# logger_helpers.py
-
 import pyodbc
 
 def log_file_status_begin(filename, source_path, target_path, archive_path, status_desc, config):
-    """
-    Calls SQL proc with NULL to insert BEGIN and captures new key.
-    """
     try:
-        sql_conf = config["sql_server"]
-        conn_str = sql_conf["connection_string"]
-
+        conn_str = config["sql_server"]["connection_string"]
         conn = pyodbc.connect(conn_str)
         cur = conn.cursor()
 
-        # Set up output parameter
-        document_key_out = cur.execute("""
-            DECLARE @OutputKey BIGINT;
-            EXEC [dbo].[uspXUpdateDocumentProcessor]
-                @documentProcessorKey = NULL,
-                @fileName = ?,
-                @sourceFilePath = ?,
-                @targetFilePath = ?,
-                @archiveFilePath = ?,
-                @status = 'BEGIN',
-                @statusDesc = ?,
-                @returnDocumentProcessorKeyFlag = 1,
-                @documentProcessorKeyOut = @OutputKey OUTPUT;
-            SELECT @OutputKey;
-        """, filename, source_path, target_path, archive_path, status_desc).fetchval()
+        query = """
+        DECLARE @OutputKey BIGINT;
+        EXEC [dbo].[uspXUpdateDocumentProcessor]
+            @documentProcessorKey = NULL,
+            @fileName = ?,
+            @sourceFilePath = ?,
+            @targetFilePath = ?,
+            @archiveFilePath = ?,
+            @status = 'BEGIN',
+            @statusDesc = ?,
+            @returnDocumentProcessorKeyFlag = 1,
+            @documentProcessorKeyOut = @OutputKey OUTPUT;
+        SELECT @OutputKey;
+        """
 
+        # ✅ Fetch actual inserted SQL ID (e.g., 99)
+        document_id = cur.execute(query, filename, source_path, target_path, archive_path, status_desc).fetchval()
+        conn.commit()
         cur.close()
         conn.close()
 
-        return document_key_out
+        print(f"[DEBUG] SQL INSERT - DocumentProcessor_Key: {document_id}")
+        return document_id
 
     except Exception as e:
-        print(f"[ERROR] BEGIN log failed: {e}")
+        print(f"[ERROR] log_file_status_begin failed: {e}")
         return None
 
 
 def log_file_status_update(document_id, filename, source_path, target_path, archive_path, status, status_desc, config):
-    """
-    Updates the log using the same documentProcessorKey captured earlier.
-    """
     try:
-        sql_conf = config["sql_server"]
-        conn_str = sql_conf["connection_string"]
-
+        conn_str = config["sql_server"]["connection_string"]
         conn = pyodbc.connect(conn_str)
         cur = conn.cursor()
 
-        cur.execute("""
-            EXEC [dbo].[uspXUpdateDocumentProcessor]
-                @documentProcessorKey = ?,
-                @fileName = ?,
-                @sourceFilePath = ?,
-                @targetFilePath = ?,
-                @archiveFilePath = ?,
-                @status = ?,
-                @statusDesc = ?,
-                @returnDocumentProcessorKeyFlag = 0,
-                @documentProcessorKeyOut = NULL;
-        """, document_id, filename, source_path, target_path, archive_path, status, status_desc)
+        query = """
+        EXEC [dbo].[uspXUpdateDocumentProcessor]
+            @documentProcessorKey = ?,
+            @fileName = ?,
+            @sourceFilePath = ?,
+            @targetFilePath = ?,
+            @archiveFilePath = ?,
+            @status = ?,
+            @statusDesc = ?,
+            @returnDocumentProcessorKeyFlag = 0,
+            @documentProcessorKeyOut = NULL;
+        """
 
+        print(f"[DEBUG] SQL UPDATE - Using DocumentProcessor_Key: {document_id}")
+        cur.execute(query, document_id, filename, source_path, target_path, archive_path, status, status_desc)
         conn.commit()
         cur.close()
         conn.close()
 
     except Exception as e:
-        print(f"[ERROR] UPDATE log failed: {e}")
----
-from logger_helpers import log_file_status_begin, log_file_status_update
-
-filename = pdf_blob.split("/")[-1]
-full_blob_path = f"{azure_folder.rstrip('/')}/{pdf_blob.lstrip('/')}"
-
-document_id = log_file_status_begin(
-    filename=filename,
-    source_path=full_blob_path,
-    target_path="",
-    archive_path="",
-    status_desc="Started processing",
-    config=config
-)
-
-----
-log_summary.append({
-    "document_id": document_id,
-    "filename": filename,
-    "source_path": full_blob_path,
-    "target_path": csv_blob_name if file_processed_successfully else "N/A",
-    "status": "COMPLETE" if file_processed_successfully else "FAILURE",
-    "status_desc": "Successfully processed" if file_processed_successfully else "Failed to process"
-})
-
---
-for entry in log_summary:
-    log_file_status_update(
-        document_id=entry["document_id"],
-        filename=entry["filename"],
-        source_path=entry["source_path"],
-        target_path=entry["target_path"],
-        archive_path=archive_url if success else "N/A",
-        status=entry["status"],
-        status_desc=entry["status_desc"],
-        config=config
-    )
+        print(f"[ERROR] log_file_status_update failed: {e}")
