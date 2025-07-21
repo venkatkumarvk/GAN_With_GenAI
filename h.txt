@@ -1,64 +1,115 @@
+# logger_helpers.py
+
 import pyodbc
+from datetime import datetime
 
-def log_file_status_begin(filename, source_path, target_path, archive_path, status_desc, config):
+
+def get_uid_from_conn_string(conn_str):
+    for part in conn_str.split(";"):
+        if part.strip().upper().startswith("UID="):
+            return part.split("=")[1].strip()
+    return "system"
+
+
+def insert_begin_log(filename, source_path, config):
+    if not config.get("logging", {}).get("enabled", True):
+        print("[INFO] Logging disabled — skipping BEGIN insert.")
+        return None
+
+    conn_str = config["sql_server"]["connection_string"]
+    table_name = config.get("logging", {}).get("table_name", "FileLogs")
+    created_by = get_uid_from_conn_string(conn_str)
+    created_on = datetime.utcnow()
+
     try:
-        conn_str = config["sql_server"]["connection_string"]
         conn = pyodbc.connect(conn_str)
-        cur = conn.cursor()
+        cursor = conn.cursor()
 
-        query = """
-        DECLARE @OutputKey BIGINT;
-        EXEC [dbo].[uspXUpdateDocumentProcessor]
-            @documentProcessorKey = NULL,
-            @fileName = ?,
-            @sourceFilePath = ?,
-            @targetFilePath = ?,
-            @archiveFilePath = ?,
-            @status = 'BEGIN',
-            @statusDesc = ?,
-            @returnDocumentProcessorKeyFlag = 1,
-            @documentProcessorKeyOut = @OutputKey OUTPUT;
-        SELECT @OutputKey;
+        insert_query = f"""
+            INSERT INTO {table_name} (
+                FileName, SourceFilePath,
+                TargetFilePath, ArchiveFilePath,
+                Status, StatusDesc,
+                CREATED_ON, CREATED_BY
+            )
+            OUTPUT INSERTED.DocumentProcessor_Key
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
         """
 
-        # ✅ Fetch actual inserted SQL ID (e.g., 99)
-        document_id = cur.execute(query, filename, source_path, target_path, archive_path, status_desc).fetchval()
+        cursor.execute(insert_query, filename, source_path, "", "", "BEGIN", "Started processing file", created_on, created_by)
+        document_id = cursor.fetchone()[0]
+
         conn.commit()
-        cur.close()
+        cursor.close()
         conn.close()
 
-        print(f"[DEBUG] SQL INSERT - DocumentProcessor_Key: {document_id}")
+        print(f"[DEBUG] Inserted BEGIN log with ID {document_id}")
         return document_id
 
     except Exception as e:
-        print(f"[ERROR] log_file_status_begin failed: {e}")
+        print(f"[ERROR] BEGIN log failed: {e}")
         return None
 
 
-def log_file_status_update(document_id, filename, source_path, target_path, archive_path, status, status_desc, config):
-    try:
-        conn_str = config["sql_server"]["connection_string"]
-        conn = pyodbc.connect(conn_str)
-        cur = conn.cursor()
+def update_log(document_id, target_path, archive_path, status, status_desc, config):
+    if not config.get("logging", {}).get("enabled", True):
+        print("[INFO] Logging disabled — skipping UPDATE.")
+        return
 
-        query = """
-        EXEC [dbo].[uspXUpdateDocumentProcessor]
-            @documentProcessorKey = ?,
-            @fileName = ?,
-            @sourceFilePath = ?,
-            @targetFilePath = ?,
-            @archiveFilePath = ?,
-            @status = ?,
-            @statusDesc = ?,
-            @returnDocumentProcessorKeyFlag = 0,
-            @documentProcessorKeyOut = NULL;
+    conn_str = config["sql_server"]["connection_string"]
+    table_name = config.get("logging", {}).get("table_name", "FileLogs")
+    updated_by = get_uid_from_conn_string(conn_str)
+    updated_on = datetime.utcnow()
+
+    try:
+        conn = pyodbc.connect(conn_str)
+        cursor = conn.cursor()
+
+        update_query = f"""
+            UPDATE {table_name}
+            SET
+                TargetFilePath = ?,
+                ArchiveFilePath = ?,
+                Status = ?,
+                StatusDesc = ?,
+                UPDATED_ON = ?,
+                UPDATED_BY = ?
+            WHERE DocumentProcessor_Key = ?
         """
 
-        print(f"[DEBUG] SQL UPDATE - Using DocumentProcessor_Key: {document_id}")
-        cur.execute(query, document_id, filename, source_path, target_path, archive_path, status, status_desc)
+        cursor.execute(update_query, target_path, archive_path, status, status_desc, updated_on, updated_by, document_id)
+
         conn.commit()
-        cur.close()
+        cursor.close()
         conn.close()
 
+        print(f"[DEBUG] Updated log ID {document_id} to status {status}")
+
     except Exception as e:
-        print(f"[ERROR] log_file_status_update failed: {e}")
+        print(f"[ERROR] UPDATE log failed: {e}")
+
+
+---
+document_id = insert_begin_log(filename, full_blob_path, config)
+
+---
+log_summary.append({
+    "document_id": document_id,
+    "filename": filename,
+    "source_path": full_blob_path,
+    "target_path": csv_blob_name if file_processed_successfully else "N/A",
+    "status": "COMPLETE" if file_processed_successfully else "FAILURE",
+    "status_desc": "Successfully processed" if file_processed_successfully else "Failed to process"
+})
+---
+archive_url = archive_url if archive_url else "N/A"  # fallback for archive path
+
+for entry in log_summary:
+    update_log(
+        document_id=entry["document_id"],
+        target_path=entry["target_path"],
+        archive_path=archive_url,
+        status=entry["status"],
+        status_desc=entry["status_desc"],
+        config=config
+    )
