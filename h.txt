@@ -1,9 +1,182 @@
+# logger_helpers.py
 import pyodbc
+from datetime import datetime
 
-conn_str = "DRIVER={ODBC Driver 17 for SQL Server};SERVER=your_server;DATABASE=your_db;UID=your_user;PWD=your_pwd"
-conn = pyodbc.connect(conn_str)
-cursor = conn.cursor()
+def get_uid_from_conn_string(conn_str):
+    for part in conn_str.split(";"):
+        if part.strip().upper().startswith("UID="):
+            return part.split("=")[1].strip()
+    return "system"
 
-cursor.execute("SELECT TOP 1 * FROM dbo.XLogDocumentProcessor")
-row = cursor.fetchone()
-print(row)
+def insert_begin_log(filename, source_path, config):
+    if not config.get("logging", {}).get("enabled", True):
+        print("[INFO] Logging disabled — skipping BEGIN insert.")
+        return None
+
+    conn_str = config["sql_server"]["connection_string"]
+    table_name = config["logging"].get("table_name", "dbo.XLogDocumentProcessor")
+    created_by = get_uid_from_conn_string(conn_str)
+    created_on = datetime.utcnow()
+
+    try:
+        conn = pyodbc.connect(conn_str)
+        cursor = conn.cursor()
+
+        # Check if table exists
+        if '.' in table_name:
+            schema_name, actual_table_name = table_name.split('.', 1)
+            cursor.execute("""
+                SELECT COUNT(*) 
+                FROM INFORMATION_SCHEMA.TABLES 
+                WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ?
+            """, schema_name, actual_table_name)
+        else:
+            cursor.execute("""
+                SELECT COUNT(*) 
+                FROM INFORMATION_SCHEMA.TABLES 
+                WHERE TABLE_NAME = ?
+            """, table_name)
+
+        if cursor.fetchone()[0] == 0:
+            print(f"[ERROR] Table {table_name} does not exist!")
+            return None
+
+        insert_query = f"""
+            INSERT INTO {table_name} (
+                FileName, SourceFilePath,
+                TargetFilePath, ArchiveFilePath,
+                Status, StatusDesc,
+                CREATED_ON, CREATED_BY
+            )
+            OUTPUT INSERTED.DocumentProcessor_Key
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        """
+
+        cursor.execute(insert_query, 
+                       filename, source_path, "", "", 
+                       "BEGIN", "Started processing file", 
+                       created_on, created_by)
+
+        result = cursor.fetchone()
+        conn.commit()
+
+        if result:
+            document_id = result[0]
+            print(f"[DEBUG] Inserted BEGIN log with ID: {document_id}")
+            return document_id
+        else:
+            print("[ERROR] No ID returned from insert")
+            return None
+
+    except Exception as e:
+        print(f"[ERROR] BEGIN log error: {e}")
+        return None
+    finally:
+        cursor.close()
+        conn.close()
+
+
+def update_log(document_id, target_path, archive_path, status, status_desc, config):
+    if not config.get("logging", {}).get("enabled", True):
+        print("[INFO] Logging disabled — skipping UPDATE.")
+        return
+
+    if document_id is None:
+        print("[WARNING] Cannot update log - document_id is None")
+        return
+
+    conn_str = config["sql_server"]["connection_string"]
+    table_name = config["logging"].get("table_name", "dbo.XLogDocumentProcessor")
+    updated_by = get_uid_from_conn_string(conn_str)
+    updated_on = datetime.utcnow()
+
+    try:
+        conn = pyodbc.connect(conn_str)
+        cursor = conn.cursor()
+
+        update_query = f"""
+            UPDATE {table_name}
+            SET
+                TargetFilePath = ?,
+                ArchiveFilePath = ?,
+                Status = ?,
+                StatusDesc = ?,
+                UPDATED_ON = ?,
+                UPDATED_BY = ?
+            WHERE DocumentProcessor_Key = ?
+        """
+
+        cursor.execute(update_query, 
+                       target_path, archive_path, status, status_desc, 
+                       updated_on, updated_by, document_id)
+
+        conn.commit()
+
+        if cursor.rowcount > 0:
+            print(f"[DEBUG] Updated log ID {document_id} to status {status}")
+        else:
+            print(f"[WARNING] No rows updated for ID {document_id}")
+
+    except Exception as e:
+        print(f"[ERROR] UPDATE log error: {e}")
+    finally:
+        cursor.close()
+        conn.close()
+
+
+def update_log_with_archive(document_id, archive_path, status, status_desc, config):
+    if not config.get("logging", {}).get("enabled", True):
+        print("[INFO] Logging disabled — skipping ARCHIVE update.")
+        return
+
+    if document_id is None:
+        print("[WARNING] Cannot update archive log - document_id is None")
+        return
+
+    conn_str = config["sql_server"]["connection_string"]
+    table_name = config["logging"].get("table_name", "dbo.XLogDocumentProcessor")
+    updated_by = get_uid_from_conn_string(conn_str)
+    updated_on = datetime.utcnow()
+
+    try:
+        conn = pyodbc.connect(conn_str)
+        cursor = conn.cursor()
+
+        # Get current target path
+        cursor.execute(f"""
+            SELECT TargetFilePath 
+            FROM {table_name} 
+            WHERE DocumentProcessor_Key = ?
+        """, document_id)
+        result = cursor.fetchone()
+        current_target_path = result[0] if result else ""
+
+        # Update with archive
+        update_query = f"""
+            UPDATE {table_name}
+            SET
+                TargetFilePath = ?,
+                ArchiveFilePath = ?,
+                Status = ?,
+                StatusDesc = ?,
+                UPDATED_ON = ?,
+                UPDATED_BY = ?
+            WHERE DocumentProcessor_Key = ?
+        """
+
+        cursor.execute(update_query, 
+                       current_target_path, archive_path, status, status_desc, 
+                       updated_on, updated_by, document_id)
+
+        conn.commit()
+
+        if cursor.rowcount > 0:
+            print(f"[DEBUG] Updated archive path for log ID {document_id}")
+        else:
+            print(f"[WARNING] No rows updated for archive on ID {document_id}")
+
+    except Exception as e:
+        print(f"[ERROR] ARCHIVE update log error: {e}")
+    finally:
+        cursor.close()
+        conn.close()
