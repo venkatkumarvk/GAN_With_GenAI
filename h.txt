@@ -1,359 +1,58 @@
-def process_azure_pdf_files(config, api_type, azure_folder, logger):
+# logger_helpers.py
+import pyodbc
+
+def log_file_status_begin(filename, source_path, target_path, archive_path, status_desc, config):
     """
-    Process PDF files from Azure Blob Storage with archiving support and SQL logging.
-    
-    Parameters:
-    - config: Configuration dictionary
-    - api_type: 'batch' or 'general'
-    - azure_folder: Folder path in Azure Blob Storage
-    - logger: Logger instance
+    Inserts a BEGIN status log for a file and returns the generated DocumentProcessor_Key.
     """
-    # Initialize helpers with archive container
-    archive_container = config["azure_storage"].get("input_archive_container")
-    logger.info(f"Initializing Azure Storage Helper with containers:")
-    logger.info(f"  Input: {config['azure_storage']['input_container']}")
-    logger.info(f"  Output: {config['azure_storage']['output_container']}")
-    logger.info(f"  Archive: {archive_container}")
-    
-    storage_helper = AzureStorageHelper(
-        config["azure_storage"]["connection_string"],
-        config["azure_storage"]["input_container"],
-        config["azure_storage"]["output_container"],
-        archive_container,
-        logger
-    )
-    
-    pdf_processor = PDFProcessor(config, logger)
-    
-    logger.info(f"Initializing Azure OpenAI Client with {api_type} API")
-    ai_client = AzureOpenAIClient(config, logger)
-    
-    # List PDF blobs in the specified folder
-    logger.info(f"Listing PDF files in Azure folder: {azure_folder}")
-    pdf_blobs = storage_helper.list_blobs_in_folder(azure_folder)
-    
-    if not pdf_blobs:
-        logger.warning(f"No PDF files found in folder: {azure_folder}")
-        return
-    
-    logger.info(f"Found {len(pdf_blobs)} PDF files to process")
-    
-    # Track processed and unprocessed files for archiving
-    processed_files = []
-    unprocessed_files = []
-    
-    # Process each PDF
-    for i, blob_name in enumerate(pdf_blobs):
-        file_processed_successfully = False
-        document_id = None  # Initialize document_id for this file
-        filename = blob_name.split('/')[-1]
-        
-        # Initialize paths for SQL logging
-        source_path = blob_name
-        target_path = ""  # Will be updated when we know the target
-        archive_path = ""  # Will be updated during archiving
-        
-        try:
-            logger.info(f"Processing file {i+1}/{len(pdf_blobs)}: {blob_name}")
-            
-            # **SQL LOGGING - BEGIN: Log the start of processing**
-            document_id = log_file_status_begin(
-                filename=filename,
-                source_path=source_path,
-                target_path=target_path,
-                archive_path=archive_path,
-                status_desc="Starting PDF processing",
-                config=config
-            )
-            
-            if document_id:
-                logger.info(f"SQL Log: Started processing log with ID {document_id}")
-            else:
-                logger.warning(f"SQL Log: Failed to create initial log entry for {filename}")
-            
-            # Download blob to memory
-            logger.debug(f"Downloading blob: {blob_name}")
-            blob_content = storage_helper.download_blob_to_memory(blob_name)
-            
-            if blob_content is None:
-                logger.error(f"Could not download blob: {blob_name}")
-                unprocessed_files.append(blob_name)
-                
-                # **SQL LOGGING - UPDATE: Failed to download**
-                if document_id:
-                    log_file_status_update(
-                        document_id=document_id,
-                        filename=filename,
-                        source_path=source_path,
-                        target_path=target_path,
-                        archive_path=archive_path,
-                        status="FAILED",
-                        status_desc="Failed to download blob from Azure storage",
-                        config=config
-                    )
-                continue
-            
-            # Extract pages as base64 strings
-            logger.info(f"Extracting pages from {filename}")
-            pages = pdf_processor.extract_pdf_pages(blob_content)
-            
-            if not pages:
-                logger.warning(f"No pages extracted from {filename}")
-                unprocessed_files.append(blob_name)
-                
-                # **SQL LOGGING - UPDATE: No pages extracted**
-                if document_id:
-                    log_file_status_update(
-                        document_id=document_id,
-                        filename=filename,
-                        source_path=source_path,
-                        target_path=target_path,
-                        archive_path=archive_path,
-                        status="FAILED",
-                        status_desc="No pages could be extracted from PDF",
-                        config=config
-                    )
-                continue
-            
-            logger.info(f"Extracted {len(pages)} pages from {filename}")
-            
-            # **SQL LOGGING - UPDATE: Successfully extracted pages**
-            if document_id:
-                log_file_status_update(
-                    document_id=document_id,
-                    filename=filename,
-                    source_path=source_path,
-                    target_path=target_path,
-                    archive_path=archive_path,
-                    status="PROCESSING",
-                    status_desc=f"Successfully extracted {len(pages)} pages, starting AI processing",
-                    config=config
-                )
-            
-            # Prepare batches for processing
-            batch_size = config["processing"]["batch_size"]
-            
-            all_results = []
-            batch_processing_successful = True
-            
-            for batch_start in range(0, len(pages), batch_size):
-                batch_end = min(batch_start + batch_size, len(pages))
-                batch_pages = pages[batch_start:batch_end]
-                
-                # Split into page numbers and base64 strings
-                page_nums = [p[0] for p in batch_pages]
-                base64_strings = [p[1] for p in batch_pages]
-                
-                # Create prompts
-                prompts = [pdf_processor.create_extraction_prompt() for _ in range(len(batch_pages))]
-                
-                logger.info(f"Processing batch of {len(batch_pages)} pages (pages {batch_start+1}-{batch_end})")
-                
-                # Process batch using specified API type
-                try:
-                    if api_type == "batch":
-                        logger.debug("Using batch API for processing")
-                        raw_results = ai_client.process_batch(base64_strings, prompts)
-                    else:
-                        logger.debug("Using general API for processing")
-                        raw_results = ai_client.process_general(base64_strings, prompts)
-                    
-                    # Process the results
-                    logger.debug("Processing batch results")
-                    processed_results = pdf_processor.process_batch_results(raw_results, page_nums)
-                    all_results.extend(processed_results)
-                    
-                    logger.info(f"Processed batch {batch_start+1}-{batch_end}")
-                except Exception as batch_error:
-                    logger.error(f"Error processing batch: {str(batch_error)}")
-                    batch_processing_successful = False
-                    
-                    # **SQL LOGGING - UPDATE: Batch processing failed**
-                    if document_id:
-                        log_file_status_update(
-                            document_id=document_id,
-                            filename=filename,
-                            source_path=source_path,
-                            target_path=target_path,
-                            archive_path=archive_path,
-                            status="FAILED",
-                            status_desc=f"AI processing failed at batch {batch_start+1}-{batch_end}: {str(batch_error)}",
-                            config=config
-                        )
-                    break
-            
-            # Check if batch processing was successful
-            if not batch_processing_successful:
-                unprocessed_files.append(blob_name)
-                continue
-            
-            # Log classification results
-            for page_num, category, _ in all_results:
-                logger.info(f"Page {page_num+1} classified as: {category}")
-            
-            # **SQL LOGGING - UPDATE: AI processing completed**
-            if document_id:
-                log_file_status_update(
-                    document_id=document_id,
-                    filename=filename,
-                    source_path=source_path,
-                    target_path=target_path,
-                    archive_path=archive_path,
-                    status="PROCESSING",
-                    status_desc=f"AI processing completed for {len(all_results)} pages, creating output files",
-                    config=config
-                )
-            
-            # Create CSV and determine confidence level
-            logger.info("Creating CSV from extraction results")
-            csv_content, invoice_number, total_amount = pdf_processor.create_csv_for_results(
-                all_results, filename
-            )
-            
-            if csv_content:
-                # Determine confidence level for folder structure
-                is_high_confidence = pdf_processor.has_high_confidence(all_results)
-                
-                # Determine folder path based on confidence
-                if is_high_confidence:
-                    folder_path = config["azure_storage"]["high_confidence_folder"]
-                    logger.info(f"{filename} has HIGH confidence (≥{config['processing']['confidence_threshold']}%)")
-                else:
-                    folder_path = config["azure_storage"]["low_confidence_folder"]
-                    logger.info(f"{filename} has LOW confidence (<{config['processing']['confidence_threshold']}%)")
-                
-                # Prepare filenames for upload
-                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-                base_filename = os.path.splitext(filename)[0]
-                
-                # Upload CSV to blob storage
-                csv_blob_name = f"{folder_path}{base_filename}_{invoice_number}_{total_amount}_{timestamp}.csv"
-                logger.info(f"Uploading CSV to {csv_blob_name}")
-                csv_success, csv_url = storage_helper.upload_to_storage(
-                    csv_blob_name,
-                    csv_content,
-                    "text/csv"
-                )
-                
-                # Upload original PDF to appropriate folder
-                source_folder = "source_documents/" + folder_path
-                source_blob_name = f"{source_folder}{filename}"
-                logger.info(f"Uploading source PDF to {source_blob_name}")
-                source_success, source_url = storage_helper.upload_to_storage(
-                    source_blob_name,
-                    blob_content,
-                    "application/pdf"
-                )
-                
-                logger.info(f"CSV upload: {'Success' if csv_success else 'Failed'}")
-                logger.info(f"Source PDF upload: {'Success' if source_success else 'Failed'}")
-                
-                # Update target_path with the actual output location
-                target_path = f"CSV: {csv_blob_name}, PDF: {source_blob_name}"
-                
-                if csv_success and source_success:
-                    file_processed_successfully = True
-                    processed_files.append(blob_name)
-                    
-                    # **SQL LOGGING - UPDATE: Successfully completed**
-                    if document_id:
-                        confidence_level = "HIGH" if is_high_confidence else "LOW"
-                        log_file_status_update(
-                            document_id=document_id,
-                            filename=filename,
-                            source_path=source_path,
-                            target_path=target_path,
-                            archive_path=archive_path,
-                            status="COMPLETED",
-                            status_desc=f"Processing completed successfully. Confidence: {confidence_level}. CSV: {csv_blob_name}",
-                            config=config
-                        )
-                    
-                    if csv_success:
-                        logger.info(f"CSV URL: {csv_url}")
-                    if source_success:
-                        logger.info(f"Source PDF URL: {source_url}")
-                else:
-                    unprocessed_files.append(blob_name)
-                    
-                    # **SQL LOGGING - UPDATE: Upload failed**
-                    if document_id:
-                        log_file_status_update(
-                            document_id=document_id,
-                            filename=filename,
-                            source_path=source_path,
-                            target_path=target_path,
-                            archive_path=archive_path,
-                            status="FAILED",
-                            status_desc=f"File upload failed - CSV: {'Success' if csv_success else 'Failed'}, PDF: {'Success' if source_success else 'Failed'}",
-                            config=config
-                        )
-            else:
-                logger.warning(f"No extractable content found in {filename}")
-                unprocessed_files.append(blob_name)
-                
-                # **SQL LOGGING - UPDATE: No extractable content**
-                if document_id:
-                    log_file_status_update(
-                        document_id=document_id,
-                        filename=filename,
-                        source_path=source_path,
-                        target_path=target_path,
-                        archive_path=archive_path,
-                        status="FAILED",
-                        status_desc="No extractable content found in PDF after processing",
-                        config=config
-                    )
-        
-        except Exception as e:
-            logger.error(f"Error processing {blob_name}: {str(e)}", exc_info=True)
-            unprocessed_files.append(blob_name)
-            
-            # **SQL LOGGING - UPDATE: Unexpected error**
-            if document_id:
-                log_file_status_update(
-                    document_id=document_id,
-                    filename=filename,
-                    source_path=source_path,
-                    target_path=target_path,
-                    archive_path=archive_path,
-                    status="FAILED",
-                    status_desc=f"Unexpected error during processing: {str(e)}",
-                    config=config
-                )
-    
-    # Handle archiving based on configuration
-    blob_input_move_on = config.get("archive", {}).get("blob_input_move_on", False)
-    
-    if blob_input_move_on:
-        logger.info("Starting archiving process...")
-        logger.info(f"Files to archive - Processed: {len(processed_files)}, Unprocessed: {len(unprocessed_files)}")
-        
-        if processed_files or unprocessed_files:
-            archive_config = config.get("archive", {})
-            success, archive_url = storage_helper.move_files_to_archive(
-                processed_files, 
-                unprocessed_files, 
-                archive_config
-            )
-            
-            if success:
-                logger.info(f"Successfully archived all files to: {archive_url}")
-                
-                # **SQL LOGGING - UPDATE: Update archive paths for all processed files**
-                # You might want to track document IDs in a list to update them all here
-                # This is a simplified approach - you could maintain a dictionary of blob_name -> document_id
-                
-            else:
-                logger.error("Failed to archive files")
-        else:
-            logger.info("No files to archive")
-    else:
-        logger.info("Archiving is disabled (blob_input_move_on = False)")
-    
-    # Summary
-    logger.info("Processing complete!")
-    logger.info(f"Summary:")
-    logger.info(f"  Total files processed: {len(pdf_blobs)}")
-    logger.info(f"  Successfully processed: {len(processed_files)}")
-    logger.info(f"  Failed to process: {len(unprocessed_files)}")
+    try:
+        conn_str = config["sql_server"]["connection_string"]
+        conn = pyodbc.connect(conn_str)
+        cur = conn.cursor()
+
+        result = cur.execute(
+            "{CALL dbo.uspXUpdateDocumentProcessor (?, ?, ?, ?, ?, ?, ?)}",
+            None, filename, source_path, target_path, archive_path, "BEGIN", status_desc
+        ).fetchone()
+
+        document_id = result[0] if result else None
+
+        cur.close()
+        conn.close()
+
+        print(f"[BEGIN] DocumentProcessor_Key = {document_id}")
+        return document_id
+
+    except Exception as e:
+        print(f"[SQL LOGGING ERROR - BEGIN] {e}")
+        return None
+
+
+def log_file_status_update(document_id, filename, source_path, target_path, archive_path, status, status_desc, config):
+    """
+    Updates the file's status in the SQL log using the DocumentProcessor_Key.
+    """
+    if not document_id:
+        print("[SQL UPDATE ERROR] document_id is missing")
+        return False
+
+    try:
+        conn_str = config["sql_server"]["connection_string"]
+        conn = pyodbc.connect(conn_str)
+        cur = conn.cursor()
+
+        cur.execute(
+            "{CALL dbo.uspXUpdateDocumentProcessor (?, ?, ?, ?, ?, ?, ?)}",
+            document_id, filename, source_path, target_path, archive_path, status, status_desc
+        )
+
+        conn.commit()
+        cur.close()
+        conn.close()
+
+        print(f"[UPDATE] document_id {document_id} set to status {status}")
+        return True
+
+    except Exception as e:
+        print(f"[SQL LOGGING ERROR - UPDATE] {e}")
+        return False
