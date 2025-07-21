@@ -56,3 +56,39 @@ def log_file_status_update(document_id, filename, source_path, target_path, arch
     except Exception as e:
         print(f"[SQL LOGGING ERROR - UPDATE] {e}")
         return False
+---
+from logger_helpers import log_file_status_begin, log_file_status_update
+
+config = {
+    "sql_server": {
+        "connection_string": "DRIVER={ODBC Driver 17 for SQL Server};SERVER=localhost;DATABASE=MyDB;UID=sa;PWD=YourPassword123"
+    }
+}
+
+filename = "invoice123.pdf"
+source_path = "azure/input/invoice123.pdf"
+target_path = ""
+archive_path = ""
+
+# STEP 1: Log BEGIN
+document_id = log_file_status_begin(
+    filename=filename,
+    source_path=source_path,
+    target_path=target_path,
+    archive_path=archive_path,
+    status_desc="Started test processing",
+    config=config
+)
+
+# STEP 2: Simulate update
+if document_id:
+    log_file_status_update(
+        document_id=document_id,
+        filename=filename,
+        source_path=source_path,
+        target_path="output/final/invoice123.csv",
+        archive_path="archive/processed/invoice123.pdf",
+        status="COMPLETED",
+        status_desc="Successfully processed and archived",
+        config=config
+    )
