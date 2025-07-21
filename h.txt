@@ -180,3 +180,183 @@ def update_log_with_archive(document_id, archive_path, status, status_desc, conf
     finally:
         cursor.close()
         conn.close()
+
+-----
+
+from pathlib import Path
+import os
+from datetime import datetime
+from logger_helpers import insert_begin_log, update_log  # ✅ IMPORT LOGGING
+
+def process_local_pdf_files(config, api_type, local_folder, logger):
+    """
+    Process PDF files from a local folder and log status to SQL.
+    
+    Parameters:
+    - config: Configuration dictionary
+    - api_type: 'batch' or 'general'
+    - local_folder: Path to local PDF files
+    - logger: Logger instance
+    """
+
+    logger.info(f"Initializing Azure Storage Helper with output container: {config['azure_storage']['output_container']}")
+    
+    storage_helper = AzureStorageHelper(
+        config["azure_storage"]["connection_string"],
+        config["azure_storage"]["input_container"],
+        config["azure_storage"]["output_container"],
+        logger=logger
+    )
+
+    pdf_processor = PDFProcessor(config, logger)
+    ai_client = AzureOpenAIClient(config, logger)
+
+    folder_path = Path(local_folder)
+    if not folder_path.exists() or not folder_path.is_dir():
+        logger.error(f"Folder not found: {local_folder}")
+        return
+
+    pdf_files = list(folder_path.glob("*.pdf"))
+    if not pdf_files:
+        logger.warning(f"No PDF files found in folder: {local_folder}")
+        return
+
+    logger.info(f"Found {len(pdf_files)} PDF files to process")
+
+    processed_files = []
+    unprocessed_files = []
+
+    for i, pdf_file in enumerate(pdf_files):
+        file_processed_successfully = False
+        document_id = None
+
+        try:
+            logger.info(f"Processing file {i+1}/{len(pdf_files)}: {pdf_file.name}")
+            filename = pdf_file.name
+            full_path = str(pdf_file.resolve())
+
+            # ✅ Log BEGIN
+            document_id = insert_begin_log(filename, full_path, config)
+
+            with open(pdf_file, 'rb') as f:
+                file_content = f.read()
+
+            logger.info(f"Extracting pages from {filename}")
+            pages = pdf_processor.extract_pdf_pages(file_content)
+
+            if not pages:
+                logger.warning(f"No pages extracted from {filename}")
+                unprocessed_files.append(filename)
+                if document_id:
+                    update_log(document_id, "", "N/A", "ERROR", "No pages extracted from PDF", config)
+                continue
+
+            batch_size = config["processing"]["batch_size"]
+            all_results = []
+            batch_processing_successful = True
+
+            for batch_start in range(0, len(pages), batch_size):
+                batch_end = min(batch_start + batch_size, len(pages))
+                batch_pages = pages[batch_start:batch_end]
+
+                page_nums = [p[0] for p in batch_pages]
+                base64_strings = [p[1] for p in batch_pages]
+                prompts = [pdf_processor.create_extraction_prompt() for _ in batch_pages]
+
+                logger.info(f"Processing pages {batch_start+1} to {batch_end}")
+
+                try:
+                    if api_type == "batch":
+                        raw_results = ai_client.process_batch(base64_strings, prompts)
+                    else:
+                        raw_results = ai_client.process_general(base64_strings, prompts)
+
+                    processed_results = pdf_processor.process_batch_results(raw_results, page_nums)
+                    all_results.extend(processed_results)
+                except Exception as batch_error:
+                    logger.error(f"Error processing batch: {str(batch_error)}")
+                    batch_processing_successful = False
+                    if document_id:
+                        update_log(document_id, "", "N/A", "ERROR", f"Batch failed: {batch_error}", config)
+                    break
+
+            if not batch_processing_successful:
+                unprocessed_files.append(filename)
+                continue
+
+            for page_num, category, _ in all_results:
+                logger.info(f"Page {page_num+1} classified as: {category}")
+
+            logger.info("Creating CSV from extraction results")
+            csv_content, invoice_number, total_amount = pdf_processor.create_csv_for_results(all_results, filename)
+
+            if not csv_content:
+                logger.warning(f"No extractable content found in {filename}")
+                unprocessed_files.append(filename)
+                if document_id:
+                    update_log(document_id, "", "N/A", "ERROR", "No extractable content found", config)
+                continue
+
+            is_high_confidence = pdf_processor.has_high_confidence(all_results)
+            confidence_folder = config["azure_storage"]["high_confidence_folder"] if is_high_confidence else config["azure_storage"]["low_confidence_folder"]
+            logger.info(f"{filename} classified as {'HIGH' if is_high_confidence else 'LOW'} confidence")
+
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            base_filename = os.path.splitext(filename)[0]
+
+            csv_blob_name = f"{confidence_folder}{base_filename}_{invoice_number}_{total_amount}_{timestamp}.csv"
+            source_blob_name = f"source_documents/{confidence_folder}{filename}"
+
+            logger.info(f"Uploading CSV to blob: {csv_blob_name}")
+            csv_success, csv_url = storage_helper.upload_to_storage(csv_blob_name, csv_content, "text/csv")
+
+            logger.info(f"Uploading source PDF to blob: {source_blob_name}")
+            source_success, source_url = storage_helper.upload_to_storage(source_blob_name, file_content, "application/pdf")
+
+            output_dir = Path("output") / ("high_confidence" if is_high_confidence else "low_confidence")
+            output_dir.mkdir(parents=True, exist_ok=True)
+
+            local_csv_path = output_dir / f"{base_filename}_{invoice_number}_{total_amount}_{timestamp}.csv"
+            with open(local_csv_path, "w") as f:
+                f.write(csv_content)
+
+            logger.info(f"Saved CSV locally to: {local_csv_path}")
+
+            if csv_success and source_success:
+                file_processed_successfully = True
+                processed_files.append(filename)
+
+                # ✅ Update log on success
+                if document_id:
+                    update_log(
+                        document_id=document_id,
+                        target_path=str(local_csv_path.resolve()),
+                        archive_path="N/A",
+                        status="SUCCESS",
+                        status_desc="File processed successfully",
+                        config=config
+                    )
+            else:
+                unprocessed_files.append(filename)
+                if document_id:
+                    update_log(
+                        document_id=document_id,
+                        target_path=str(local_csv_path.resolve()) if csv_success else "",
+                        archive_path="N/A",
+                        status="ERROR",
+                        status_desc="Blob upload failed",
+                        config=config
+                    )
+
+        except Exception as e:
+            logger.error(f"Error processing {filename}: {str(e)}", exc_info=True)
+            unprocessed_files.append(filename)
+            if document_id:
+                update_log(document_id, "", "N/A", "ERROR", f"Exception: {e}", config)
+
+    # Summary
+    logger.info("✅ Local processing complete")
+    logger.info(f"  Processed: {len(processed_files)}")
+    logger.info(f"  Failed: {len(unprocessed_files)}")
+    logger.info("⚠️  Archiving not supported for local files")
+
