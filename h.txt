@@ -1,0 +1,253 @@
+import os
+import json
+import pandas as pd
+import re
+from typing import List, Dict, Tuple, Optional
+from collections import defaultdict
+
+def load_config_from_file(config_file: str) -> Dict:
+    try:
+        with open(config_file, 'r') as f:
+            return json.load(f)
+    except Exception as e:
+        print(f"Error loading config file: {e}")
+        return {}
+
+class DatabricksSchemaGenerator:
+    def __init__(self,
+                 excel_file_path: str,
+                 output_base_folder: str = "generated_schemas",
+                 sheet_name: Optional[str] = None,
+                 categories: Optional[Dict[str, Dict[str, str]]] = None,
+                 generate_drop_statements: bool = False):
+        self.excel_file_path = excel_file_path
+        self.output_base_folder = output_base_folder
+        self.sheet_name = sheet_name
+        self.categories_config = categories or {}
+        self.generate_drop_statements = generate_drop_statements
+
+    def map_datatype(self, datatype: str) -> str:
+        if pd.isna(datatype) or not datatype or str(datatype).strip() == '':
+            return 'VARCHAR(255)'
+        dtype = str(datatype).upper().strip()
+
+        if m := re.match(r'VARCHAR2\((\d+)\s*BYTE\)', dtype):
+            return f'VARCHAR({m.group(1)})'
+        if m := re.match(r'VARCHAR2\((\d+)\)', dtype):
+            return f'VARCHAR({m.group(1)})'
+        if m := re.match(r'NUMBER\((\d+),\s*(\d+)\)', dtype):
+            return f'DECIMAL({m.group(1)},{m.group(2)})'
+        if m := re.match(r'NUMBER\((\d+)\)', dtype):
+            return 'INT' if int(m.group(1)) <= 10 else 'BIGINT'
+        if 'TIMESTAMP' in dtype:
+            return 'TIMESTAMP'
+        if 'DATE' in dtype:
+            return 'DATE'
+        if 'CHAR' in dtype:
+            return 'VARCHAR(1)'
+        if 'CLOB' in dtype:
+            return 'STRING'
+        if 'BLOB' in dtype:
+            return 'BINARY'
+        return 'VARCHAR(255)'
+
+    def load_excel_data(self) -> pd.DataFrame:
+        try:
+            df = pd.read_excel(self.excel_file_path, sheet_name=self.sheet_name)
+            df.columns = df.columns.str.strip()
+
+            for cat, cfg in self.categories_config.items():
+                for col_key in ['schema_col', 'table_col', 'column_col']:
+                    col = cfg.get(col_key)
+                    if col and col in df.columns:
+                        df[col] = df[col].ffill()
+
+            for cfg in self.categories_config.values():
+                schema_col = cfg.get("schema_col")
+                if schema_col and schema_col in df.columns:
+                    df = df[
+                        (df[schema_col].notna()) & 
+                        (df[schema_col].astype(str).str.upper() != "NA") &
+                        (df[schema_col].astype(str).str.strip() != "")
+                    ]
+
+            return df
+
+        except Exception as e:
+            print(f"Error loading Excel file: {e}")
+            return pd.DataFrame()
+
+    def extract_tables(self, df: pd.DataFrame) -> Dict[str, Dict[Tuple[str, str], List[Tuple[str, str, str]]]]:
+        result = {}
+
+        for cat, cfg in self.categories_config.items():
+            schema_col = cfg.get('schema_col')
+            table_col = cfg.get('table_col')
+            column_col = cfg.get('column_col')
+            datatype_col = cfg.get('datatype_col', '')
+            definition_col = cfg.get('definition_col', '')
+
+            missing_cols = []
+            for name, col in [('schema_col', schema_col), ('table_col', table_col), ('column_col', column_col)]:
+                if not col or col not in df.columns:
+                    missing_cols.append(f"{name}: {col}")
+            if missing_cols:
+                print(f"Missing columns for {cat}: {missing_cols}")
+                result[cat] = {}
+                continue
+
+            tables = defaultdict(list)
+            seen = defaultdict(set)
+
+            filtered_df = df[
+                df[schema_col].notna() &
+                df[table_col].notna() &
+                df[column_col].notna()
+            ]
+
+            for _, row in filtered_df.iterrows():
+                schema = str(row[schema_col]).strip()
+                table = str(row[table_col]).strip()
+                column = str(row[column_col]).strip()
+                dtype_val = row.get(datatype_col, '') if datatype_col else ''
+                defn_val = str(row.get(definition_col, '')).strip().replace("'", "''") if definition_col and definition_col in df.columns else ''
+
+                if column.lower() not in seen[(schema, table)]:
+                    dtype = self.map_datatype(dtype_val)
+                    tables[(schema, table)].append((column, dtype, defn_val))
+                    seen[(schema, table)].add(column.lower())
+
+            result[cat] = tables
+
+        return result
+
+    def generate_drop_sql(self, schema: str, table: str, category: str) -> str:
+        return f"-- {category} - Drop {table} Table\nDROP TABLE IF EXISTS external_catalog.{schema}.{table};\n"
+
+    def generate_schema_sql(self, schema: str, table: str, columns: List[Tuple[str, str, str]], category: str) -> str:
+        sql = f"-- {category} - {table} Table Schema\n"
+        sql += f"CREATE TABLE IF NOT EXISTS external_catalog.{schema}.{table} (\n"
+
+        col_lines = []
+        for col, dtype, defn in columns:
+            if defn:
+                col_lines.append(f"    [{col}] {dtype} COMMENT '{defn}'")
+            else:
+                col_lines.append(f"    [{col}] {dtype}")
+
+        sql += ",\n".join(col_lines)
+        sql += "\n);"
+        return sql
+
+    def create_folder_structure(self):
+        folders = list(self.categories_config.keys())
+        extended_folders = []
+
+        for folder in folders:
+            extended_folders.extend([
+                os.path.join(folder, "create"),
+                os.path.join(folder, "drop")
+            ])
+
+        extended_folders.extend(["all_create_consolidated", "all_drop_consolidated"])
+        folders.extend(extended_folders)
+
+        os.makedirs(self.output_base_folder, exist_ok=True)
+        for folder in folders:
+            os.makedirs(os.path.join(self.output_base_folder, folder), exist_ok=True)
+
+    def run(self):
+        df = self.load_excel_data()
+        if df.empty:
+            print("No data loaded.")
+            return
+
+        print(f"Loaded {len(df)} rows from Excel file")
+        self.create_folder_structure()
+        all_tables = self.extract_tables(df)
+
+        all_create_sql = []
+        all_drop_sql = []
+        total_tables = 0
+
+        for cat, tables in all_tables.items():
+            count = 0
+            create_folder = os.path.join(self.output_base_folder, cat, "create")
+            drop_folder = os.path.join(self.output_base_folder, cat, "drop")
+
+            create_statements = []
+            drop_statements = []
+
+            for (schema, table), cols in tables.items():
+                if cols:
+                    base_filename = f"{schema}_{table}".lower()
+                    sql_filename = f"{base_filename}.sql"
+
+                    create_sql = self.generate_schema_sql(schema, table, cols, cat)
+                    with open(os.path.join(create_folder, sql_filename), "w") as f:
+                        f.write(create_sql)
+                    create_statements.append(create_sql)
+                    all_create_sql.append(create_sql)
+
+                    drop_sql = self.generate_drop_sql(schema, table, cat)
+                    with open(os.path.join(drop_folder, sql_filename), "w") as f:
+                        f.write(drop_sql)
+                    drop_statements.append(drop_sql)
+                    all_drop_sql.append(drop_sql)
+
+                    count += 1
+
+            with open(os.path.join(create_folder, f"{cat.lower()}_consolidated_create_{count}.sql"), "w") as f:
+                f.write(f"-- Consolidated CREATE script for category: {cat}\n\n" + "\n\n".join(create_statements))
+
+            with open(os.path.join(drop_folder, f"{cat.lower()}_consolidated_drop_{count}.sql"), "w") as f:
+                f.write(f"-- Consolidated DROP script for category: {cat}\n\n" + "\n\n".join(drop_statements))
+
+            print(f"{cat}: Created {count} table SQL files and consolidated files.")
+            total_tables += count
+
+        create_all_path = os.path.join(self.output_base_folder, "all_create_consolidated", "all_categories_create.sql")
+        drop_all_path = os.path.join(self.output_base_folder, "all_drop_consolidated", "all_categories_drop.sql")
+
+        with open(create_all_path, "w") as f:
+            f.write("-- ALL CATEGORIES CONSOLIDATED CREATE SCRIPT\n\n" + "\n\n".join(all_create_sql))
+
+        with open(drop_all_path, "w") as f:
+            f.write("-- ALL CATEGORIES CONSOLIDATED DROP SCRIPT\n\n" + "\n\n".join(all_drop_sql))
+
+        print(f"\nCreated all_categories consolidated CREATE and DROP files.")
+        print(f"\nTotal tables processed: {total_tables}")
+        print(f"Output generated at: {self.output_base_folder}")
+
+
+-----
+
+{
+  "excel_file_path": "your_excel_file.xlsx",
+  "sheet_name": "Sheet1",
+  "output_base_folder": "generated_schemas",
+  "generate_drop_statements": true,
+  "categories": {
+    "RDMOF": {
+      "schema_col": "RDMOF - Schema",
+      "table_col": "RDMOF - Physical Table Name",
+      "column_col": "RDMOF - Physical Column Name",
+      "datatype_col": "RDMOF - Data Type",
+      "definition_col": "RDMOF - Definition"
+    },
+    "EDL": {
+      "schema_col": "EDL- Schema",
+      "table_col": "EDL - Physical Table Name",
+      "column_col": "EDL - Physical Column Name",
+      "datatype_col": "",
+      "definition_col": ""
+    },
+    "Original_SSR": {
+      "schema_col": "Original SSR - Schema",
+      "table_col": "Original SSR - Physical Table Name",
+      "column_col": "Original SSR - Physical Column Name",
+      "datatype_col": "",
+      "definition_col": ""
+    }
+  }
+}
