@@ -14,7 +14,9 @@ class InsertSQLGenerator:
         self.output_folder = output_folder
         self.sheet_name = sheet_name
         self.categories = categories or {}
-        self.category_keys = list(self.categories.keys())
+
+        # Reverse the category keys for right-to-left flow
+        self.category_keys = list(self.categories.keys())[::-1]
 
     def load_excel_data(self) -> pd.DataFrame:
         df = pd.read_excel(self.excel_file_path, sheet_name=self.sheet_name)
@@ -80,7 +82,6 @@ class InsertSQLGenerator:
             insert_statements = []
             insert_count = 0
 
-            # Get common table names only
             src_table_names = {t[1] for t in src_map.keys()}
             tgt_table_names = {t[1] for t in tgt_map.keys()}
             common_table_names = src_table_names & tgt_table_names
@@ -93,6 +94,9 @@ class InsertSQLGenerator:
                     for tgt_table in tgt_tables:
                         src_columns = src_map[src_table]
                         tgt_columns = tgt_map[tgt_table]
+
+                        if len(src_columns) != len(tgt_columns):
+                            print(f"⚠️ Column count mismatch: {src_table[1]} - {len(src_columns)} vs {len(tgt_columns)}")
 
                         for src_col, tgt_col in zip(src_columns, tgt_columns):
                             sql = self.generate_insert_sql(src_table, src_col, tgt_table, tgt_col)
@@ -108,34 +112,8 @@ class InsertSQLGenerator:
 
             print(f"✅ Generated {insert_count} INSERT statements for: {cat_src} → {cat_tgt}")
 
-        # Master file
         with open(os.path.join(self.output_folder, "all_insert_statements.sql"), "w") as f:
             f.write("\n".join(all_insert_sqls))
 
         print(f"\n📦 Total INSERT statements generated: {total_insert_count}")
         print(f"📁 Output folder: {self.output_folder}")
-
-
----
-  {
-  "excel_file_path": "your_excel_file.xlsx",
-  "sheet_name": "Sheet1",
-  "output_folder": "generated_inserts",
-  "categories": {
-    "Original_SSR": {
-      "schema_col": "Original SSR - Schema",
-      "table_col": "Original SSR - Physical Table Name",
-      "column_col": "Original SSR - Physical Column Name"
-    },
-    "EDL": {
-      "schema_col": "EDL- Schema",
-      "table_col": "EDL - Physical Table Name",
-      "column_col": "EDL - Physical Column Name"
-    },
-    "RDMOF": {
-      "schema_col": "RDMOF - Schema",
-      "table_col": "RDMOF - Physical Table Name",
-      "column_col": "RDMOF - Physical Column Name"
-    }
-  }
-}
