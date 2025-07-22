@@ -1,305 +1,38 @@
-# helper.py
-import os
 import json
-import pandas as pd
-import re
-from typing import List, Dict, Tuple, Optional
-from collections import defaultdict
-
-
-class DatabricksSchemaGenerator:
-    def __init__(self,
-                 excel_file_path: str,
-                 output_base_folder: str = "generated_schemas",
-                 sheet_name: Optional[str] = None,
-                 categories: Optional[Dict[str, Dict[str, str]]] = None,
-                 generate_drop_statements: bool = False):
-        self.excel_file_path = excel_file_path
-        self.output_base_folder = output_base_folder
-        self.sheet_name = sheet_name
-        self.categories_config = categories or {}
-        self.generate_drop_statements = generate_drop_statements
-
-    def map_datatype(self, datatype: str) -> str:
-        if pd.isna(datatype) or not datatype or str(datatype).strip() == '':
-            return 'STRING'
-        dtype = str(datatype).upper().strip()
-
-        if m := re.match(r'VARCHAR2\((\d+)\s*BYTE\)', dtype):
-            return f'STRING'
-        if m := re.match(r'VARCHAR2\((\d+)\)', dtype):
-            return f'STRING'
-        if m := re.match(r'NUMBER\((\d+),\s*(\d+)\)', dtype):
-            return f'DECIMAL({m.group(1)},{m.group(2)})'
-        if m := re.match(r'NUMBER\((\d+)\)', dtype):
-            return 'INT' if int(m.group(1)) <= 10 else 'BIGINT'
-        if 'TIMESTAMP' in dtype:
-            return 'TIMESTAMP'
-        if 'DATE' in dtype:
-            return 'DATE'
-        if 'CHAR' in dtype:
-            return 'STRING'
-        if 'CLOB' in dtype:
-            return 'STRING'
-        if 'BLOB' in dtype:
-            return 'BINARY'
-        return 'STRING'
-
-    def load_excel_data(self) -> pd.DataFrame:
-        try:
-            df = pd.read_excel(self.excel_file_path, sheet_name=self.sheet_name)
-            df.columns = df.columns.str.strip()
-
-            # Forward fill only for schema and table columns
-            for cfg in self.categories_config.values():
-                for col_key in ['schema_col', 'table_col']:
-                    col = cfg.get(col_key)
-                    if col and col in df.columns:
-                        df[col] = df[col].ffill()
-
-            # Filter out rows where schema is NA/empty
-            for cfg in self.categories_config.values():
-                schema_col = cfg.get("schema_col")
-                if schema_col and schema_col in df.columns:
-                    df = df[
-                        (df[schema_col].notna()) &
-                        (df[schema_col].astype(str).str.upper() != "NA") &
-                        (df[schema_col].astype(str).str.strip() != "")
-                    ]
-
-            return df
-
-        except Exception as e:
-            print(f"❌ Error loading Excel file: {e}")
-            return pd.DataFrame()
-
-    def extract_tables(self, df: pd.DataFrame) -> Dict[str, Dict[str, any]]:
-        result = {}
-
-        for cat, cfg in self.categories_config.items():
-            schema_col = cfg.get('schema_col')
-            table_col = cfg.get('table_col')
-            column_col = cfg.get('column_col')
-            datatype_col = cfg.get('datatype_col', '')
-            column_comment_col = cfg.get('column_comment_col', '')
-            table_comment_col = cfg.get('table_comment_col', '')
-
-            if not (schema_col and table_col and column_col):
-                print(f"⚠️  Skipping category {cat}: Missing required columns")
-                continue
-
-            # Check if all required columns exist in dataframe
-            required_cols = [schema_col, table_col, column_col]
-            missing_cols = [col for col in required_cols if col not in df.columns]
-            if missing_cols:
-                print(f"⚠️  Skipping category {cat}: Missing columns {missing_cols}")
-                continue
-
-            tables = defaultdict(list)
-            table_comments = {}
-
-            # Filter for this category - only rows with data in all required columns
-            filtered_df = df[
-                df[schema_col].notna() &
-                df[table_col].notna() &
-                df[column_col].notna() &
-                (df[schema_col].astype(str).str.strip() != '') &
-                (df[table_col].astype(str).str.strip() != '') &
-                (df[column_col].astype(str).str.strip() != '')
-            ].copy()
-
-            if filtered_df.empty:
-                print(f"⚠️  No data found for category {cat}")
-                continue
-
-            # Track unique combinations to avoid duplicates
-            seen_combinations = set()
-            
-            print(f"🔍 Processing category {cat}: {len(filtered_df)} rows")
-
-            for idx, row in filtered_df.iterrows():
-                try:
-                    schema = str(row[schema_col]).strip()
-                    table = str(row[table_col]).strip()
-                    column = str(row[column_col]).strip()
-                    
-                    # Create unique key for this table-column combination
-                    table_key = (schema.lower(), table.lower())
-                    column_key = (schema.lower(), table.lower(), column.lower())
-                    
-                    # Skip if we've already processed this exact combination
-                    if column_key in seen_combinations:
-                        continue
-                    
-                    seen_combinations.add(column_key)
-                    
-                    # Get additional data
-                    dtype = str(row.get(datatype_col, '')).strip() if datatype_col and datatype_col in df.columns else ''
-                    comment = str(row.get(column_comment_col, '')).strip() if column_comment_col and column_comment_col in df.columns else ''
-                    table_comment = str(row.get(table_comment_col, '')).strip() if table_comment_col and table_comment_col in df.columns else ''
-
-                    # Add column to table
-                    tables[table_key].append((column, self.map_datatype(dtype), comment))
-
-                    # Store table comment (only once per table)
-                    if table_comment and table_key not in table_comments:
-                        table_comments[table_key] = table_comment
-
-                except Exception as e:
-                    print(f"⚠️  Error processing row {idx} in category {cat}: {e}")
-                    continue
-
-            result[cat] = {
-                'tables': dict(tables),
-                'table_comments': table_comments
-            }
-            
-            print(f"✅ Category {cat}: Found {len(tables)} unique tables")
-            for (schema, table), columns in tables.items():
-                print(f"   📋 {schema}.{table}: {len(columns)} columns")
-
-        return result
-
-    def generate_schema_sql(self, schema: str, table: str, columns: List[Tuple[str, str, str]],
-                            table_comment: str, category: str) -> str:
-        sql = f"-- {category} - {table} Table Schema\n"
-        sql += f"CREATE TABLE IF NOT EXISTS external_catalog.{schema}.{table} (\n"
-        
-        column_definitions = []
-        for col, dtype, comment in columns:
-            col_def = f"  `{col}` {dtype}"
-            if comment and comment.strip() and comment.lower() not in ['nan', 'none', '']:
-                # Escape single quotes in comments
-                escaped_comment = comment.replace("'", "''")
-                col_def += f" COMMENT '{escaped_comment}'"
-            column_definitions.append(col_def)
-        
-        sql += ",\n".join(column_definitions)
-        sql += "\n)"
-        
-        if table_comment and table_comment.strip() and table_comment.lower() not in ['nan', 'none', '']:
-            escaped_table_comment = table_comment.replace("'", "''")
-            sql += f"\nCOMMENT '{escaped_table_comment}'"
-        
-        sql += ";\n"
-        return sql
-
-    def generate_drop_sql(self, schema: str, table: str, category: str) -> str:
-        return f"-- {category} - Drop {table} Table\nDROP TABLE IF EXISTS external_catalog.{schema}.{table};\n"
-
-    def create_folder_structure(self):
-        for cat in self.categories_config.keys():
-            os.makedirs(os.path.join(self.output_base_folder, cat, "create"), exist_ok=True)
-            if self.generate_drop_statements:
-                os.makedirs(os.path.join(self.output_base_folder, cat, "drop"), exist_ok=True)
-
-        os.makedirs(os.path.join(self.output_base_folder, "all_create_consolidated"), exist_ok=True)
-        if self.generate_drop_statements:
-            os.makedirs(os.path.join(self.output_base_folder, "all_drop_consolidated"), exist_ok=True)
-
-    def run(self):
-        print(f"🚀 Starting schema generation from: {self.excel_file_path}")
-        
-        df = self.load_excel_data()
-        if df.empty:
-            print("❌ No data to process.")
-            return
-
-        print(f"📊 Loaded {len(df)} rows from Excel")
-        print(f"📋 Available columns: {list(df.columns)}")
-
-        self.create_folder_structure()
-
-        all_create_sql = []
-        all_drop_sql = []
-        total_tables = 0
-
-        all_extracted = self.extract_tables(df)
-
-        for cat, data in all_extracted.items():
-            tables = data['tables']
-            table_comments = data['table_comments']
-
-            if not tables:
-                print(f"⚠️  No tables found for category {cat}")
-                continue
-
-            create_sqls = []
-            drop_sqls = []
-            table_count = 0
-
-            for (schema, table), columns in tables.items():
-                comment = table_comments.get((schema, table), '')
-
-                # CREATE
-                create_sql = self.generate_schema_sql(schema, table, columns, comment, cat)
-                create_sqls.append(create_sql)
-                all_create_sql.append(create_sql)
-
-                create_file = os.path.join(self.output_base_folder, cat, "create", f"{schema}_{table}.sql")
-                with open(create_file, 'w', encoding='utf-8') as f:
-                    f.write(create_sql)
-
-                # DROP
-                if self.generate_drop_statements:
-                    drop_sql = self.generate_drop_sql(schema, table, cat)
-                    drop_sqls.append(drop_sql)
-                    all_drop_sql.append(drop_sql)
-
-                    drop_file = os.path.join(self.output_base_folder, cat, "drop", f"{schema}_{table}.sql")
-                    with open(drop_file, 'w', encoding='utf-8') as f:
-                        f.write(drop_sql)
-
-                table_count += 1
-
-            # Category consolidated files
-            consolidated_create = os.path.join(self.output_base_folder, cat, "create", f"{cat.lower()}_consolidated_create.sql")
-            with open(consolidated_create, 'w', encoding='utf-8') as f:
-                f.write("\n\n".join(create_sqls))
-
-            if self.generate_drop_statements and drop_sqls:
-                consolidated_drop = os.path.join(self.output_base_folder, cat, "drop", f"{cat.lower()}_consolidated_drop.sql")
-                with open(consolidated_drop, 'w', encoding='utf-8') as f:
-                    f.write("\n\n".join(drop_sqls))
-
-            print(f"✅ {cat}: {table_count} tables processed.")
-            total_tables += table_count
-
-        # Final consolidated files
-        if all_create_sql:
-            all_create_file = os.path.join(self.output_base_folder, "all_create_consolidated", "all_categories_create.sql")
-            with open(all_create_file, 'w', encoding='utf-8') as f:
-                f.write("\n\n".join(all_create_sql))
-
-        if self.generate_drop_statements and all_drop_sql:
-            all_drop_file = os.path.join(self.output_base_folder, "all_drop_consolidated", "all_categories_drop.sql")
-            with open(all_drop_file, 'w', encoding='utf-8') as f:
-                f.write("\n\n".join(all_drop_sql))
-
-        print(f"\n📦 Total tables processed: {total_tables}")
-        print(f"📁 Output folder: {self.output_base_folder}")
-
-
-# main.py
-import json
-from helper import DatabricksSchemaGenerator
+from schema_helper import DatabricksSchemaGenerator
+from insert_helper import InsertSQLGenerator
 
 def main():
     try:
+        # Load config
         with open("schema_config.json", 'r') as f:
             config = json.load(f)
 
-        generator = DatabricksSchemaGenerator(
+        # Run schema generation
+        print("🛠️ Generating SCHEMA (CREATE + DROP)...")
+        schema_gen = DatabricksSchemaGenerator(
             excel_file_path=config["excel_file_path"],
             output_base_folder=config.get("output_base_folder", "generated_schemas"),
             sheet_name=config.get("sheet_name"),
             categories=config["categories"],
             generate_drop_statements=config.get("generate_drop_statements", False)
         )
-        generator.run()
+        schema_gen.run()
+
+        # Run insert generation
+        print("\n📥 Generating INSERT statements...")
+        insert_gen = InsertSQLGenerator(
+            excel_file_path=config["excel_file_path"],
+            output_folder="generated_inserts",
+            sheet_name=config.get("sheet_name"),
+            categories=config["categories"]
+        )
+        insert_gen.run()
+
+        print("\n✅ All tasks completed successfully!")
 
     except FileNotFoundError:
-        print("❌ schema_config.json not found.")
+        print("❌ Error: schema_config.json not found.")
     except Exception as e:
         print(f"❌ Error: {e}")
 
@@ -307,20 +40,20 @@ if __name__ == "__main__":
     main()
 
 
-# schema_config.json
+--
 {
   "excel_file_path": "your_excel_file.xlsx",
   "sheet_name": "Sheet1",
   "output_base_folder": "generated_schemas",
   "generate_drop_statements": true,
   "categories": {
-    "RDMOF": {
-      "schema_col": "RDMOF - Schema",
-      "table_col": "RDMOF - Physical Table Name",
-      "column_col": "RDMOF - Physical Column Name",
-      "datatype_col": "RDMOF - Data Type",
-      "column_comment_col": "RDMOF - Column Definition",
-      "table_comment_col": "RDMOF - Table Definition"
+    "Original_SSR": {
+      "schema_col": "Original SSR - Schema",
+      "table_col": "Original SSR - Physical Table Name",
+      "column_col": "Original SSR - Physical Column Name",
+      "datatype_col": "Original SSR - Data Type",
+      "column_comment_col": "Original SSR - Column Definition",
+      "table_comment_col": "Original SSR - Table Definition"
     },
     "EDL": {
       "schema_col": "EDL- Schema",
@@ -330,13 +63,13 @@ if __name__ == "__main__":
       "column_comment_col": "EDL - Column Definition",
       "table_comment_col": "EDL - Table Definition"
     },
-    "Original_SSR": {
-      "schema_col": "Original SSR - Schema",
-      "table_col": "Original SSR - Physical Table Name",
-      "column_col": "Original SSR - Physical Column Name",
-      "datatype_col": "Original SSR - Data Type",
-      "column_comment_col": "Original SSR - Column Definition",
-      "table_comment_col": "Original SSR - Table Definition"
+    "RDMOF": {
+      "schema_col": "RDMOF - Schema",
+      "table_col": "RDMOF - Physical Table Name",
+      "column_col": "RDMOF - Physical Column Name",
+      "datatype_col": "RDMOF - Data Type",
+      "column_comment_col": "RDMOF - Column Definition",
+      "table_comment_col": "RDMOF - Table Definition"
     }
   }
 }
