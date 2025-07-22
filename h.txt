@@ -1,0 +1,141 @@
+import os
+import json
+import pandas as pd
+from typing import List, Dict, Tuple, Optional
+from collections import defaultdict
+
+class InsertSQLGenerator:
+    def __init__(self,
+                 excel_file_path: str,
+                 output_folder: str = "generated_inserts",
+                 sheet_name: Optional[str] = None,
+                 categories: Optional[Dict[str, Dict[str, str]]] = None):
+        self.excel_file_path = excel_file_path
+        self.output_folder = output_folder
+        self.sheet_name = sheet_name
+        self.categories = categories or {}
+        self.category_keys = list(self.categories.keys())
+
+    def load_excel_data(self) -> pd.DataFrame:
+        df = pd.read_excel(self.excel_file_path, sheet_name=self.sheet_name)
+        df.columns = df.columns.str.strip()
+        for cfg in self.categories.values():
+            for col_key in ['schema_col', 'table_col', 'column_col']:
+                col = cfg.get(col_key)
+                if col in df.columns:
+                    df[col] = df[col].ffill()
+        return df
+
+    def extract_column_mappings(self, df: pd.DataFrame, cat: str) -> Dict[Tuple[str, str], List[str]]:
+        cfg = self.categories[cat]
+        schema_col = cfg['schema_col']
+        table_col = cfg['table_col']
+        column_col = cfg['column_col']
+
+        result = defaultdict(list)
+        filtered_df = df[
+            df[schema_col].notna() &
+            df[table_col].notna() &
+            df[column_col].notna()
+        ]
+
+        for _, row in filtered_df.iterrows():
+            schema = str(row[schema_col]).strip()
+            table = str(row[table_col]).strip()
+            column = str(row[column_col]).strip()
+            result[(schema, table)].append(column)
+
+        return result
+
+    def generate_insert_sql(self, src_table: Tuple[str, str], src_col: str,
+                            tgt_table: Tuple[str, str], tgt_col: str) -> str:
+        src_schema, src_tab = src_table
+        tgt_schema, tgt_tab = tgt_table
+
+        return (
+            f"-- Insert from {src_tab} to {tgt_tab}\n"
+            f"INSERT INTO {tgt_schema}.{tgt_tab} ({tgt_col})\n"
+            f"SELECT {src_col} FROM {src_schema}.{src_tab};\n"
+        )
+
+    def run(self):
+        df = self.load_excel_data()
+        os.makedirs(self.output_folder, exist_ok=True)
+
+        mappings_per_cat = {
+            cat: self.extract_column_mappings(df, cat)
+            for cat in self.category_keys
+        }
+
+        all_insert_sqls = []
+        total_insert_count = 0
+
+        for i in range(len(self.category_keys) - 1):
+            cat_src = self.category_keys[i]
+            cat_tgt = self.category_keys[i + 1]
+
+            src_map = mappings_per_cat[cat_src]
+            tgt_map = mappings_per_cat[cat_tgt]
+
+            insert_statements = []
+            insert_count = 0
+
+            # Get common table names only
+            src_table_names = {t[1] for t in src_map.keys()}
+            tgt_table_names = {t[1] for t in tgt_map.keys()}
+            common_table_names = src_table_names & tgt_table_names
+
+            for table_name in common_table_names:
+                src_tables = [k for k in src_map if k[1] == table_name]
+                tgt_tables = [k for k in tgt_map if k[1] == table_name]
+
+                for src_table in src_tables:
+                    for tgt_table in tgt_tables:
+                        src_columns = src_map[src_table]
+                        tgt_columns = tgt_map[tgt_table]
+
+                        for src_col, tgt_col in zip(src_columns, tgt_columns):
+                            sql = self.generate_insert_sql(src_table, src_col, tgt_table, tgt_col)
+                            if sql not in insert_statements:
+                                insert_statements.append(sql)
+                                all_insert_sqls.append(sql)
+                                insert_count += 1
+                                total_insert_count += 1
+
+            file_name = f"{cat_src}_to_{cat_tgt}.sql"
+            with open(os.path.join(self.output_folder, file_name), "w") as f:
+                f.write("\n".join(insert_statements))
+
+            print(f"✅ Generated {insert_count} INSERT statements for: {cat_src} → {cat_tgt}")
+
+        # Master file
+        with open(os.path.join(self.output_folder, "all_insert_statements.sql"), "w") as f:
+            f.write("\n".join(all_insert_sqls))
+
+        print(f"\n📦 Total INSERT statements generated: {total_insert_count}")
+        print(f"📁 Output folder: {self.output_folder}")
+
+
+---
+  {
+  "excel_file_path": "your_excel_file.xlsx",
+  "sheet_name": "Sheet1",
+  "output_folder": "generated_inserts",
+  "categories": {
+    "Original_SSR": {
+      "schema_col": "Original SSR - Schema",
+      "table_col": "Original SSR - Physical Table Name",
+      "column_col": "Original SSR - Physical Column Name"
+    },
+    "EDL": {
+      "schema_col": "EDL- Schema",
+      "table_col": "EDL - Physical Table Name",
+      "column_col": "EDL - Physical Column Name"
+    },
+    "RDMOF": {
+      "schema_col": "RDMOF - Schema",
+      "table_col": "RDMOF - Physical Table Name",
+      "column_col": "RDMOF - Physical Column Name"
+    }
+  }
+}
