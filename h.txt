@@ -1,18 +1,19 @@
 import pandas as pd
 import os
 
-def excel_to_formatted_text(excel_file_path, output_file_path=None):
+def excel_to_formatted_text(excel_file_path, sheet_name=None, output_file_path=None):
     """
     Convert Excel file to formatted text file with each row as quoted, comma-separated values.
     
     Parameters:
     excel_file_path (str): Path to the Excel file
+    sheet_name (str): Name of the sheet to read (if None, reads first sheet)
     output_file_path (str): Path for output text file (optional)
     """
     
     try:
-        # Read the Excel file
-        df = pd.read_excel(excel_file_path)
+        # Read the Excel file - skip header row and specify sheet
+        df = pd.read_excel(excel_file_path, sheet_name=sheet_name, header=None, skiprows=1)
         
         # If no output path specified, create one based on input file name
         if output_file_path is None:
@@ -38,29 +39,32 @@ def excel_to_formatted_text(excel_file_path, output_file_path=None):
                 formatted_row = "(" + ",".join(formatted_values) + "),"
                 f.write(formatted_row + "\n")
         
-        print(f"Successfully converted {len(df)} rows to {output_file_path}")
+        print(f"Successfully converted {len(df)} data rows to {output_file_path}")
         print(f"File contains {len(df.columns)} columns per row")
+        print(f"Sheet used: {sheet_name if sheet_name else 'First sheet'}")
         
     except FileNotFoundError:
         print(f"Error: Excel file '{excel_file_path}' not found.")
     except Exception as e:
         print(f"Error processing file: {str(e)}")
 
-def preview_conversion(excel_file_path, num_rows=3):
+def preview_conversion(excel_file_path, sheet_name=None, num_rows=3):
     """
     Preview how the conversion will look for the first few rows.
     
     Parameters:
     excel_file_path (str): Path to the Excel file
+    sheet_name (str): Name of the sheet to read (if None, reads first sheet)
     num_rows (int): Number of rows to preview
     """
     
     try:
-        # Read the Excel file
-        df = pd.read_excel(excel_file_path)
+        # Read the Excel file - skip header row and specify sheet
+        df = pd.read_excel(excel_file_path, sheet_name=sheet_name, header=None, skiprows=1)
         
-        print(f"Preview of conversion (showing first {num_rows} rows):")
-        print(f"Total rows: {len(df)}, Total columns: {len(df.columns)}")
+        print(f"Preview of conversion (showing first {num_rows} data rows):")
+        print(f"Total data rows: {len(df)}, Total columns: {len(df.columns)}")
+        print(f"Sheet: {sheet_name if sheet_name else 'First sheet'}")
         print("-" * 80)
         
         # Show first few rows in the target format
@@ -74,24 +78,25 @@ def preview_conversion(excel_file_path, num_rows=3):
                     formatted_values.append(f'"{str_value}"')
             
             formatted_row = "(" + ",".join(formatted_values) + "),"
-            print(f"Row {index + 1}: {formatted_row}")
+            print(f"Data Row {index + 1}: {formatted_row}")
         
     except Exception as e:
         print(f"Error previewing file: {str(e)}")
 
 # Example usage
 if __name__ == "__main__":
-    # Replace with your Excel file path
+    # Replace with your Excel file path and sheet name
     excel_file = "your_file.xlsx"  # Change this to your file path
+    sheet_name = "Sheet1"  # Change this to your sheet name (or None for first sheet)
     output_file = "output_formatted.txt"  # Optional: specify output file name
     
     # Preview the conversion first
     print("=== PREVIEW ===")
-    preview_conversion(excel_file, 3)
+    preview_conversion(excel_file, sheet_name, 3)
     
     print("\n=== CONVERSION ===")
     # Perform the actual conversion
-    excel_to_formatted_text(excel_file, output_file)
+    excel_to_formatted_text(excel_file, sheet_name, output_file)
     
     # Alternative: Let the script auto-generate output filename
-    # excel_to_formatted_text(excel_file)
+    # excel_to_formatted_text(excel_file, sheet_name)
