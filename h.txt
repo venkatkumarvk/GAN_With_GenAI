@@ -1,0 +1,42 @@
+{
+  "azure_openai": {
+    "api_key": "your-api-key",
+    "api_version": "2023-12-01-preview",
+    "azure_endpoint": "https://your-endpoint.openai.azure.com/",
+    "deployment_name": "your-deployment-name"
+  },
+  "azure_storage": {
+    "connection_string": "your-connection-string",
+    "input_container": "input-pdfs",
+    "output_container": "processed-results",
+    "input_archive_container": "archived-inputs",
+    "high_confidence_folder": "high_confidence/",
+    "low_confidence_folder": "low_confidence/"
+  },
+  "processing": {
+    "batch_size": 10,
+    "confidence_threshold": 80,
+    "zoom_factor": 2.0,
+    "timeout_seconds": 300,
+    "document_types": {
+      "invoice": {
+        "extraction_fields": ["invoice_number", "total_amount", "date", "vendor"],
+        "prompt_module": "invoice_prompt"
+      },
+      "eob": {
+        "extraction_fields": ["eob_number", "patient_name", "service_date", "paid_amount", "provider"],
+        "prompt_module": "eob_prompt"
+      },
+      "claim": {
+        "extraction_fields": ["claim_number", "patient_id", "diagnosis_code", "procedure_code", "claim_amount"],
+        "prompt_module": "claim_prompt"
+      }
+    }
+  },
+  "archive": {
+    "blob_input_move_on": true,
+    "archive_name_format": "archive_{timestamp}.zip",
+    "processed_folder": "processed/",
+    "unprocessed_folder": "unprocessed/"
+  }
+}
