@@ -1,7 +1,7 @@
 import pandas as pd
 import os
 
-def excel_to_formatted_text(excel_file_path, sheet_name=None, output_file_path=None):
+def excel_to_formatted_text(excel_file_path, sheet_name=None, output_file_path=None, empty_value='""'):
     """
     Convert Excel file to formatted text file with each row as quoted, comma-separated values.
     
@@ -9,6 +9,8 @@ def excel_to_formatted_text(excel_file_path, sheet_name=None, output_file_path=N
     excel_file_path (str): Path to the Excel file
     sheet_name (str): Name of the sheet to read (if None, reads first sheet)
     output_file_path (str): Path for output text file (optional)
+    empty_value (str): How to represent empty/null/NA values
+                      Options: '""' (default), '"NULL"', '"NA"', '"EMPTY"', '""'
     """
     
     try:
@@ -28,8 +30,8 @@ def excel_to_formatted_text(excel_file_path, sheet_name=None, output_file_path=N
                 formatted_values = []
                 for value in row:
                     # Handle NaN/None values
-                    if pd.isna(value):
-                        formatted_values.append('""')
+                    if pd.isna(value) or value == '' or str(value).strip() == '':
+                        formatted_values.append(empty_value)
                     else:
                         # Convert to string, remove line breaks and escape quotes
                         str_value = str(value).replace('\n', ' ').replace('\r', ' ').replace('"', '""')
@@ -171,7 +173,7 @@ def show_sample_comparison(excel_file_path, text_file_path, sheet_name=None, num
     except Exception as e:
         print(f"Error processing file: {str(e)}")
 
-def preview_conversion(excel_file_path, sheet_name=None, num_rows=3):
+def preview_conversion(excel_file_path, sheet_name=None, num_rows=3, empty_value='""'):
     """
     Preview how the conversion will look for the first few rows.
     
@@ -179,6 +181,7 @@ def preview_conversion(excel_file_path, sheet_name=None, num_rows=3):
     excel_file_path (str): Path to the Excel file
     sheet_name (str): Name of the sheet to read (if None, reads first sheet)
     num_rows (int): Number of rows to preview
+    empty_value (str): How to represent empty/null/NA values
     """
     
     try:
@@ -188,14 +191,15 @@ def preview_conversion(excel_file_path, sheet_name=None, num_rows=3):
         print(f"Preview of conversion (showing first {num_rows} data rows):")
         print(f"Total data rows: {len(df)}, Total columns: {len(df.columns)}")
         print(f"Sheet: {sheet_name if sheet_name else 'First sheet'}")
+        print(f"Empty values will be represented as: {empty_value}")
         print("-" * 80)
         
         # Show first few rows in the target format
         for index, row in df.head(num_rows).iterrows():
             formatted_values = []
             for value in row:
-                if pd.isna(value):
-                    formatted_values.append('""')
+                if pd.isna(value) or value == '' or str(value).strip() == '':
+                    formatted_values.append(empty_value)
                 else:
                     # Convert to string, remove line breaks and escape quotes
                     str_value = str(value).replace('\n', ' ').replace('\r', ' ').replace('"', '""')
@@ -216,13 +220,17 @@ if __name__ == "__main__":
     sheet_name = "Sheet1"  # Change this to your sheet name (or None for first sheet)
     output_file = "output_formatted.txt"  # Optional: specify output file name
     
+    # Choose how to represent empty/null/NA values:
+    # Options: '""' (empty quotes), '"NULL"', '"NA"', '"EMPTY"', '""'
+    empty_representation = '""'  # Change this as needed
+    
     # Preview the conversion first
     print("=== PREVIEW ===")
-    preview_conversion(excel_file, sheet_name, 3)
+    preview_conversion(excel_file, sheet_name, 3, empty_representation)
     
     print("\n=== CONVERSION ===")
     # Perform the actual conversion
-    converted_rows = excel_to_formatted_text(excel_file, sheet_name, output_file)
+    converted_rows = excel_to_formatted_text(excel_file, sheet_name, output_file, empty_representation)
     
     # Validate the conversion
     if converted_rows > 0:
