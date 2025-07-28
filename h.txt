@@ -20,8 +20,8 @@ def excel_to_formatted_text(excel_file_path, sheet_name=None, output_file_path=N
             base_name = os.path.splitext(os.path.basename(excel_file_path))[0]
             output_file_path = f"{base_name}_formatted.txt"
         
-        # Open the output file for writing
-        with open(output_file_path, 'w', encoding='utf-8') as f:
+        # Open the output file for writing with explicit encoding
+        with open(output_file_path, 'w', encoding='utf-8', newline='') as f:
             # Process each row
             for index, row in df.iterrows():
                 # Convert each cell to string and wrap in quotes
@@ -31,8 +31,10 @@ def excel_to_formatted_text(excel_file_path, sheet_name=None, output_file_path=N
                     if pd.isna(value):
                         formatted_values.append('""')
                     else:
-                        # Convert to string and escape any quotes inside
-                        str_value = str(value).replace('"', '""')
+                        # Convert to string, remove line breaks and escape quotes
+                        str_value = str(value).replace('\n', ' ').replace('\r', ' ').replace('"', '""')
+                        # Remove extra spaces
+                        str_value = ' '.join(str_value.split())
                         formatted_values.append(f'"{str_value}"')
                 
                 # Join with commas and write to file (with trailing comma)
@@ -53,6 +55,19 @@ def excel_to_formatted_text(excel_file_path, sheet_name=None, output_file_path=N
         print(f"Error processing file: {str(e)}")
         return 0
 
+def count_actual_rows(text_file_path):
+    """
+    Count actual rows in text file (each row should start with '(' and end with '),')
+    """
+    try:
+        with open(text_file_path, 'r', encoding='utf-8') as f:
+            content = f.read()
+            # Count rows that match the pattern: starts with '(' and ends with '),'
+            rows = content.count('),')
+            return rows
+    except Exception as e:
+        print(f"Error counting rows: {str(e)}")
+        return 0
 def validate_conversion(excel_file_path, text_file_path, sheet_name=None):
     """
     Validate that the text file has the same number of rows as the Excel file.
@@ -69,9 +84,8 @@ def validate_conversion(excel_file_path, text_file_path, sheet_name=None):
         excel_rows = len(df)
         excel_cols = len(df.columns)
         
-        # Count rows in text file
-        with open(text_file_path, 'r', encoding='utf-8') as f:
-            text_rows = sum(1 for line in f if line.strip())  # Count non-empty lines
+        # Count rows in text file using pattern matching
+        text_rows = count_actual_rows(text_file_path)
         
         # Display validation results
         print("\n" + "="*60)
@@ -183,7 +197,10 @@ def preview_conversion(excel_file_path, sheet_name=None, num_rows=3):
                 if pd.isna(value):
                     formatted_values.append('""')
                 else:
-                    str_value = str(value).replace('"', '""')
+                    # Convert to string, remove line breaks and escape quotes
+                    str_value = str(value).replace('\n', ' ').replace('\r', ' ').replace('"', '""')
+                    # Remove extra spaces
+                    str_value = ' '.join(str_value.split())
                     formatted_values.append(f'"{str_value}"')
             
             formatted_row = "(" + ",".join(formatted_values) + "),"
