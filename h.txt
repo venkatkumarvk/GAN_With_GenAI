@@ -1,0 +1,97 @@
+import pandas as pd
+import os
+
+def excel_to_formatted_text(excel_file_path, output_file_path=None):
+    """
+    Convert Excel file to formatted text file with each row as quoted, comma-separated values.
+    
+    Parameters:
+    excel_file_path (str): Path to the Excel file
+    output_file_path (str): Path for output text file (optional)
+    """
+    
+    try:
+        # Read the Excel file
+        df = pd.read_excel(excel_file_path)
+        
+        # If no output path specified, create one based on input file name
+        if output_file_path is None:
+            base_name = os.path.splitext(os.path.basename(excel_file_path))[0]
+            output_file_path = f"{base_name}_formatted.txt"
+        
+        # Open the output file for writing
+        with open(output_file_path, 'w', encoding='utf-8') as f:
+            # Process each row
+            for index, row in df.iterrows():
+                # Convert each cell to string and wrap in quotes
+                formatted_values = []
+                for value in row:
+                    # Handle NaN/None values
+                    if pd.isna(value):
+                        formatted_values.append('""')
+                    else:
+                        # Convert to string and escape any quotes inside
+                        str_value = str(value).replace('"', '""')
+                        formatted_values.append(f'"{str_value}"')
+                
+                # Join with commas and write to file
+                formatted_row = "(" + ",".join(formatted_values) + ")"
+                f.write(formatted_row + "\n")
+        
+        print(f"Successfully converted {len(df)} rows to {output_file_path}")
+        print(f"File contains {len(df.columns)} columns per row")
+        
+    except FileNotFoundError:
+        print(f"Error: Excel file '{excel_file_path}' not found.")
+    except Exception as e:
+        print(f"Error processing file: {str(e)}")
+
+def preview_conversion(excel_file_path, num_rows=3):
+    """
+    Preview how the conversion will look for the first few rows.
+    
+    Parameters:
+    excel_file_path (str): Path to the Excel file
+    num_rows (int): Number of rows to preview
+    """
+    
+    try:
+        # Read the Excel file
+        df = pd.read_excel(excel_file_path)
+        
+        print(f"Preview of conversion (showing first {num_rows} rows):")
+        print(f"Total rows: {len(df)}, Total columns: {len(df.columns)}")
+        print("-" * 80)
+        
+        # Show first few rows in the target format
+        for index, row in df.head(num_rows).iterrows():
+            formatted_values = []
+            for value in row:
+                if pd.isna(value):
+                    formatted_values.append('""')
+                else:
+                    str_value = str(value).replace('"', '""')
+                    formatted_values.append(f'"{str_value}"')
+            
+            formatted_row = "(" + ",".join(formatted_values) + ")"
+            print(f"Row {index + 1}: {formatted_row}")
+        
+    except Exception as e:
+        print(f"Error previewing file: {str(e)}")
+
+# Example usage
+if __name__ == "__main__":
+    # Replace with your Excel file path
+    excel_file = "your_file.xlsx"  # Change this to your file path
+    output_file = "output_formatted.txt"  # Optional: specify output file name
+    
+    # Preview the conversion first
+    print("=== PREVIEW ===")
+    preview_conversion(excel_file, 3)
+    
+    print("\n=== CONVERSION ===")
+    # Perform the actual conversion
+    excel_to_formatted_text(excel_file, output_file)
+    
+    # Alternative: Let the script auto-generate output filename
+    # excel_to_formatted_text(excel_file)
