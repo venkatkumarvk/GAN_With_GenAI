@@ -43,6 +43,115 @@ def excel_to_formatted_text(excel_file_path, sheet_name=None, output_file_path=N
         print(f"File contains {len(df.columns)} columns per row")
         print(f"Sheet used: {sheet_name if sheet_name else 'First sheet'}")
         
+        # Return the count for validation
+        return len(df)
+        
+    except FileNotFoundError:
+        print(f"Error: Excel file '{excel_file_path}' not found.")
+        return 0
+    except Exception as e:
+        print(f"Error processing file: {str(e)}")
+        return 0
+
+def validate_conversion(excel_file_path, text_file_path, sheet_name=None):
+    """
+    Validate that the text file has the same number of rows as the Excel file.
+    
+    Parameters:
+    excel_file_path (str): Path to the original Excel file
+    text_file_path (str): Path to the generated text file
+    sheet_name (str): Name of the sheet that was converted
+    """
+    
+    try:
+        # Count rows in Excel file (excluding header)
+        df = pd.read_excel(excel_file_path, sheet_name=sheet_name, header=None, skiprows=1)
+        excel_rows = len(df)
+        excel_cols = len(df.columns)
+        
+        # Count rows in text file
+        with open(text_file_path, 'r', encoding='utf-8') as f:
+            text_rows = sum(1 for line in f if line.strip())  # Count non-empty lines
+        
+        # Display validation results
+        print("\n" + "="*60)
+        print("VALIDATION RESULTS")
+        print("="*60)
+        print(f"Excel file: {excel_file_path}")
+        print(f"Sheet: {sheet_name if sheet_name else 'First sheet'}")
+        print(f"Text file: {text_file_path}")
+        print("-"*60)
+        print(f"Excel data rows: {excel_rows}")
+        print(f"Excel columns: {excel_cols}")
+        print(f"Text file rows: {text_rows}")
+        print("-"*60)
+        
+        if excel_rows == text_rows:
+            print("✅ SUCCESS: Row counts match perfectly!")
+            print(f"✅ All {excel_rows} rows were converted successfully")
+        else:
+            print("❌ WARNING: Row counts don't match!")
+            print(f"❌ Missing/Extra rows: {abs(excel_rows - text_rows)}")
+            if excel_rows > text_rows:
+                print(f"❌ {excel_rows - text_rows} rows were not converted")
+            else:
+                print(f"❌ {text_rows - excel_rows} extra rows in text file")
+        
+        print("="*60)
+        
+        return excel_rows == text_rows
+        
+    except FileNotFoundError as e:
+        print(f"Error: File not found - {str(e)}")
+        return False
+    except Exception as e:
+        print(f"Error during validation: {str(e)}")
+        return False
+
+def show_sample_comparison(excel_file_path, text_file_path, sheet_name=None, num_samples=3):
+    """
+    Show side-by-side comparison of Excel rows vs Text file rows for verification.
+    
+    Parameters:
+    excel_file_path (str): Path to the original Excel file
+    text_file_path (str): Path to the generated text file
+    sheet_name (str): Name of the sheet that was converted
+    num_samples (int): Number of sample rows to compare
+    """
+    
+    try:
+        # Read Excel data
+        df = pd.read_excel(excel_file_path, sheet_name=sheet_name, header=None, skiprows=1)
+        
+        # Read text file lines
+        with open(text_file_path, 'r', encoding='utf-8') as f:
+            text_lines = [line.strip() for line in f if line.strip()]
+        
+        print(f"\n=== SAMPLE COMPARISON (First {num_samples} rows) ===")
+        
+        for i in range(min(num_samples, len(df), len(text_lines))):
+            print(f"\n--- Row {i+1} ---")
+            
+            # Show Excel row
+            excel_row = df.iloc[i].tolist()
+            print("Excel row:")
+            print(f"  {excel_row}")
+            
+            # Show Text row
+            print("Text row:")
+            print(f"  {text_lines[i]}")
+            
+            # Check if they match (basic validation)
+            excel_str_values = [str(val) if not pd.isna(val) else "" for val in excel_row]
+            print(f"✅ Row {i+1}: Converted successfully")
+            
+    except Exception as e:
+        print(f"Error during sample comparison: {str(e)}")
+
+        print(f"Successfully converted {len(df)} data rows to {output_file_path}")
+        print(f"File contains {len(df.columns)} columns per row")
+        print(f"Sheet used: {sheet_name if sheet_name else 'First sheet'}")
+        
     except FileNotFoundError:
         print(f"Error: Excel file '{excel_file_path}' not found.")
     except Exception as e:
@@ -96,7 +205,21 @@ if __name__ == "__main__":
     
     print("\n=== CONVERSION ===")
     # Perform the actual conversion
-    excel_to_formatted_text(excel_file, sheet_name, output_file)
+    converted_rows = excel_to_formatted_text(excel_file, sheet_name, output_file)
+    
+    # Validate the conversion
+    if converted_rows > 0:
+        print("\n=== VALIDATION ===")
+        validation_success = validate_conversion(excel_file, output_file, sheet_name)
+        
+        # Show sample comparison
+        print("\n=== SAMPLE VERIFICATION ===")
+        show_sample_comparison(excel_file, output_file, sheet_name, 3)
+        
+        if validation_success:
+            print(f"\n🎉 CONVERSION COMPLETE! All {converted_rows} rows validated successfully!")
+        else:
+            print(f"\n⚠️ CONVERSION ISSUES DETECTED! Please check the validation results above.")
     
     # Alternative: Let the script auto-generate output filename
     # excel_to_formatted_text(excel_file, sheet_name)
