@@ -34,8 +34,8 @@ def excel_to_formatted_text(excel_file_path, output_file_path=None):
                         str_value = str(value).replace('"', '""')
                         formatted_values.append(f'"{str_value}"')
                 
-                # Join with commas and write to file
-                formatted_row = "(" + ",".join(formatted_values) + ")"
+                # Join with commas and write to file (with trailing comma)
+                formatted_row = "(" + ",".join(formatted_values) + "),"
                 f.write(formatted_row + "\n")
         
         print(f"Successfully converted {len(df)} rows to {output_file_path}")
@@ -73,7 +73,7 @@ def preview_conversion(excel_file_path, num_rows=3):
                     str_value = str(value).replace('"', '""')
                     formatted_values.append(f'"{str_value}"')
             
-            formatted_row = "(" + ",".join(formatted_values) + ")"
+            formatted_row = "(" + ",".join(formatted_values) + "),"
             print(f"Row {index + 1}: {formatted_row}")
         
     except Exception as e:
