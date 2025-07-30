@@ -2,13 +2,14 @@ import importlib  # Add this line
 
 ---
 
-  def get_document_config(config, doc_type):
+ def get_document_config(config, doc_type, api_type):
     """
-    Get configuration for a specific document type including model configuration.
+    Get configuration for a specific document type and API type.
     
     Args:
         config: Full configuration dictionary
         doc_type: Document type ('invoice', 'eob', 'claim')
+        api_type: API type ('general', 'batch')
     
     Returns:
         tuple: (extraction_fields, systemprompt, prompt_template, model_config)
@@ -22,19 +23,20 @@ import importlib  # Add this line
     extraction_fields = doc_config["extraction_fields"]
     prompt_module_name = doc_config["prompt_module"]
     
-    # Get model configuration for this document type
-    azure_openai_config = config["azure_openai"]
-    api_version = azure_openai_config["api_version"]
+    # Get model configuration based on API type
+    if api_type == "general":
+        azure_openai_config = config["azure_openai_general"]
+    elif api_type == "batch":
+        azure_openai_config = config["azure_openai_batch"]
+    else:
+        raise ValueError(f"Unsupported API type: {api_type}. Use 'general' or 'batch'")
     
     # Check if document type has specific model configuration
     if doc_type in azure_openai_config.get("models", {}):
         model_config = azure_openai_config["models"][doc_type].copy()
-        model_config["api_version"] = api_version
     else:
         # Use default configuration
-        default_config = azure_openai_config.get("default", {})
-        model_config = default_config.copy()
-        model_config["api_version"] = api_version
+        model_config = azure_openai_config.get("default", {}).copy()
     
     # Dynamically import the prompt module
     try:
@@ -56,7 +58,6 @@ import importlib  # Add this line
     
     return extraction_fields, systemprompt, prompt_template, model_config
 
-
 def create_formatted_prompt(prompt_template, extraction_fields):
     """
     Format the prompt template with extraction fields.
@@ -73,17 +74,17 @@ def create_formatted_prompt(prompt_template, extraction_fields):
 
 
   ----
-  def process_azure_pdf_files(config, api_type, azure_folder, doc_type, logger):
-
+def process_azure_pdf_files(config, api_type, azure_folder, doc_type, logger):
 ---
-  # Get document-specific configuration including model config
-    extraction_fields, systemprompt, prompt_template, model_config = get_document_config(config, doc_type)
+ # Get document-specific configuration including model config
+    extraction_fields, systemprompt, prompt_template, model_config = get_document_config(config, doc_type, api_type)
     logger.info(f"Processing {doc_type} documents with fields: {extraction_fields}")
     logger.info(f"Using prompt module: {config['processing']['document_types'][doc_type]['prompt_module']}")
-    logger.info(f"Using Azure OpenAI model configuration:")
+    logger.info(f"Using Azure OpenAI {api_type} API configuration:")
     logger.info(f"  Endpoint: {model_config.get('azure_endpoint')}")
     logger.info(f"  Deployment: {model_config.get('deployment_name')}")
     logger.info(f"  API Version: {model_config.get('api_version')}")
+    logger.info(f"  Model Name: {model_config.get('modelname')}")
     
     # Initialize helpers with archive container
     archive_container = config["azure_storage"].get("input_archive_container")
@@ -106,17 +107,14 @@ def create_formatted_prompt(prompt_template, extraction_fields):
     # Initialize AI client with document-specific model configuration
     logger.info(f"Initializing Azure OpenAI Client with {api_type} API for {doc_type}")
     ai_client = AzureOpenAIClient(model_config, logger)
-
-
   ----
 
   # Create formatted prompts using the document-specific prompt template
                 formatted_prompt = create_formatted_prompt(prompt_template, extraction_fields)
                 prompts = [formatted_prompt for _ in range(len(batch_pages))]
 
-
 ----
-  if api_type == "batch":
+if api_type == "batch":
                         logger.debug("Using batch API for processing")
                         raw_results = ai_client.process_batch(base64_strings, prompts, systemprompt)
                     else:
@@ -125,15 +123,10 @@ def create_formatted_prompt(prompt_template, extraction_fields):
 
 
   ---
-  csv_content, primary_field, secondary_field = pdf_processor.create_csv_for_results(
-                all_results, filename
-            )
-
-
-  ---
   # Upload CSV to blob storage
-                csv_blob_name = f"{folder_path}{doc_type}_{base_filename}_{primary_field}_{secondary_field}_{timestamp}.csv"
+csv_content, primary_field, secondary_field = pdf_processor.create_csv_for_results(
 
+csv_blob_name = f"{folder_path}{doc_type}_{base_filename}_{primary_field}_{secondary_field}_{timestamp}.csv"
   ----
   # Upload original PDF to appropriate folder
                 source_folder = f"source_documents/{doc_type}/" + folder_path
@@ -143,18 +136,96 @@ def create_formatted_prompt(prompt_template, extraction_fields):
                       help="Document type to process (invoice, eob, or claim)")
 
   ---
-  # Validate document type exists in config
+  # # Validate document type exists in config
         if args.doctype not in config["processing"]["document_types"]:
             available_types = list(config["processing"]["document_types"].keys())
             raise ValueError(f"Document type '{args.doctype}' not found in config. Available types: {available_types}")
-
-
+---
+logger.info("Processing complete!")
+    logger.info(f"Summary:")
+    logger.info(f"  Document type: {doc_type}")
+    logger.info(f"  API type: {api_type}")
+    logger.info(f"  Total files processed: {len(pdf_blobs)}")
   ---
-  if args.source == "azure":
+if args.source == "azure":
             process_azure_pdf_files(config, args.apitype, args.folder, args.doctype, logger)
-
-
   ---
+
+----
+
+
+class PDFProcessor:
+    def __init__(self, config, logger, doc_type=None, extraction_fields=None):
+        self.config = config
+        self.logger = logger
+        self.doc_type = doc_type or "invoice"
+        self.extraction_fields = extraction_fields or config["processing"].get("extraction_fields", ["invoice_number", "total_amount", "date", "vendor"])
+        
+        # Log the processor configuration
+        self.logger.info(f"PDFProcessor initialized for document type: {self.doc_type}")
+        self.logger.info(f"Extraction fields: {self.extraction_fields}")
+-----
+def create_csv_for_results(self, results, filename):
+        """
+        Create CSV content from extraction results, adapting to different document types.
+        
+        Returns:
+            tuple: (csv_content, primary_field_value, secondary_field_value)
+        """
+        if not results:
+            return None, "unknown", "unknown"
+        
+        try:
+            # Create CSV header based on extraction fields
+            csv_lines = []
+            header = ["filename", "page_number", "document_type"] + self.extraction_fields + ["confidence"]
+            csv_lines.append(",".join(header))
+            
+            # Initialize field values for filename generation
+            primary_field_value = "unknown"
+            secondary_field_value = "unknown"
+            
+            # Process each result
+            for page_num, category, extracted_data in results:
+                row = [filename, str(page_num + 1), self.doc_type]
+                
+                # Extract field values based on document type
+                if extracted_data and isinstance(extracted_data, dict):
+                    extractions = extracted_data.get("extractions", {})
+                    
+                    # Add field values to row
+                    for field in self.extraction_fields:
+                        field_data = extractions.get(field, {})
+                        value = field_data.get("value", "N/A") if isinstance(field_data, dict) else str(field_data)
+                        row.append(f'"{value}"')  # Quote values to handle commas
+                        
+                        # Set primary and secondary field values for filename
+                        if field == self.extraction_fields[0] and value != "N/A":  # First field as primary
+                            primary_field_value = str(value).replace('"', '').replace(',', '_')
+                        elif len(self.extraction_fields) > 1 and field == self.extraction_fields[1] and value != "N/A":  # Second field as secondary
+                            secondary_field_value = str(value).replace('"', '').replace(',', '_')
+                    
+                    # Add overall confidence
+                    confidence = extracted_data.get("overall_confidence", 0)
+                    row.append(str(confidence))
+                else:
+                    # If no extracted data, fill with N/A
+                    row.extend(["N/A"] * len(self.extraction_fields))
+                    row.append("0")
+                
+                csv_lines.append(",".join(row))
+            
+            csv_content = "\n".join(csv_lines)
+            self.logger.debug(f"Created CSV with {len(results)} rows for {self.doc_type} document")
+            
+            return csv_content, primary_field_value, secondary_field_value
+            
+        except Exception as e:
+            self.logger.error(f"Error creating CSV: {str(e)}")
+            return None, "error", "error"
+
+---
+
   class AzureOpenAIClient:
     def __init__(self, model_config, logger):
         """
@@ -171,15 +242,14 @@ def create_formatted_prompt(prompt_template, extraction_fields):
         self.azure_endpoint = model_config.get("azure_endpoint")
         self.api_version = model_config.get("api_version")
         self.deployment_name = model_config.get("deployment_name")
+        self.modelname = model_config.get("modelname")
+        self.api_type = model_config.get("api_type")
         
         # Validate required configuration
-        if not all([self.api_key, self.azure_endpoint, self.api_version, self.deployment_name]):
-            missing = [k for k, v in {
-                "api_key": self.api_key,
-                "azure_endpoint": self.azure_endpoint, 
-                "api_version": self.api_version,
-                "deployment_name": self.deployment_name
-            }.items() if not v]
+        required_fields = ["api_key", "azure_endpoint", "api_version", "deployment_name"]
+        missing = [field for field in required_fields if not model_config.get(field)]
+        
+        if missing:
             raise ValueError(f"Missing required Azure OpenAI configuration: {missing}")
         
         # Initialize the Azure OpenAI client
@@ -196,16 +266,22 @@ def create_formatted_prompt(prompt_template, extraction_fields):
             self.logger.info(f"  Endpoint: {self.azure_endpoint}")
             self.logger.info(f"  Deployment: {self.deployment_name}")
             self.logger.info(f"  API Version: {self.api_version}")
+            self.logger.info(f"  Model Name: {self.modelname}")
+            self.logger.info(f"  API Type: {self.api_type}")
             
         except Exception as e:
             self.logger.error(f"Failed to initialize Azure OpenAI client: {str(e)}")
             raise
 
 ---
-  def process_general(self, base64_strings, prompts, systemprompt=None):
-
+def process_general(self, base64_strings, prompts, systemprompt=None):
 ---
-  messages = []
+  for i, (base64_string, user_prompt) in enumerate(zip(base64_strings, prompts)):
+            try:
+                self.logger.debug(f"Processing image {i+1}/{len(base64_strings)}")
+                
+                # Prepare messages
+                messages = []
                 
                 # Add system message if provided
                 if systemprompt:
@@ -215,24 +291,42 @@ def create_formatted_prompt(prompt_template, extraction_fields):
                     })
                 
                 # Add user message with image
+                user_content = [
+                    {
+                        "type": "text",
+                        "text": user_prompt
+                    },
+                    {
+                        "type": "image_url",
+                        "image_url": {
+                            "url": f"data:image/jpeg;base64,{base64_string}"
+                        }
+                    }
+                ]
+                
                 messages.append({
                     "role": "user",
-                    "content": [
-                        {
-                            "type": "text",
-                            "text": user_prompt
-                        },
-                        {
-                            "type": "image_url",
-                            "image_url": {
-                                "url": f"data:image/jpeg;base64,{base64_string}"
-                            }
-                        }
-                    ]
+                    "content": user_content
                 })
-
+                
+                # Make API call
+                response = self.client.chat.completions.create(
+                    model=self.deployment_name,
+                    messages=messages,
+                    max_tokens=2000,
+                    temperature=0.1
+                )
+                
+                result = response.choices[0].message.content
+                results.append(result)
+                
+                self.logger.debug(f"Successfully processed image {i+1}")
+                
+            except Exception as e:
+                self.logger.error(f"Error processing image {i+1}: {str(e)}")
+                results.append(None)
   ---
-  def process_batch(self, base64_strings, prompts, systemprompt=None):
+def process_batch(self, base64_strings, prompts, systemprompt=None):
 --
 class PDFProcessor:
     def __init__(self, config, logger, doc_type=None, extraction_fields=None):
