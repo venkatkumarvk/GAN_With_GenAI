@@ -1,26 +1,73 @@
 {
-  "azure_openai": {
-    "api_version": "2023-12-01-preview",
+  "azure_openai_general": {
     "default": {
       "api_key": "your-default-api-key",
+      "api_version": "2023-12-01-preview",
       "azure_endpoint": "https://your-default-endpoint.openai.azure.com/",
-      "deployment_name": "your-default-deployment-name"
+      "deployment_name": "your-default-deployment-name",
+      "modelname": "gpt",
+      "api_type": "azure"
     },
     "models": {
       "invoice": {
         "api_key": "your-invoice-api-key",
+        "api_version": "2023-12-01-preview",
         "azure_endpoint": "https://your-invoice-endpoint.openai.azure.com/",
-        "deployment_name": "gpt-4-vision-invoice"
+        "deployment_name": "gpt-4-vision-invoice",
+        "modelname": "gpt",
+        "api_type": "azure"
       },
       "eob": {
         "api_key": "your-eob-api-key", 
+        "api_version": "2023-12-01-preview",
         "azure_endpoint": "https://your-eob-endpoint.openai.azure.com/",
-        "deployment_name": "gpt-4-vision-eob"
+        "deployment_name": "gpt-4-vision-eob",
+        "modelname": "gpt",
+        "api_type": "azure"
       },
       "claim": {
         "api_key": "your-claim-api-key",
+        "api_version": "2023-12-01-preview",
         "azure_endpoint": "https://your-claim-endpoint.openai.azure.com/",
-        "deployment_name": "gpt-4-vision-claim"
+        "deployment_name": "gpt-4-vision-claim",
+        "modelname": "gpt",
+        "api_type": "azure"
+      }
+    }
+  },
+  "azure_openai_batch": {
+    "default": {
+      "api_key": "your-default-api-key",
+      "api_version": "2023-12-01-preview",
+      "azure_endpoint": "https://your-default-endpoint.openai.azure.com/",
+      "deployment_name": "your-default-deployment-name",
+      "modelname": "gpt",
+      "api_type": "azure"
+    },
+    "models": {
+      "invoice": {
+        "api_key": "your-invoice-api-key",
+        "api_version": "2023-12-01-preview",
+        "azure_endpoint": "https://your-invoice-endpoint.openai.azure.com/",
+        "deployment_name": "gpt-4-vision-invoice",
+        "modelname": "gpt",
+        "api_type": "azure"
+      },
+      "eob": {
+        "api_key": "your-eob-api-key", 
+        "api_version": "2023-12-01-preview",
+        "azure_endpoint": "https://your-eob-endpoint.openai.azure.com/",
+        "deployment_name": "gpt-4-vision-eob",
+        "modelname": "gpt",
+        "api_type": "azure"
+      },
+      "claim": {
+        "api_key": "your-claim-api-key",
+        "api_version": "2023-12-01-preview",
+        "azure_endpoint": "https://your-claim-endpoint.openai.azure.com/",
+        "deployment_name": "gpt-4-vision-claim",
+        "modelname": "gpt",
+        "api_type": "azure"
       }
     }
   },
