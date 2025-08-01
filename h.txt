@@ -1,108 +1,88 @@
-{
-  "azure_openai_general": {
-    "default": {
-      "api_key": "your-default-api-key",
-      "api_version": "2023-12-01-preview",
-      "azure_endpoint": "https://your-default-endpoint.openai.azure.com/",
-      "deployment_name": "your-default-deployment-name",
-      "modelname": "gpt",
-      "api_type": "azure"
-    },
-    "models": {
-      "invoice": {
-        "api_key": "your-invoice-api-key",
-        "api_version": "2023-12-01-preview",
-        "azure_endpoint": "https://your-invoice-endpoint.openai.azure.com/",
-        "deployment_name": "gpt-4-vision-invoice",
-        "modelname": "gpt",
-        "api_type": "azure"
-      },
-      "eob": {
-        "api_key": "your-eob-api-key", 
-        "api_version": "2023-12-01-preview",
-        "azure_endpoint": "https://your-eob-endpoint.openai.azure.com/",
-        "deployment_name": "gpt-4-vision-eob",
-        "modelname": "gpt",
-        "api_type": "azure"
-      },
-      "claim": {
-        "api_key": "your-claim-api-key",
-        "api_version": "2023-12-01-preview",
-        "azure_endpoint": "https://your-claim-endpoint.openai.azure.com/",
-        "deployment_name": "gpt-4-vision-claim",
-        "modelname": "gpt",
-        "api_type": "azure"
-      }
-    }
-  },
-  "azure_openai_batch": {
-    "default": {
-      "api_key": "your-default-api-key",
-      "api_version": "2023-12-01-preview",
-      "azure_endpoint": "https://your-default-endpoint.openai.azure.com/",
-      "deployment_name": "your-default-deployment-name",
-      "modelname": "gpt",
-      "api_type": "azure"
-    },
-    "models": {
-      "invoice": {
-        "api_key": "your-invoice-api-key",
-        "api_version": "2023-12-01-preview",
-        "azure_endpoint": "https://your-invoice-endpoint.openai.azure.com/",
-        "deployment_name": "gpt-4-vision-invoice",
-        "modelname": "gpt",
-        "api_type": "azure"
-      },
-      "eob": {
-        "api_key": "your-eob-api-key", 
-        "api_version": "2023-12-01-preview",
-        "azure_endpoint": "https://your-eob-endpoint.openai.azure.com/",
-        "deployment_name": "gpt-4-vision-eob",
-        "modelname": "gpt",
-        "api_type": "azure"
-      },
-      "claim": {
-        "api_key": "your-claim-api-key",
-        "api_version": "2023-12-01-preview",
-        "azure_endpoint": "https://your-claim-endpoint.openai.azure.com/",
-        "deployment_name": "gpt-4-vision-claim",
-        "modelname": "gpt",
-        "api_type": "azure"
-      }
-    }
-  },
-  "azure_storage": {
-    "connection_string": "your-connection-string",
-    "input_container": "input-pdfs",
-    "output_container": "processed-results",
-    "input_archive_container": "archived-inputs",
-    "high_confidence_folder": "high_confidence/",
-    "low_confidence_folder": "low_confidence/"
-  },
-  "processing": {
-    "batch_size": 10,
-    "confidence_threshold": 80,
-    "zoom_factor": 2.0,
-    "timeout_seconds": 300,
-    "document_types": {
-      "invoice": {
-        "extraction_fields": ["invoice_number", "total_amount", "date", "vendor"],
-        "prompt_module": "invoice_prompt"
-      },
-      "eob": {
-        "extraction_fields": ["eob_number", "patient_name", "service_date", "paid_amount", "provider"],
-        "prompt_module": "eob_prompt"
-      },
-      "claim": {
-        "extraction_fields": ["claim_number", "patient_id", "diagnosis_code", "procedure_code", "claim_amount"],
-        "prompt_module": "claim_prompt"
-      }
-    }
-  },
-  "archive": {
-    "blob_input_move_on": true,
-    "archive_name_format": "archive_{timestamp}.zip",
-    "processed_folder": "processed/",
-    "unprocessed_folder": "unprocessed/"
-  }
-}
+
+def create_formatted_prompt(prompt_template, extraction_fields):
+    """
+    Format the prompt template with extraction fields.
+    
+    Args:
+        prompt_template: The prompt template string
+        extraction_fields: List of fields to extract
+    
+    Returns:
+        str: Formatted prompt
+    """
+    fields_str = ", ".join(extraction_fields)
+    try:
+        return prompt_template.format(extraction_fields=fields_str)
+    except KeyError as e:
+        # Handle cases where prompt template has extra placeholders
+        print(f"Warning: KeyError in prompt formatting: {e}")
+        print(f"Available placeholders should be: {{extraction_fields}}")
+        # Return prompt with basic replacement
+        return prompt_template.replace("{extraction_fields}", fields_str)
+
+
+
+def process_local_pdf_files(config, api_type, local_folder, doc_type, logger):
+    """
+    Process PDF files from a local folder.
+    
+    Parameters:
+    - config: Configuration dictionary
+    - api_type: 'batch' or 'general'
+    - local_folder: Folder path in local filesystem
+    - doc_type: Document type ('invoice', 'eob', 'claim', etc.)
+    - logger: Logger instance
+    """
+    # Get document-specific configuration including model config
+    extraction_fields, systemprompt, prompt_template, model_config = get_document_config(config, doc_type, api_type)
+    logger.info(f"Processing {doc_type} documents with fields: {extraction_fields}")
+    logger.info(f"Using prompt module: {config['processing']['document_types'][doc_type]['prompt_module']}")
+    
+    # Initialize helpers (no archiving for local files)
+    logger.info(f"Initializing Azure Storage Helper with output container: {config['azure_storage']['output_container']}")
+    storage_helper = AzureStorageHelper(
+        config["azure_storage"]["connection_string"],
+        config["azure_storage"]["input_container"],
+        config["azure_storage"]["output_container"],
+        logger=logger
+    )
+    
+    # Pass document type and extraction fields to PDFProcessor
+    pdf_processor = PDFProcessor(config, logger, doc_type, extraction_fields)
+    
+    # Initialize AI client with document-specific model configuration
+    logger.info(f"Initializing Azure OpenAI Client with {api_type} API for {doc_type}")
+    ai_client = AzureOpenAIClient(model_config, logger)
+    
+    # Check if folder exists
+    folder_path = Path(local_folder)
+    if not folder_path.exists() or not folder_path.is_dir():
+        logger.error(f"Folder not found: {local_folder}")
+        return
+    
+    # Find all PDF files in the folder
+    logger.info(f"Scanning local folder: {local_folder}")
+    pdf_files = list(folder_path.glob("*.pdf"))
+    
+    if not pdf_files:
+        logger.warning(f"No PDF files found in folder: {local_folder}")
+        return
+    
+    logger.info(f"Found {len(pdf_files)} PDF files to process")
+    
+    # Track processed and unprocessed files
+    processed_files = []
+    unprocessed_files = []
+    
+    # Process each PDF (continue with your existing local processing logic, but update prompts section)
+    # ... rest of the function remains the same but replace prompt creation with:
+    
+    # Create formatted prompts using the document-specific prompt template
+    formatted_prompt = create_formatted_prompt(prompt_template, extraction_fields)
+    prompts = [formatted_prompt for _ in range(len(batch_pages))]
+    
+    # And update AI client calls with systemprompt:
+    if api_type == "batch":
+        raw_results = ai_client.process_batch(base64_strings, prompts, systemprompt)
+    else:
+        raw_results = ai_client.process_general(base64_strings, prompts, systemprompt)
