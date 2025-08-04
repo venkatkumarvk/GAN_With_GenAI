@@ -1,88 +1,315 @@
+# insert_helper.py
+import os
+import json
+import pandas as pd
+from typing import List, Dict, Tuple, Optional
+from collections import defaultdict
 
-def create_formatted_prompt(prompt_template, extraction_fields):
-    """
-    Format the prompt template with extraction fields.
-    
-    Args:
-        prompt_template: The prompt template string
-        extraction_fields: List of fields to extract
-    
-    Returns:
-        str: Formatted prompt
-    """
-    fields_str = ", ".join(extraction_fields)
+class InsertSQLGenerator:
+    def __init__(self,
+                 excel_file_path: str,
+                 output_folder: str = "generated_inserts",
+                 sheet_name: Optional[str] = None,
+                 categories: Optional[Dict[str, Dict[str, str]]] = None):
+        self.excel_file_path = excel_file_path
+        self.output_folder = output_folder
+        self.sheet_name = sheet_name
+        self.categories = categories or {}
+        self.category_keys = list(self.categories.keys())  # preserve order
+
+    def load_excel_data(self) -> pd.DataFrame:
+        """Load and clean Excel data"""
+        df = pd.read_excel(self.excel_file_path, sheet_name=self.sheet_name)
+        df.columns = df.columns.str.strip()
+        
+        # Forward fill for schema, table, and column names to handle merged cells
+        for cfg in self.categories.values():
+            for col_key in ['schema_col', 'table_col', 'column_col']:
+                col = cfg.get(col_key)
+                if col in df.columns:
+                    df[col] = df[col].ffill()
+        return df
+
+    def extract_column_mappings(self, df: pd.DataFrame, cat: str) -> Dict[Tuple[str, str], List[str]]:
+        """Extract schema.table -> [columns] mapping for a category"""
+        cfg = self.categories[cat]
+        schema_col = cfg['schema_col']
+        table_col = cfg['table_col']
+        column_col = cfg['column_col']
+
+        result = defaultdict(list)
+        filtered_df = df[
+            df[schema_col].notna() &
+            df[table_col].notna() &
+            df[column_col].notna()
+        ]
+
+        for _, row in filtered_df.iterrows():
+            schema = str(row[schema_col]).strip()
+            table = str(row[table_col]).strip()
+            column = str(row[column_col]).strip()
+            result[(schema, table)].append(column)
+
+        return result
+
+    def generate_insert_sql(self, src_table: Tuple[str, str], src_col: str,
+                           tgt_table: Tuple[str, str], tgt_col: str, 
+                           src_has_na: bool = False, tgt_has_na: bool = False) -> str:
+        """Generate a single INSERT statement, handling NA values"""
+        src_schema, src_tab = src_table
+        tgt_schema, tgt_tab = tgt_table
+
+        # Handle NA cases
+        if src_has_na and tgt_has_na:
+            # Both source and target have NA - create placeholder INSERT
+            return (
+                f"-- Insert from {src_schema}.{src_tab}.{src_col} to {tgt_schema}.{tgt_tab}.{tgt_col}\n"
+                f"-- WARNING: Both source and target have NA values\n"
+                f"-- INSERT INTO {tgt_schema}.{tgt_tab} ({tgt_col})\n"
+                f"-- SELECT NULL AS {tgt_col}; -- Placeholder for NA mapping\n"
+            )
+        elif src_has_na:
+            # Source has NA - insert NULL values
+            return (
+                f"-- Insert from {src_schema}.{src_tab}.{src_col} to {tgt_schema}.{tgt_tab}.{tgt_col}\n"
+                f"-- WARNING: Source has NA values, inserting NULL\n"
+                f"INSERT INTO {tgt_schema}.{tgt_tab} ({tgt_col})\n"
+                f"SELECT NULL AS {tgt_col}; -- Source mapping is NA\n"
+            )
+        elif tgt_has_na:
+            # Target has NA - comment out the INSERT
+            return (
+                f"-- Insert from {src_schema}.{src_tab}.{src_col} to {tgt_schema}.{tgt_tab}.{tgt_col}\n"
+                f"-- WARNING: Target has NA values, INSERT commented out\n"
+                f"-- INSERT INTO {tgt_schema}.{tgt_tab} ({tgt_col})\n"
+                f"-- SELECT DISTINCT {src_col} FROM {src_schema}.{src_tab}; -- Target mapping is NA\n"
+            )
+        else:
+            # Normal case - both source and target are valid
+            return (
+                f"-- Insert from {src_schema}.{src_tab}.{src_col} to {tgt_schema}.{tgt_tab}.{tgt_col}\n"
+                f"INSERT INTO {tgt_schema}.{tgt_tab} ({tgt_col})\n"
+                f"SELECT DISTINCT {src_col} FROM {src_schema}.{src_tab};\n"
+            )
+
+    def create_table_column_pairs(self, df: pd.DataFrame) -> List[Dict]:
+        """Create ordered pairs of (source_category, target_category, table_mappings)"""
+        pairs = []
+        seen_mappings = set()  # Track unique mappings to prevent duplicates
+        
+        # Get all rows that have at least some data (not requiring all categories to be filled)
+        valid_rows = df.dropna(how='all')  # Only skip completely empty rows
+        
+        if valid_rows.empty:
+            return pairs  # Silent return, no warning
+
+        # Group by row index to maintain relationships
+        for idx, row in valid_rows.iterrows():
+            row_mappings = {}
+            
+            # Extract table and column info for each category in this row
+            for cat in self.category_keys:
+                cfg = self.categories[cat]
+                
+                # Get values, handling NaN/None cases
+                schema_val = row.get(cfg['schema_col'])
+                table_val = row.get(cfg['table_col'])
+                column_val = row.get(cfg['column_col'])
+                
+                # Convert to string and clean, handling NA values
+                schema = str(schema_val).strip() if pd.notna(schema_val) else 'NA'
+                table = str(table_val).strip() if pd.notna(table_val) else 'NA'
+                column = str(column_val).strip() if pd.notna(column_val) else 'NA'
+                
+                # Clean up string representations of NaN
+                if schema in ['nan', 'None']:
+                    schema = 'NA'
+                if table in ['nan', 'None']:
+                    table = 'NA'
+                if column in ['nan', 'None']:
+                    column = 'NA'
+                
+                # Always add to mapping, even with NA values
+                row_mappings[cat] = {
+                    'table': (schema, table),
+                    'column': column,
+                    'has_na': schema == 'NA' or table == 'NA' or column == 'NA'
+                }
+            
+            # Only add if we have at least 2 categories (need source and target)
+            if len(row_mappings) >= 2:
+                # Create a unique signature for this mapping to detect duplicates
+                mapping_signature = tuple(
+                    (cat, info['table'][0], info['table'][1], info['column'])
+                    for cat, info in sorted(row_mappings.items())
+                )
+                
+                if mapping_signature not in seen_mappings:
+                    pairs.append(row_mappings)
+                    seen_mappings.add(mapping_signature)
+        
+        return pairs
+
+    def run(self):
+        """Main execution method"""
+        df = self.load_excel_data()
+        os.makedirs(self.output_folder, exist_ok=True)
+
+        # Get table-column pairs that maintain row relationships
+        table_column_pairs = self.create_table_column_pairs(df)
+        
+        if not table_column_pairs:
+            print("No valid data found to generate INSERT statements")
+            return
+
+        all_insert_sqls = []
+        files_generated = []
+        total_generated = 0
+        total_skipped = 0
+
+        # Generate INSERT statements for each category transition
+        for i in range(len(self.category_keys) - 1):
+            cat_src = self.category_keys[i]
+            cat_tgt = self.category_keys[i + 1]
+
+            insert_statements = []
+            unique_sql_statements = set()  # Track unique SQL statements
+            insert_count = 0
+            duplicate_count = 0
+
+            for pair_data in table_column_pairs:
+                # Check if both source and target categories exist for this pair
+                if cat_src in pair_data and cat_tgt in pair_data:
+                    src_info = pair_data[cat_src]
+                    tgt_info = pair_data[cat_tgt]
+                    
+                    sql = self.generate_insert_sql(
+                        src_info['table'], 
+                        src_info['column'],
+                        tgt_info['table'], 
+                        tgt_info['column'],
+                        src_info.get('has_na', False),
+                        tgt_info.get('has_na', False)
+                    )
+                    
+                    # Create a normalized version for duplicate detection
+                    sql_normalized = ' '.join(sql.split())  # Remove extra whitespace
+                    
+                    if sql_normalized not in unique_sql_statements:
+                        insert_statements.append(sql)
+                        all_insert_sqls.append(sql)
+                        unique_sql_statements.add(sql_normalized)
+                        insert_count += 1
+                    else:
+                        duplicate_count += 1
+
+            # Write individual category file - always try to create, even if empty
+            file_name = f"{cat_src}_to_{cat_tgt}.sql"
+            file_path = os.path.join(self.output_folder, file_name)
+            
+            if insert_statements:
+                with open(file_path, "w", encoding='utf-8') as f:
+                    f.write(f"-- INSERT statements from {cat_src} to {cat_tgt}\n")
+                    f.write(f"-- Generated {insert_count} unique statements")
+                    if duplicate_count > 0:
+                        f.write(f" (skipped {duplicate_count} duplicates)")
+                    f.write(f"\n\n")
+                    f.write("\n".join(insert_statements))
+                
+                files_generated.append(file_name)
+                total_generated += insert_count
+                total_skipped += duplicate_count
+            else:
+                # Create empty file with explanation
+                with open(file_path, "w", encoding='utf-8') as f:
+                    f.write(f"-- INSERT statements from {cat_src} to {cat_tgt}\n")
+                    f.write(f"-- No valid data mappings found for this transition\n")
+                    f.write(f"-- Check your Excel data for {cat_src} and {cat_tgt} columns\n\n")
+                    f.write(f"-- This could happen if:\n")
+                    f.write(f"--   1. {cat_src} or {cat_tgt} columns have NA/empty values\n")
+                    f.write(f"--   2. No matching rows exist for this category pair\n")
+                
+                files_generated.append(f"{file_name} (empty)")
+
+        # Write combined file - always create, even if empty
+        combined_file = "all_insert_statements.sql"
+        combined_path = os.path.join(self.output_folder, combined_file)
+        
+        with open(combined_path, "w", encoding='utf-8') as f:
+            f.write(f"-- All INSERT statements combined\n")
+            f.write(f"-- Total unique statements: {len(all_insert_sqls)}\n")
+            f.write(f"-- Categories: {' → '.join(self.category_keys)}\n\n")
+            
+            if all_insert_sqls:
+                f.write("\n".join(all_insert_sqls))
+            else:
+                f.write("-- No INSERT statements generated\n")
+                f.write("-- Check your Excel data for valid mappings\n")
+        
+        files_generated.append(combined_file)
+
+        # Simple summary
+        if total_generated > 0:
+            print(f"✅ Generated {total_generated} INSERT statements in {len(files_generated)} files")
+            if total_skipped > 0:
+                print(f"   Skipped {total_skipped} duplicates")
+        else:
+            print(f"⚠️  Generated {len(files_generated)} files (no valid INSERT statements)")
+            print("   Check your Excel data for valid category mappings")
+
+# main.py
+import json
+from insert_helper import InsertSQLGenerator
+
+def main():
     try:
-        return prompt_template.format(extraction_fields=fields_str)
+        with open("schema_config.json", 'r') as f:
+            config = json.load(f)
+        
+        print("🚀 Starting INSERT SQL Generation...")
+        print(f"📄 Config loaded from: schema_config.json")
+        
+        generator = InsertSQLGenerator(
+            excel_file_path=config["excel_file_path"],
+            output_folder=config.get("output_folder", "generated_inserts"),
+            sheet_name=config.get("sheet_name"),
+            categories=config["categories"]
+        )
+        generator.run()
+        
+    except FileNotFoundError:
+        print("❌ Error: schema_config.json not found")
+        print("Please ensure the config file exists in the same directory")
     except KeyError as e:
-        # Handle cases where prompt template has extra placeholders
-        print(f"Warning: KeyError in prompt formatting: {e}")
-        print(f"Available placeholders should be: {{extraction_fields}}")
-        # Return prompt with basic replacement
-        return prompt_template.replace("{extraction_fields}", fields_str)
+        print(f"❌ Error: Missing required config key: {e}")
+    except Exception as e:
+        print(f"❌ Error: {str(e)}")
 
+if __name__ == "__main__":
+    main()
 
-
-def process_local_pdf_files(config, api_type, local_folder, doc_type, logger):
-    """
-    Process PDF files from a local folder.
-    
-    Parameters:
-    - config: Configuration dictionary
-    - api_type: 'batch' or 'general'
-    - local_folder: Folder path in local filesystem
-    - doc_type: Document type ('invoice', 'eob', 'claim', etc.)
-    - logger: Logger instance
-    """
-    # Get document-specific configuration including model config
-    extraction_fields, systemprompt, prompt_template, model_config = get_document_config(config, doc_type, api_type)
-    logger.info(f"Processing {doc_type} documents with fields: {extraction_fields}")
-    logger.info(f"Using prompt module: {config['processing']['document_types'][doc_type]['prompt_module']}")
-    
-    # Initialize helpers (no archiving for local files)
-    logger.info(f"Initializing Azure Storage Helper with output container: {config['azure_storage']['output_container']}")
-    storage_helper = AzureStorageHelper(
-        config["azure_storage"]["connection_string"],
-        config["azure_storage"]["input_container"],
-        config["azure_storage"]["output_container"],
-        logger=logger
-    )
-    
-    # Pass document type and extraction fields to PDFProcessor
-    pdf_processor = PDFProcessor(config, logger, doc_type, extraction_fields)
-    
-    # Initialize AI client with document-specific model configuration
-    logger.info(f"Initializing Azure OpenAI Client with {api_type} API for {doc_type}")
-    ai_client = AzureOpenAIClient(model_config, logger)
-    
-    # Check if folder exists
-    folder_path = Path(local_folder)
-    if not folder_path.exists() or not folder_path.is_dir():
-        logger.error(f"Folder not found: {local_folder}")
-        return
-    
-    # Find all PDF files in the folder
-    logger.info(f"Scanning local folder: {local_folder}")
-    pdf_files = list(folder_path.glob("*.pdf"))
-    
-    if not pdf_files:
-        logger.warning(f"No PDF files found in folder: {local_folder}")
-        return
-    
-    logger.info(f"Found {len(pdf_files)} PDF files to process")
-    
-    # Track processed and unprocessed files
-    processed_files = []
-    unprocessed_files = []
-    
-    # Process each PDF (continue with your existing local processing logic, but update prompts section)
-    # ... rest of the function remains the same but replace prompt creation with:
-    
-    # Create formatted prompts using the document-specific prompt template
-    formatted_prompt = create_formatted_prompt(prompt_template, extraction_fields)
-    prompts = [formatted_prompt for _ in range(len(batch_pages))]
-    
-    # And update AI client calls with systemprompt:
-    if api_type == "batch":
-        raw_results = ai_client.process_batch(base64_strings, prompts, systemprompt)
-    else:
-        raw_results = ai_client.process_general(base64_strings, prompts, systemprompt)
+# Example schema_config.json
+"""
+{
+  "excel_file_path": "your_excel_file.xlsx",
+  "sheet_name": "Sheet1",
+  "output_folder": "generated_inserts",
+  "categories": {
+    "Original_SSR": {
+      "schema_col": "Original SSR - Schema",
+      "table_col": "Original SSR - Physical Table Name",
+      "column_col": "Original SSR - Physical Column Name"
+    },
+    "EDL": {
+      "schema_col": "EDL- Schema",
+      "table_col": "EDL - Physical Table Name",
+      "column_col": "EDL - Physical Column Name"
+    },
+    "RDMOF": {
+      "schema_col": "RDMOF - Schema",
+      "table_col": "RDMOF - Physical Table Name",
+      "column_col": "RDMOF - Physical Column Name"
+    }
+  }
+}
+"""
