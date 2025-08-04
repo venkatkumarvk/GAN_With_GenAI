@@ -1,9 +1,9 @@
-# insert_helper.py
 import os
 import json
 import pandas as pd
 from typing import List, Dict, Tuple, Optional
 from collections import defaultdict
+
 
 class InsertSQLGenerator:
     def __init__(self,
@@ -18,82 +18,59 @@ class InsertSQLGenerator:
         self.category_keys = list(self.categories.keys())  # preserve order
 
     def load_excel_data(self) -> pd.DataFrame:
-        """Load and clean Excel data"""
+        """Load and clean Excel data from all sheets"""
         try:
-            df = pd.read_excel(self.excel_file_path, sheet_name=self.sheet_name)
+            # Load all sheets if no specific sheet_name is provided
+            if self.sheet_name is None:
+                sheets = pd.read_excel(self.excel_file_path, sheet_name=None)
+                df = pd.concat(sheets.values(), ignore_index=True)
+            else:
+                df = pd.read_excel(self.excel_file_path, sheet_name=self.sheet_name)
+
+            # Clean column names
+            df.columns = df.columns.str.strip()
+
+            # Forward fill for schema, table, and column names
+            for cfg in self.categories.values():
+                for col_key in ['schema_col', 'table_col', 'column_col']:
+                    col = cfg.get(col_key)
+                    if col and col in df.columns:
+                        df[col] = df[col].fillna(method='ffill')
+
+            return df
+
         except Exception as e:
-            print(f"Error loading Excel file: {e}")
+            print(f"❌ Error loading Excel file: {e}")
             return pd.DataFrame()
-            
-        # Clean column names
-        df.columns = df.columns.str.strip()
-        
-        # Forward fill for schema, table, and column names to handle merged cells
-        for cfg in self.categories.values():
-            for col_key in ['schema_col', 'table_col', 'column_col']:
-                col = cfg.get(col_key)
-                if col and col in df.columns:
-                    # Use forward fill only on non-empty cells
-                    df[col] = df[col].fillna(method='ffill')
-        
-        return df
-
-    def extract_column_mappings(self, df: pd.DataFrame, cat: str) -> Dict[Tuple[str, str], List[str]]:
-        """Extract schema.table -> [columns] mapping for a category"""
-        cfg = self.categories[cat]
-        schema_col = cfg['schema_col']
-        table_col = cfg['table_col']
-        column_col = cfg['column_col']
-
-        result = defaultdict(list)
-        filtered_df = df[
-            df[schema_col].notna() &
-            df[table_col].notna() &
-            df[column_col].notna()
-        ]
-
-        for _, row in filtered_df.iterrows():
-            schema = str(row[schema_col]).strip()
-            table = str(row[table_col]).strip()
-            column = str(row[column_col]).strip()
-            result[(schema, table)].append(column)
-
-        return result
 
     def generate_insert_sql(self, src_table: Tuple[str, str], src_col: str,
-                           tgt_table: Tuple[str, str], tgt_col: str, 
-                           src_has_na: bool = False, tgt_has_na: bool = False) -> str:
-        """Generate a single INSERT statement, handling NA values"""
+                            tgt_table: Tuple[str, str], tgt_col: str,
+                            src_has_na: bool = False, tgt_has_na: bool = False) -> str:
         src_schema, src_tab = src_table
         tgt_schema, tgt_tab = tgt_table
 
-        # Handle NA cases
         if src_has_na and tgt_has_na:
-            # Both source and target have NA - create placeholder INSERT
             return (
                 f"-- Insert from {src_schema}.{src_tab}.{src_col} to {tgt_schema}.{tgt_tab}.{tgt_col}\n"
                 f"-- WARNING: Both source and target have NA values\n"
                 f"-- INSERT INTO {tgt_schema}.{tgt_tab} ({tgt_col})\n"
-                f"-- SELECT NULL AS {tgt_col}; -- Placeholder for NA mapping\n"
+                f"-- SELECT NULL AS {tgt_col};\n"
             )
         elif src_has_na:
-            # Source has NA - insert NULL values
             return (
                 f"-- Insert from {src_schema}.{src_tab}.{src_col} to {tgt_schema}.{tgt_tab}.{tgt_col}\n"
-                f"-- WARNING: Source has NA values, inserting NULL\n"
+                f"-- WARNING: Source has NA values\n"
                 f"INSERT INTO {tgt_schema}.{tgt_tab} ({tgt_col})\n"
-                f"SELECT NULL AS {tgt_col}; -- Source mapping is NA\n"
+                f"SELECT NULL AS {tgt_col};\n"
             )
         elif tgt_has_na:
-            # Target has NA - comment out the INSERT
             return (
                 f"-- Insert from {src_schema}.{src_tab}.{src_col} to {tgt_schema}.{tgt_tab}.{tgt_col}\n"
-                f"-- WARNING: Target has NA values, INSERT commented out\n"
+                f"-- WARNING: Target has NA values\n"
                 f"-- INSERT INTO {tgt_schema}.{tgt_tab} ({tgt_col})\n"
-                f"-- SELECT DISTINCT {src_col} FROM {src_schema}.{src_tab}; -- Target mapping is NA\n"
+                f"-- SELECT DISTINCT {src_col} FROM {src_schema}.{src_tab};\n"
             )
         else:
-            # Normal case - both source and target are valid
             return (
                 f"-- Insert from {src_schema}.{src_tab}.{src_col} to {tgt_schema}.{tgt_tab}.{tgt_col}\n"
                 f"INSERT INTO {tgt_schema}.{tgt_tab} ({tgt_col})\n"
@@ -101,232 +78,96 @@ class InsertSQLGenerator:
             )
 
     def create_table_column_pairs(self, df: pd.DataFrame) -> List[Dict]:
-        """Create ordered pairs of (source_category, target_category, table_mappings)"""
+        """Create ordered row-based mappings between all category columns"""
         pairs = []
-        seen_mappings = set()  # Track unique mappings to prevent duplicates
-        
-        # Get all rows that have at least some data (not requiring all categories to be filled)
-        valid_rows = df.dropna(how='all')  # Only skip completely empty rows
-        
-        if valid_rows.empty:
-            return pairs  # Silent return, no warning
+        seen = set()
 
-        # Group by row index to maintain relationships
-        for idx, row in valid_rows.iterrows():
-            row_mappings = {}
-            
-            # Extract table and column info for each category in this row
+        for _, row in df.iterrows():
+            row_map = {}
+
             for cat in self.category_keys:
                 cfg = self.categories[cat]
-                
-                # Get values using .get() method to avoid KeyError
                 schema_val = row.get(cfg['schema_col'])
-                table_val = row.get(cfg['table_col']) 
+                table_val = row.get(cfg['table_col'])
                 column_val = row.get(cfg['column_col'])
-                
-                # Handle pandas NA/NaN values properly
-                if pd.isna(schema_val):
-                    schema = 'NA'
-                else:
-                    schema = str(schema_val).strip()
-                    if schema.lower() in ['nan', 'none', '']:
-                        schema = 'NA'
-                
-                if pd.isna(table_val):
-                    table = 'NA'
-                else:
-                    table = str(table_val).strip()
-                    if table.lower() in ['nan', 'none', '']:
-                        table = 'NA'
-                
-                if pd.isna(column_val):
-                    column = 'NA'
-                else:
-                    column = str(column_val).strip()
-                    if column.lower() in ['nan', 'none', '']:
-                        column = 'NA'
-                
-                # Always add to mapping, even with NA values
-                row_mappings[cat] = {
+
+                # Normalize values and check if NA
+                def norm(val): return str(val).strip() if pd.notna(val) else 'NA'
+                schema = norm(schema_val) or 'NA'
+                table = norm(table_val) or 'NA'
+                column = norm(column_val) or 'NA'
+
+                has_na = any(x in ['NA', '', 'None', 'nan'] for x in [schema, table, column])
+
+                row_map[cat] = {
                     'table': (schema, table),
                     'column': column,
-                    'has_na': schema == 'NA' or table == 'NA' or column == 'NA'
+                    'has_na': has_na
                 }
-            
-            # Only add if we have at least 2 categories (need source and target)
-            if len(row_mappings) >= 2:
-                # Create a unique signature for this mapping to detect duplicates
-                mapping_signature = tuple(
-                    (cat, info['table'][0], info['table'][1], info['column'])
-                    for cat, info in sorted(row_mappings.items())
-                )
-                
-                if mapping_signature not in seen_mappings:
-                    pairs.append(row_mappings)
-                    seen_mappings.add(mapping_signature)
-        
+
+            # Prevent duplicate mappings
+            signature = tuple((cat, m['table'], m['column']) for cat, m in row_map.items())
+            if signature not in seen:
+                pairs.append(row_map)
+                seen.add(signature)
+
         return pairs
 
     def run(self):
-        """Main execution method"""
         df = self.load_excel_data()
-        os.makedirs(self.output_folder, exist_ok=True)
-
-        # Get table-column pairs that maintain row relationships
-        table_column_pairs = self.create_table_column_pairs(df)
-        
-        if not table_column_pairs:
-            print("No valid data found to generate INSERT statements")
+        if df.empty:
+            print("❌ No valid Excel data loaded.")
             return
 
-        all_insert_sqls = []
-        files_generated = []
-        total_generated = 0
+        os.makedirs(self.output_folder, exist_ok=True)
+
+        mappings = self.create_table_column_pairs(df)
+        if not mappings:
+            print("❌ No valid table-column pairs found.")
+            return
+
+        all_sql = []
+        total_inserted = 0
         total_skipped = 0
 
-        # Generate INSERT statements for each category transition
         for i in range(len(self.category_keys) - 1):
-            cat_src = self.category_keys[i]
-            cat_tgt = self.category_keys[i + 1]
+            src_cat = self.category_keys[i]
+            tgt_cat = self.category_keys[i + 1]
+            cat_sql = []
+            seen_sql = set()
 
-            insert_statements = []
-            unique_sql_statements = set()  # Track unique SQL statements
-            insert_count = 0
-            duplicate_count = 0
+            for mapping in mappings:
+                if src_cat not in mapping or tgt_cat not in mapping:
+                    continue
 
-            for pair_data in table_column_pairs:
-                # Check if both source and target categories exist for this pair
-                if cat_src in pair_data and cat_tgt in pair_data:
-                    src_info = pair_data[cat_src]
-                    tgt_info = pair_data[cat_tgt]
-                    
-                    sql = self.generate_insert_sql(
-                        src_info['table'], 
-                        src_info['column'],
-                        tgt_info['table'], 
-                        tgt_info['column'],
-                        src_info.get('has_na', False),
-                        tgt_info.get('has_na', False)
-                    )
-                    
-                    # Create a normalized version for duplicate detection
-                    sql_normalized = ' '.join(sql.split())  # Remove extra whitespace
-                    
-                    if sql_normalized not in unique_sql_statements:
-                        insert_statements.append(sql)
-                        all_insert_sqls.append(sql)
-                        unique_sql_statements.add(sql_normalized)
-                        insert_count += 1
-                    else:
-                        duplicate_count += 1
+                src = mapping[src_cat]
+                tgt = mapping[tgt_cat]
+                sql = self.generate_insert_sql(src['table'], src['column'],
+                                               tgt['table'], tgt['column'],
+                                               src['has_na'], tgt['has_na'])
+                sql_key = ' '.join(sql.split())
+                if sql_key not in seen_sql:
+                    cat_sql.append(sql)
+                    all_sql.append(sql)
+                    seen_sql.add(sql_key)
+                    total_inserted += 1
+                else:
+                    total_skipped += 1
 
-            # Write individual category file - always try to create, even if empty
-            file_name = f"{cat_src}_to_{cat_tgt}.sql"
-            file_path = os.path.join(self.output_folder, file_name)
-            
-            if insert_statements:
-                with open(file_path, "w", encoding='utf-8') as f:
-                    f.write(f"-- INSERT statements from {cat_src} to {cat_tgt}\n")
-                    f.write(f"-- Generated {insert_count} unique statements")
-                    if duplicate_count > 0:
-                        f.write(f" (skipped {duplicate_count} duplicates)")
-                    f.write(f"\n\n")
-                    f.write("\n".join(insert_statements))
-                
-                files_generated.append(file_name)
-                total_generated += insert_count
-                total_skipped += duplicate_count
-            else:
-                # Create empty file with explanation
-                with open(file_path, "w", encoding='utf-8') as f:
-                    f.write(f"-- INSERT statements from {cat_src} to {cat_tgt}\n")
-                    f.write(f"-- No valid data mappings found for this transition\n")
-                    f.write(f"-- Check your Excel data for {cat_src} and {cat_tgt} columns\n\n")
-                    f.write(f"-- This could happen if:\n")
-                    f.write(f"--   1. {cat_src} or {cat_tgt} columns have NA/empty values\n")
-                    f.write(f"--   2. No matching rows exist for this category pair\n")
-                
-                files_generated.append(f"{file_name} (empty)")
+            file_path = os.path.join(self.output_folder, f"{src_cat}_to_{tgt_cat}.sql")
+            with open(file_path, 'w', encoding='utf-8') as f:
+                f.write(f"-- INSERT statements from {src_cat} to {tgt_cat}\n")
+                if cat_sql:
+                    f.write("\n".join(cat_sql))
+                else:
+                    f.write("-- No valid mappings found\n")
 
-        # Write combined file - always create, even if empty
-        combined_file = "all_insert_statements.sql"
-        combined_path = os.path.join(self.output_folder, combined_file)
-        
-        with open(combined_path, "w", encoding='utf-8') as f:
-            f.write(f"-- All INSERT statements combined\n")
-            f.write(f"-- Total unique statements: {len(all_insert_sqls)}\n")
-            f.write(f"-- Categories: {' → '.join(self.category_keys)}\n\n")
-            
-            if all_insert_sqls:
-                f.write("\n".join(all_insert_sqls))
-            else:
-                f.write("-- No INSERT statements generated\n")
-                f.write("-- Check your Excel data for valid mappings\n")
-        
-        files_generated.append(combined_file)
+        # Write combined INSERT file
+        combined_file = os.path.join(self.output_folder, "all_insert_statements.sql")
+        with open(combined_file, 'w', encoding='utf-8') as f:
+            f.write(f"-- Combined INSERT statements for all transitions\n")
+            f.write(f"-- Total inserts: {total_inserted}, Skipped: {total_skipped}\n\n")
+            f.write("\n".join(all_sql) if all_sql else "-- No INSERTs generated")
 
-        # Simple summary
-        if total_generated > 0:
-            print(f"✅ Generated {total_generated} INSERT statements in {len(files_generated)} files")
-            if total_skipped > 0:
-                print(f"   Skipped {total_skipped} duplicates")
-        else:
-            print(f"⚠️  Generated {len(files_generated)} files (no valid INSERT statements)")
-            print("   Check your Excel data for valid category mappings")
-
-# main.py
-import json
-from insert_helper import InsertSQLGenerator
-
-def main():
-    try:
-        with open("schema_config.json", 'r') as f:
-            config = json.load(f)
-        
-        print("🚀 Starting INSERT SQL Generation...")
-        print(f"📄 Config loaded from: schema_config.json")
-        
-        generator = InsertSQLGenerator(
-            excel_file_path=config["excel_file_path"],
-            output_folder=config.get("output_folder", "generated_inserts"),
-            sheet_name=config.get("sheet_name"),
-            categories=config["categories"]
-        )
-        generator.run()
-        
-    except FileNotFoundError:
-        print("❌ Error: schema_config.json not found")
-        print("Please ensure the config file exists in the same directory")
-    except KeyError as e:
-        print(f"❌ Error: Missing required config key: {e}")
-    except Exception as e:
-        print(f"❌ Error: {str(e)}")
-
-if __name__ == "__main__":
-    main()
-
-# Example schema_config.json
-"""
-{
-  "excel_file_path": "your_excel_file.xlsx",
-  "sheet_name": "Sheet1",
-  "output_folder": "generated_inserts",
-  "categories": {
-    "Original_SSR": {
-      "schema_col": "Original SSR - Schema",
-      "table_col": "Original SSR - Physical Table Name",
-      "column_col": "Original SSR - Physical Column Name"
-    },
-    "EDL": {
-      "schema_col": "EDL- Schema",
-      "table_col": "EDL - Physical Table Name",
-      "column_col": "EDL - Physical Column Name"
-    },
-    "RDMOF": {
-      "schema_col": "RDMOF - Schema",
-      "table_col": "RDMOF - Physical Table Name",
-      "column_col": "RDMOF - Physical Column Name"
-    }
-  }
-}
-"""
+        print(f"✅ INSERT generation complete: {total_inserted} statements generated.")
+        print(f"📁 Output folder: {self.output_folder}")
