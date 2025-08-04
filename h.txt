@@ -24,7 +24,7 @@ class InsertSQLGenerator:
         except Exception as e:
             print(f"Error loading Excel file: {e}")
             return pd.DataFrame()
-        
+            
         # Clean column names
         df.columns = df.columns.str.strip()
         
@@ -33,7 +33,8 @@ class InsertSQLGenerator:
             for col_key in ['schema_col', 'table_col', 'column_col']:
                 col = cfg.get(col_key)
                 if col and col in df.columns:
-                    df[col] = df[col].fillna(method='ffill') if hasattr(df[col], 'fillna') else df[col].ffill()
+                    # Use forward fill only on non-empty cells
+                    df[col] = df[col].fillna(method='ffill')
         
         return df
 
@@ -105,12 +106,7 @@ class InsertSQLGenerator:
         seen_mappings = set()  # Track unique mappings to prevent duplicates
         
         # Get all rows that have at least some data (not requiring all categories to be filled)
-        try:
-            # Use a more robust approach to filter valid rows
-            valid_rows = df[df.notna().any(axis=1)]  # Keep rows that have at least one non-NA value
-        except Exception:
-            # Fallback: just use all rows if filtering fails
-            valid_rows = df.copy()
+        valid_rows = df.dropna(how='all')  # Only skip completely empty rows
         
         if valid_rows.empty:
             return pairs  # Silent return, no warning
@@ -123,28 +119,32 @@ class InsertSQLGenerator:
             for cat in self.category_keys:
                 cfg = self.categories[cat]
                 
-                # Get values safely from row
-                try:
-                    schema_val = row[cfg['schema_col']] if cfg['schema_col'] in row.index else None
-                    table_val = row[cfg['table_col']] if cfg['table_col'] in row.index else None
-                    column_val = row[cfg['column_col']] if cfg['column_col'] in row.index else None
-                except KeyError:
-                    schema_val = None
-                    table_val = None
-                    column_val = None
+                # Get values using .get() method to avoid KeyError
+                schema_val = row.get(cfg['schema_col'])
+                table_val = row.get(cfg['table_col']) 
+                column_val = row.get(cfg['column_col'])
                 
-                # Convert to string and clean, handling NA values
-                def safe_convert(val):
-                    if val is None or pd.isna(val):
-                        return 'NA'
-                    str_val = str(val).strip()
-                    if str_val.lower() in ['nan', 'none', '', 'null']:
-                        return 'NA'
-                    return str_val
+                # Handle pandas NA/NaN values properly
+                if pd.isna(schema_val):
+                    schema = 'NA'
+                else:
+                    schema = str(schema_val).strip()
+                    if schema.lower() in ['nan', 'none', '']:
+                        schema = 'NA'
                 
-                schema = safe_convert(schema_val)
-                table = safe_convert(table_val)
-                column = safe_convert(column_val)
+                if pd.isna(table_val):
+                    table = 'NA'
+                else:
+                    table = str(table_val).strip()
+                    if table.lower() in ['nan', 'none', '']:
+                        table = 'NA'
+                
+                if pd.isna(column_val):
+                    column = 'NA'
+                else:
+                    column = str(column_val).strip()
+                    if column.lower() in ['nan', 'none', '']:
+                        column = 'NA'
                 
                 # Always add to mapping, even with NA values
                 row_mappings[cat] = {
