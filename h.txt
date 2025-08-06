@@ -3,52 +3,47 @@ import numpy as np
 from pdf2image import convert_from_path
 from PIL import Image
 
-# === Step 1: Load PDFs and convert to images ===
+# === Load empty form PDF ===
 empty_pdf_path = "Sample 1500_2012_02_removed.pdf"
-filled_pdf_path = "1000265175.pdf"  # Or .jpg if needed
-
-# Convert to high-res images
 empty_pil = convert_from_path(empty_pdf_path, dpi=300)[0]
-filled_pil = convert_from_path(filled_pdf_path, dpi=300)[0]
-
-# Convert PIL to OpenCV BGR
 empty_img = cv2.cvtColor(np.array(empty_pil), cv2.COLOR_RGB2BGR)
+
+# === Load filled form PDF ===
+filled_pdf_path = "1000265175.pdf"
+filled_pil = convert_from_path(filled_pdf_path, dpi=300)[0]
 filled_img = cv2.cvtColor(np.array(filled_pil), cv2.COLOR_RGB2BGR)
 
-# === Step 2: Resize both to match exactly ===
-if filled_img.shape != empty_img.shape:
+# === Resize to match ===
+if empty_img.shape != filled_img.shape:
     filled_img = cv2.resize(filled_img, (empty_img.shape[1], empty_img.shape[0]))
 
-# === Step 3: Convert to grayscale and subtract ===
+# === Convert to grayscale ===
 gray_empty = cv2.cvtColor(empty_img, cv2.COLOR_BGR2GRAY)
 gray_filled = cv2.cvtColor(filled_img, cv2.COLOR_BGR2GRAY)
 
-# Subtract and threshold
+# === Subtract and threshold ===
 diff = cv2.absdiff(gray_filled, gray_empty)
 _, mask = cv2.threshold(diff, 30, 255, cv2.THRESH_BINARY)
 
-# Make sure mask is uint8 single-channel
-mask = mask.astype(np.uint8)
+# === Convert everything to uint8, check shape ===
+print("filled_img:", filled_img.shape, filled_img.dtype)
+print("mask:", mask.shape, mask.dtype)
 
-# === Step 4: Prepare 3-channel mask ===
+# Ensure 3-channel mask
 mask_3ch = cv2.merge([mask, mask, mask])
-
-# === Step 5: Ensure types and shapes match ===
-filled_img = filled_img.astype(np.uint8)
 mask_3ch = mask_3ch.astype(np.uint8)
 
-# Ensure shapes match
+# === FINAL CHECK ===
 if filled_img.shape != mask_3ch.shape:
     mask_3ch = cv2.resize(mask_3ch, (filled_img.shape[1], filled_img.shape[0]))
 
-# === Step 6: Extract only text/handwriting ===
+# === NOW TRY bitwise_and ===
 text_only = cv2.bitwise_and(filled_img, mask_3ch)
 
-# === Step 7: Overlay on clean empty form ===
+# === Overlay text on clean form ===
 output_img = cv2.addWeighted(empty_img, 1.0, text_only, 1.0, 0)
 
-# === Step 8: Save as PDF ===
+# === Save output ===
 output_rgb = cv2.cvtColor(output_img, cv2.COLOR_BGR2RGB)
 Image.fromarray(output_rgb).save("final_clean_overlay.pdf")
-
-print("✅ Saved as 'final_clean_overlay.pdf'")
+print("✅ Output saved as final_clean_overlay.pdf")
