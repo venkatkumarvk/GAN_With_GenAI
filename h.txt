@@ -45,4 +45,3 @@ final_pil = Image.fromarray(final_rgb)
 final_pil.save("final_clean_overlay.pdf")
 
 print("✅ Final output saved as 'final_clean_overlay.pdf'")
-
