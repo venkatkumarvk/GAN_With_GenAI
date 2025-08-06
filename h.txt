@@ -7,38 +7,48 @@ from PIL import Image
 empty_pdf_path = "Sample 1500_2012_02_removed.pdf"
 filled_pdf_path = "1000265175.pdf"  # Or .jpg if needed
 
-# Convert to images (first page only)
+# Convert to high-res images
 empty_pil = convert_from_path(empty_pdf_path, dpi=300)[0]
 filled_pil = convert_from_path(filled_pdf_path, dpi=300)[0]
 
-# Convert to OpenCV (BGR)
+# Convert PIL to OpenCV BGR
 empty_img = cv2.cvtColor(np.array(empty_pil), cv2.COLOR_RGB2BGR)
 filled_img = cv2.cvtColor(np.array(filled_pil), cv2.COLOR_RGB2BGR)
 
-# === Step 2: Resize to match shapes exactly ===
-if empty_img.shape != filled_img.shape:
+# === Step 2: Resize both to match exactly ===
+if filled_img.shape != empty_img.shape:
     filled_img = cv2.resize(filled_img, (empty_img.shape[1], empty_img.shape[0]))
 
-# === Step 3: Convert to grayscale for subtraction ===
+# === Step 3: Convert to grayscale and subtract ===
 gray_empty = cv2.cvtColor(empty_img, cv2.COLOR_BGR2GRAY)
 gray_filled = cv2.cvtColor(filled_img, cv2.COLOR_BGR2GRAY)
 
-# Subtract to get only the difference (text/handwriting)
+# Subtract and threshold
 diff = cv2.absdiff(gray_filled, gray_empty)
-
-# Threshold to get binary mask of text only
 _, mask = cv2.threshold(diff, 30, 255, cv2.THRESH_BINARY)
 
-# === Step 4: Create 3-channel mask for color overlay ===
+# Make sure mask is uint8 single-channel
+mask = mask.astype(np.uint8)
+
+# === Step 4: Prepare 3-channel mask ===
 mask_3ch = cv2.merge([mask, mask, mask])
+
+# === Step 5: Ensure types and shapes match ===
+filled_img = filled_img.astype(np.uint8)
+mask_3ch = mask_3ch.astype(np.uint8)
+
+# Ensure shapes match
+if filled_img.shape != mask_3ch.shape:
+    mask_3ch = cv2.resize(mask_3ch, (filled_img.shape[1], filled_img.shape[0]))
+
+# === Step 6: Extract only text/handwriting ===
 text_only = cv2.bitwise_and(filled_img, mask_3ch)
 
-# === Step 5: Overlay text onto the clean form ===
+# === Step 7: Overlay on clean empty form ===
 output_img = cv2.addWeighted(empty_img, 1.0, text_only, 1.0, 0)
 
-# === Step 6: Save output as PDF ===
+# === Step 8: Save as PDF ===
 output_rgb = cv2.cvtColor(output_img, cv2.COLOR_BGR2RGB)
-output_pil = Image.fromarray(output_rgb)
-output_pil.save("final_clean_overlay.pdf")
+Image.fromarray(output_rgb).save("final_clean_overlay.pdf")
 
-print("✅ Final clean overlay saved as 'final_clean_overlay.pdf'")
+print("✅ Saved as 'final_clean_overlay.pdf'")
