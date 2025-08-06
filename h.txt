@@ -1,59 +1,23 @@
-# Simple Automatic PDF Overlay - No Manual Coordinates Required
+# Simple Background Removal and Content Overlay
 
-from PyPDF2 import PdfReader, PdfWriter
 import fitz  # PyMuPDF
+from PyPDF2 import PdfReader, PdfWriter
+from reportlab.pdfgen import canvas
+from reportlab.lib.pagesizes import letter
+import io
 
-# METHOD 1: Simple Automatic Overlay (Recommended for your case)
-def auto_overlay_same_layout(blank_pdf_path, filled_pdf_path, output_path):
+# METHOD 1: Extract all text (no background) and overlay
+def remove_background_overlay_text(blank_template_path, filled_form_path, output_path):
     """
-    Automatically overlay filled PDF onto blank PDF.
-    Perfect when both PDFs have identical layout.
-    NO manual coordinates needed!
+    Remove background from filled form and overlay ALL text content onto blank template.
+    No filtering - just removes graphics/background and keeps all text.
     """
     try:
-        # Read both PDFs
-        blank_pdf = PdfReader(blank_pdf_path)
-        filled_pdf = PdfReader(filled_pdf_path)
-        writer = PdfWriter()
+        print("🗑️ Removing background and extracting text...")
         
-        print(f"📄 Blank PDF: {len(blank_pdf.pages)} pages")
-        print(f"📄 Filled PDF: {len(filled_pdf.pages)} pages")
-        
-        # Process each page
-        for page_num in range(len(blank_pdf.pages)):
-            blank_page = blank_pdf.pages[page_num]
-            
-            # If filled PDF has this page, overlay it
-            if page_num < len(filled_pdf.pages):
-                filled_page = filled_pdf.pages[page_num]
-                blank_page.merge_page(filled_page)
-                print(f"✅ Overlaid page {page_num + 1}")
-            
-            writer.add_page(blank_page)
-        
-        # Save result
-        with open(output_path, 'wb') as output_file:
-            writer.write(output_file)
-        
-        print(f"🎉 Success! Created: {output_path}")
-        return True
-        
-    except Exception as e:
-        print(f"❌ Error: {e}")
-        return False
-
-# METHOD 2: PyMuPDF Automatic (Better Quality)
-def pymupdf_auto_overlay(blank_pdf_path, filled_pdf_path, output_path):
-    """
-    Use PyMuPDF for automatic overlay with better quality.
-    Still no manual coordinates needed!
-    """
-    try:
         # Open both documents
-        blank_doc = fitz.open(blank_pdf_path)
-        filled_doc = fitz.open(filled_pdf_path)
-        
-        print(f"📄 Processing {len(blank_doc)} pages...")
+        blank_doc = fitz.open(blank_template_path)
+        filled_doc = fitz.open(filled_form_path)
         
         # Process each page
         for page_num in range(len(blank_doc)):
@@ -62,146 +26,306 @@ def pymupdf_auto_overlay(blank_pdf_path, filled_pdf_path, output_path):
             if page_num < len(filled_doc):
                 filled_page = filled_doc[page_num]
                 
-                # Get filled page content and overlay it
-                blank_page.show_pdf_page(blank_page.rect, filled_doc, page_num)
-                print(f"✅ Overlaid page {page_num + 1}")
-        
-        # Save result
-        blank_doc.save(output_path)
-        blank_doc.close()
-        filled_doc.close()
-        
-        print(f"🎉 Success! Created: {output_path}")
-        return True
-        
-    except Exception as e:
-        print(f"❌ Error: {e}")
-        return False
-
-# METHOD 3: Smart Text Extraction and Auto-Placement
-def auto_extract_and_place(blank_pdf_path, filled_pdf_path, output_path):
-    """
-    Automatically extract text from filled PDF and place on blank PDF.
-    Uses original positions - no manual work needed!
-    """
-    try:
-        # Open documents
-        blank_doc = fitz.open(blank_pdf_path)
-        filled_doc = fitz.open(filled_pdf_path)
-        
-        print(f"🔍 Extracting text from filled PDF...")
-        
-        # Process each page
-        for page_num in range(len(blank_doc)):
-            blank_page = blank_doc[page_num]
-            
-            if page_num < len(filled_doc):
-                filled_page = filled_doc[page_num]
-                
-                # Extract all text with positions
+                # Extract ALL text with positions (ignores background/images)
                 text_instances = filled_page.get_text("dict")
                 
                 text_count = 0
-                # Add text to blank page at original positions
+                # Add all text to blank template
                 for block in text_instances["blocks"]:
-                    if "lines" in block:
+                    if "lines" in block:  # Text blocks only (no images/graphics)
                         for line in block["lines"]:
                             for span in line["spans"]:
-                                text = span["text"].strip()
-                                if text and len(text) > 0:
-                                    # Use original position and formatting
+                                text = span["text"]
+                                
+                                if text.strip():  # Any non-empty text
+                                    # Get original position and style
                                     pos = (span["bbox"][0], span["bbox"][1])
                                     font_size = span["size"]
                                     
+                                    # Add text to blank template
                                     blank_page.insert_text(
-                                        pos, 
+                                        pos,
                                         text,
+                                        fontname="helv",
                                         fontsize=font_size,
                                         color=(0, 0, 0)
                                     )
                                     text_count += 1
                 
-                print(f"✅ Page {page_num + 1}: Added {text_count} text elements")
+                print(f"✅ Page {page_num + 1}: Transferred {text_count} text elements")
         
         # Save result
         blank_doc.save(output_path)
         blank_doc.close()
         filled_doc.close()
         
-        print(f"🎉 Success! Created: {output_path}")
+        print(f"🎉 Success! Clean overlay created: {output_path}")
         return True
         
     except Exception as e:
         print(f"❌ Error: {e}")
         return False
 
-# QUICK TEST FUNCTION
-def test_all_methods(blank_pdf, filled_pdf):
+# METHOD 2: Advanced text extraction with better formatting preservation
+def advanced_background_removal(blank_template_path, filled_form_path, output_path):
     """
-    Test all automatic methods and see which works best for your PDFs
+    Advanced background removal that preserves original text formatting better.
     """
-    print("🧪 Testing All Automatic Overlay Methods")
-    print("=" * 50)
+    try:
+        print("🎨 Advanced background removal with formatting preservation...")
+        
+        blank_doc = fitz.open(blank_template_path)
+        filled_doc = fitz.open(filled_form_path)
+        
+        for page_num in range(len(blank_doc)):
+            blank_page = blank_doc[page_num]
+            
+            if page_num < len(filled_doc):
+                filled_page = filled_doc[page_num]
+                
+                # Get text with detailed formatting
+                text_instances = filled_page.get_text("dict")
+                
+                text_count = 0
+                for block in text_instances["blocks"]:
+                    if "lines" in block:
+                        for line in block["lines"]:
+                            for span in line["spans"]:
+                                text = span["text"]
+                                
+                                if text.strip():
+                                    # Preserve original formatting
+                                    pos = (span["bbox"][0], span["bbox"][1])
+                                    font_size = span["size"]
+                                    font_flags = span.get("flags", 0)
+                                    
+                                    # Determine font style
+                                    fontname = "helv"
+                                    if font_flags & 2**4:  # Bold
+                                        fontname = "helv-bold"
+                                    elif font_flags & 2**1:  # Italic
+                                        fontname = "helv-oblique"
+                                    
+                                    # Add text with original formatting
+                                    blank_page.insert_text(
+                                        pos,
+                                        text,
+                                        fontname=fontname,
+                                        fontsize=font_size,
+                                        color=(0, 0, 0)
+                                    )
+                                    text_count += 1
+                
+                print(f"✅ Page {page_num + 1}: Transferred {text_count} formatted text elements")
+        
+        # Save result
+        blank_doc.save(output_path)
+        blank_doc.close()
+        filled_doc.close()
+        
+        print(f"🎉 Success! Advanced overlay created: {output_path}")
+        return True
+        
+    except Exception as e:
+        print(f"❌ Error: {e}")
+        return False
+
+# METHOD 3: ReportLab approach for cleanest output
+def reportlab_background_removal(blank_template_path, filled_form_path, output_path):
+    """
+    Use ReportLab to create the cleanest possible text overlay.
+    """
+    try:
+        print("📝 Creating clean text overlay with ReportLab...")
+        
+        # Extract all text from filled form
+        filled_doc = fitz.open(filled_form_path)
+        extracted_data = []
+        
+        for page_num in range(len(filled_doc)):
+            page_data = []
+            filled_page = filled_doc[page_num]
+            text_instances = filled_page.get_text("dict")
+            
+            for block in text_instances["blocks"]:
+                if "lines" in block:
+                    for line in block["lines"]:
+                        for span in line["spans"]:
+                            text = span["text"]
+                            if text.strip():
+                                page_data.append({
+                                    'text': text,
+                                    'x': span["bbox"][0],
+                                    'y': span["bbox"][1],
+                                    'size': span["size"],
+                                    'flags': span.get("flags", 0)
+                                })
+            
+            extracted_data.append(page_data)
+            print(f"📄 Page {page_num + 1}: Extracted {len(page_data)} text elements")
+        
+        filled_doc.close()
+        
+        # Create clean overlay and merge with blank template
+        blank_pdf = PdfReader(blank_template_path)
+        writer = PdfWriter()
+        
+        for page_num, page in enumerate(blank_pdf.pages):
+            if page_num < len(extracted_data) and extracted_data[page_num]:
+                # Create text overlay
+                packet = io.BytesIO()
+                can = canvas.Canvas(packet, pagesize=letter)
+                
+                # Add all extracted text
+                for item in extracted_data[page_num]:
+                    # Set font based on flags
+                    font_name = "Helvetica"
+                    if item['flags'] & 2**4:  # Bold
+                        font_name = "Helvetica-Bold"
+                    elif item['flags'] & 2**1:  # Italic
+                        font_name = "Helvetica-Oblique"
+                    
+                    can.setFont(font_name, item['size'])
+                    
+                    # Convert coordinates (ReportLab uses bottom-left origin)
+                    y_converted = 792 - item['y']  # Standard letter height
+                    can.drawString(item['x'], y_converted, item['text'])
+                
+                can.save()
+                
+                # Merge overlay onto blank template
+                packet.seek(0)
+                overlay_pdf = PdfReader(packet)
+                page.merge_page(overlay_pdf.pages[0])
+            
+            writer.add_page(page)
+        
+        # Save result
+        with open(output_path, 'wb') as output_file:
+            writer.write(output_file)
+        
+        print(f"🎉 Success! ReportLab clean overlay: {output_path}")
+        return True
+        
+    except Exception as e:
+        print(f"❌ Error: {e}")
+        return False
+
+# METHOD 4: PyMuPDF text-only rendering
+def pymupdf_text_only_overlay(blank_template_path, filled_form_path, output_path):
+    """
+    Use PyMuPDF to render only text content (no graphics/background).
+    """
+    try:
+        print("🔧 PyMuPDF text-only rendering...")
+        
+        blank_doc = fitz.open(blank_template_path)
+        filled_doc = fitz.open(filled_form_path)
+        
+        for page_num in range(len(blank_doc)):
+            blank_page = blank_doc[page_num]
+            
+            if page_num < len(filled_doc):
+                filled_page = filled_doc[page_num]
+                
+                # Get all text as simple string with positions
+                text_content = filled_page.get_text("words")  # Returns list of words with positions
+                
+                # Add each word to blank page
+                for word_data in text_content:
+                    if len(word_data) >= 5:  # word format: (x0, y0, x1, y1, "word", block_no, line_no, word_no)
+                        x, y = word_data[0], word_data[1]
+                        word = word_data[4]
+                        
+                        if word.strip():
+                            blank_page.insert_text(
+                                (x, y),
+                                word,
+                                fontname="helv",
+                                fontsize=10,  # Standard size
+                                color=(0, 0, 0)
+                            )
+                
+                print(f"✅ Page {page_num + 1}: Added {len(text_content)} words")
+        
+        # Save result
+        blank_doc.save(output_path)
+        blank_doc.close()
+        filled_doc.close()
+        
+        print(f"🎉 Success! Text-only overlay: {output_path}")
+        return True
+        
+    except Exception as e:
+        print(f"❌ Error: {e}")
+        return False
+
+# MAIN PROCESSING FUNCTION
+def process_background_removal(blank_template, filled_form):
+    """
+    Process background removal with multiple methods to find the best result.
+    """
+    print("🗑️ Background Removal and Overlay Tool")
+    print("=" * 45)
+    print(f"📂 Clean template: {blank_template}")
+    print(f"📂 Filled form: {filled_form}")
+    print()
     
+    # Try all methods
     methods = [
-        ("Method 1 (PyPDF2)", auto_overlay_same_layout, "output_method1.pdf"),
-        ("Method 2 (PyMuPDF)", pymupdf_auto_overlay, "output_method2.pdf"),
-        ("Method 3 (Smart Extract)", auto_extract_and_place, "output_method3.pdf")
+        ("Basic Text Extraction", remove_background_overlay_text, "output_basic.pdf"),
+        ("Advanced Formatting", advanced_background_removal, "output_advanced.pdf"), 
+        ("ReportLab Clean", reportlab_background_removal, "output_reportlab.pdf"),
+        ("Words Only", pymupdf_text_only_overlay, "output_words.pdf")
     ]
     
-    results = []
+    successful_outputs = []
     
     for method_name, method_func, output_file in methods:
-        print(f"\n🔧 Testing {method_name}...")
-        success = method_func(blank_pdf, filled_pdf, output_file)
-        results.append((method_name, success, output_file))
-        
+        print(f"🔧 {method_name}...")
+        success = method_func(blank_template, filled_form, output_file)
         if success:
-            print(f"✅ {method_name} completed successfully")
+            successful_outputs.append(output_file)
+            print(f"✅ Created: {output_file}")
         else:
-            print(f"❌ {method_name} failed")
+            print(f"❌ Failed")
+        print()
     
-    print(f"\n📊 Results Summary:")
-    print("-" * 30)
-    for method_name, success, output_file in results:
-        status = "✅ SUCCESS" if success else "❌ FAILED"
-        print(f"{method_name}: {status}")
-        if success:
-            print(f"   Output: {output_file}")
+    print("📊 Summary:")
+    print("-" * 20)
+    if successful_outputs:
+        print("✅ Successfully created:")
+        for output in successful_outputs:
+            print(f"   • {output}")
+        print(f"\n💡 Try '{successful_outputs[0]}' first - it's usually the best result!")
+    else:
+        print("❌ All methods failed - please check your PDF files")
     
-    return results
+    return successful_outputs
 
-# MAIN EXECUTION
 if __name__ == "__main__":
-    print("🏥 Automatic Insurance Form PDF Overlay")
-    print("No manual coordinates needed!")
-    print("=" * 50)
+    # Your file paths
+    blank_template = "Sample 1500_2012_02_removed.pdf"  # Your clean template
+    filled_form = "your_filled_form.pdf"  # Change this to your filled form name
     
-    # Your file paths (change these to match your files)
-    blank_form = "blank_insurance_form.pdf"
-    filled_form = "filled_insurance_form.pdf"
+    # Process the files
+    process_background_removal(blank_template, filled_form)
     
-    print(f"📂 Blank form: {blank_form}")
-    print(f"📂 Filled form: {filled_form}")
-    
-    # Test all methods
-    test_all_methods(blank_form, filled_form)
-    
-    print(f"\n🎯 Recommended for your case:")
-    print("   Method 1 (PyPDF2) - Simple and reliable")
-    print("   Method 2 (PyMuPDF) - Better quality")
-    
-    print(f"\n💡 Just run:")
-    print(f"   auto_overlay_same_layout('{blank_form}', '{filled_form}', 'final_result.pdf')")
+    print("\n🎯 What this does:")
+    print("   • Removes ALL background/graphics from filled form")
+    print("   • Keeps ALL text content")  
+    print("   • Places text on your clean template")
+    print("   • Preserves original text positions")
 
-# INSTALLATION (run once)
+# INSTALLATION
 """
-pip install PyPDF2 PyMuPDF
+pip install PyPDF2 PyMuPDF reportlab
 """
 
-# USAGE (3 simple steps):
+# QUICK USAGE
 """
-1. Put your PDF files in the same folder as this script
-2. Update the file names in the script
-3. Run the script - it does everything automatically!
+1. Change 'your_filled_form.pdf' to your actual filled form filename
+2. Run this script
+3. Check the generated output files
+4. Use the one that looks best!
 """
