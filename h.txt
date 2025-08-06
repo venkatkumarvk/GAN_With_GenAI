@@ -1,63 +1,38 @@
 import cv2
+
+# Load base and overlay images
+background = cv2.imread('background.jpg')
+overlay = cv2.imread('overlay.png')
+
+# Resize overlay to match background size
+overlay = cv2.resize(overlay, (background.shape[1], background.shape[0]))
+
+# Blend the images (adjust the weights as needed)
+combined = cv2.addWeighted(background, 0.7, overlay, 0.3, 0)
+
+# Save the result
+cv2.imwrite('output_overlay.jpg', combined)
+
+##
+import cv2
 import numpy as np
-from pdf2image import convert_from_path
-from PIL import Image
-import fitz  # PyMuPDF
 
-# === Step 1: Convert both PDFs to images ===
-empty_pdf_path = "Sample 1500_2012_02_removed.pdf"
-filled_pdf_path = "1000265175.pdf"
+# Load background and overlay image with alpha
+background = cv2.imread('background.jpg')
+overlay = cv2.imread('overlay.png', cv2.IMREAD_UNCHANGED)  # includes alpha
 
-# Convert first pages to images
-empty_page = convert_from_path(empty_pdf_path, dpi=300)[0]
-filled_page = convert_from_path(filled_pdf_path, dpi=300)[0]
+# Resize overlay to match background
+overlay = cv2.resize(overlay, (background.shape[1], background.shape[0]))
 
-# Convert to OpenCV format (BGR)
-empty_img = cv2.cvtColor(np.array(empty_page), cv2.COLOR_RGB2BGR)
-filled_img = cv2.cvtColor(np.array(filled_page), cv2.COLOR_RGB2BGR)
+# Separate alpha channel
+b, g, r, a = cv2.split(overlay)
+overlay_rgb = cv2.merge((b, g, r))
+alpha_mask = cv2.merge((a, a, a)) / 255.0
 
-# Resize to match
-if empty_img.shape != filled_img.shape:
-    filled_img = cv2.resize(filled_img, (empty_img.shape[1], empty_img.shape[0]))
-
-# === Step 2: Remove background from filled form ===
-gray_empty = cv2.cvtColor(empty_img, cv2.COLOR_BGR2GRAY)
-gray_filled = cv2.cvtColor(filled_img, cv2.COLOR_BGR2GRAY)
-
-# Subtract and threshold
-diff = cv2.absdiff(gray_filled, gray_empty)
-_, mask = cv2.threshold(diff, 30, 255, cv2.THRESH_BINARY)
-mask_3ch = cv2.merge([mask, mask, mask])
-
-# Extract only text (writing)
-text_only = cv2.bitwise_and(filled_img, mask_3ch)
-
-# === Step 3: Save extracted content as PNG with transparency ===
-# Convert black text on white to transparent background
-text_gray = cv2.cvtColor(text_only, cv2.COLOR_BGR2GRAY)
-_, alpha = cv2.threshold(text_gray, 0, 255, cv2.THRESH_BINARY)
-rgba = cv2.cvtColor(text_only, cv2.COLOR_BGR2BGRA)
-rgba[:, :, 3] = alpha
-
-# Save as transparent PNG
-cv2.imwrite("text_overlay.png", rgba)
-
-# === Step 4: Overlay this image onto the original empty PDF ===
-doc = fitz.open(empty_pdf_path)
-page = doc[0]  # Assuming 1-page form
-
-# Get page size
-rect = page.rect
-pixmap_width = int(rect.width)
-pixmap_height = int(rect.height)
-
-# Insert image (overlayed text)
-page.insert_image(
-    rect,
-    filename="text_overlay.png",
-    overlay=True  # This ensures it goes on top
-)
+# Blend
+foreground = overlay_rgb * alpha_mask
+background = background * (1 - alpha_mask)
+result = cv2.add(foreground.astype(np.uint8), background.astype(np.uint8))
 
 # Save result
-doc.save("final_overlay_with_pymupdf.pdf")
-print("✅ Saved as 'final_overlay_with_pymupdf.pdf'")
+cv2.imwrite('output_overlay.png', result)
