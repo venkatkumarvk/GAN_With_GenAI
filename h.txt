@@ -3,45 +3,42 @@ import numpy as np
 from pdf2image import convert_from_path
 from PIL import Image
 
-# === Step 1: Convert PDF pages to high-resolution images ===
+# === Step 1: Load PDFs and convert to images ===
 empty_pdf_path = "Sample 1500_2012_02_removed.pdf"
-filled_pdf_path = "1000265175.pdf"
+filled_pdf_path = "1000265175.pdf"  # Or .jpg if needed
 
-# Convert to images
-empty_page = convert_from_path(empty_pdf_path, dpi=300)[0]
-filled_page = convert_from_path(filled_pdf_path, dpi=300)[0]
+# Convert to images (first page only)
+empty_pil = convert_from_path(empty_pdf_path, dpi=300)[0]
+filled_pil = convert_from_path(filled_pdf_path, dpi=300)[0]
 
-# Convert PIL to OpenCV format
-empty_img = cv2.cvtColor(np.array(empty_page), cv2.COLOR_RGB2GRAY)
-filled_img = cv2.cvtColor(np.array(filled_page), cv2.COLOR_RGB2GRAY)
+# Convert to OpenCV (BGR)
+empty_img = cv2.cvtColor(np.array(empty_pil), cv2.COLOR_RGB2BGR)
+filled_img = cv2.cvtColor(np.array(filled_pil), cv2.COLOR_RGB2BGR)
 
-# Resize to match if needed
+# === Step 2: Resize to match shapes exactly ===
 if empty_img.shape != filled_img.shape:
     filled_img = cv2.resize(filled_img, (empty_img.shape[1], empty_img.shape[0]))
 
-# === Step 2: Background subtraction (absolute difference) ===
-diff = cv2.absdiff(filled_img, empty_img)
+# === Step 3: Convert to grayscale for subtraction ===
+gray_empty = cv2.cvtColor(empty_img, cv2.COLOR_BGR2GRAY)
+gray_filled = cv2.cvtColor(filled_img, cv2.COLOR_BGR2GRAY)
 
-# Threshold to isolate only the text/writing
+# Subtract to get only the difference (text/handwriting)
+diff = cv2.absdiff(gray_filled, gray_empty)
+
+# Threshold to get binary mask of text only
 _, mask = cv2.threshold(diff, 30, 255, cv2.THRESH_BINARY)
 
-# Convert to 3-channel mask to apply on color
-filled_color = cv2.cvtColor(np.array(filled_page), cv2.COLOR_RGB2BGR)
+# === Step 4: Create 3-channel mask for color overlay ===
 mask_3ch = cv2.merge([mask, mask, mask])
-text_only = cv2.bitwise_and(filled_color, mask_3ch)
+text_only = cv2.bitwise_and(filled_img, mask_3ch)
 
-# === Step 3: Convert empty PDF to color image ===
-empty_color = cv2.cvtColor(np.array(empty_page), cv2.COLOR_RGB2BGR)
+# === Step 5: Overlay text onto the clean form ===
+output_img = cv2.addWeighted(empty_img, 1.0, text_only, 1.0, 0)
 
-# Overlay the extracted text/writing on the clean form
-if text_only.shape != empty_color.shape:
-    text_only = cv2.resize(text_only, (empty_color.shape[1], empty_color.shape[0]))
+# === Step 6: Save output as PDF ===
+output_rgb = cv2.cvtColor(output_img, cv2.COLOR_BGR2RGB)
+output_pil = Image.fromarray(output_rgb)
+output_pil.save("final_clean_overlay.pdf")
 
-output_img = cv2.addWeighted(empty_color, 1.0, text_only, 1.0, 0)
-
-# === Step 4: Save the result as PDF ===
-final_rgb = cv2.cvtColor(output_img, cv2.COLOR_BGR2RGB)
-final_pil = Image.fromarray(final_rgb)
-final_pil.save("final_clean_overlay.pdf")
-
-print("✅ Final output saved as 'final_clean_overlay.pdf'")
+print("✅ Final clean overlay saved as 'final_clean_overlay.pdf'")
