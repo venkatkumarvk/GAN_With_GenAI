@@ -271,3 +271,67 @@ class PDFProcessor:
 
         return None
 
+---
+from datetime import datetime
+import pandas as pd
+
+def create_csv_for_results(self, extracted_results, filename):
+    pdf_rows = []
+    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+    # Use user-specific headers if available, else fall back
+    if self.userspecific_headers is not None and len(self.userspecific_headers) > 0:
+        fieldheader = self.userspecific_headers
+    else:
+        fieldheader = self.extraction_fields
+
+    for page_num, category, data in extracted_results:
+        if category != f"{self.doc_type}" or data is None:
+            continue
+
+        row_data = {
+            "Filename": filename,
+            "Page": page_num + 1,
+            "Extraction_Timestamp": timestamp
+        }
+
+        for field in fieldheader:
+            if field in data:
+                field_data = data[field]
+                if isinstance(field_data, dict):
+                    value = field_data.get("value", "N/A")
+                    confidence = field_data.get("confidence", 0)
+                else:
+                    value = field_data if field_data else "N/A"
+                    confidence = 0
+
+                row_data[field] = value
+                row_data[f"{field}_Confidence"] = round(confidence * 100, 2)
+            else:
+                continue  # skip missing fields
+
+        pdf_rows.append(row_data)
+
+    if pdf_rows:
+        pdf_df = pd.DataFrame(pdf_rows, dtype=str)
+
+        # Automatically generate mapping if user-specific headers exist
+        if self.userspecific_headers is not None and len(self.userspecific_headers) > 0:
+            # Example display names (you can customize this mapping logic as needed)
+            user_friendly_names = [f.replace("_", " ").title() for f in self.userspecific_headers]
+
+            # Create the mapping
+            rename_mapping = {}
+            for original, friendly in zip(self.userspecific_headers, user_friendly_names):
+                rename_mapping[original] = friendly
+                rename_mapping[f"{original}_Confidence"] = f"{friendly} Confidence"
+
+            # Add system fields if needed
+            # (optional, rename Page, Filename, etc.)
+
+            pdf_df = pdf_df.rename(columns=rename_mapping)
+
+        pdf_csv = pdf_df.to_csv(index=False)
+        return pdf_csv
+
+    return None
