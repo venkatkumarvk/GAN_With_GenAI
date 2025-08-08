@@ -2,198 +2,197 @@ import fitz
 import cv2
 import numpy as np
 
-def detect_form_corners(img):
-    """Detect the form boundary corners"""
+def detect_form_corners_conservative(img):
+    """More conservative form boundary detection to avoid cutting content"""
     gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-    gray = cv2.equalizeHist(gray)
     
-    # Use adaptive threshold
-    thresh = cv2.adaptiveThreshold(
-        gray, 255,
-        cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
-        cv2.THRESH_BINARY_INV,
-        15, 9
-    )
+    # Use gentle edge detection
+    edges = cv2.Canny(gray, 30, 100)
     
-    # Morphological operations to clean up
-    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
-    thresh = cv2.morphologyEx(thresh, cv2.MORPH_CLOSE, kernel)
-    thresh = cv2.morphologyEx(thresh, cv2.MORPH_OPEN, kernel)
+    # Find contours
+    contours, _ = cv2.findContours(edges, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     
-    contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    if contours:
+        # Get the largest contour
+        cnt = max(contours, key=cv2.contourArea)
+        
+        # Get bounding rectangle (more reliable than trying to find exact corners)
+        x, y, w, h = cv2.boundingRect(cnt)
+        
+        # Add small padding to ensure we don't cut content
+        padding = 10
+        x = max(0, x - padding)
+        y = max(0, y - padding)
+        w = min(img.shape[1] - x, w + 2 * padding)
+        h = min(img.shape[0] - y, h + 2 * padding)
+        
+        return np.float32([
+            [x, y],
+            [x + w, y],
+            [x + w, y + h],
+            [x, y + h]
+        ])
     
-    if not contours:
-        raise ValueError("No contours found for form boundary.")
-    
-    # Find the largest contour (should be the form boundary)
-    cnt = max(contours, key=cv2.contourArea)
-    
-    # Try to approximate to 4 corners
-    peri = cv2.arcLength(cnt, True)
-    for eps in [0.01, 0.02, 0.03, 0.05]:
-        approx = cv2.approxPolyDP(cnt, eps * peri, True)
-        if len(approx) == 4:
-            return np.float32([p[0] for p in approx])
-    
-    # Fallback to bounding rectangle
-    x, y, w, h = cv2.boundingRect(cnt)
+    # Fallback: use almost entire image with small margins
+    h, w = img.shape[:2]
+    margin = 5
     return np.float32([
-        [x, y],
-        [x + w, y],
-        [x + w, y + h],
-        [x, y + h]
+        [margin, margin],
+        [w - margin, margin],
+        [w - margin, h - margin],
+        [margin, h - margin]
     ])
 
-def detect_background_form_area(bg_img):
-    """Detect the form area in the background template"""
-    gray = cv2.cvtColor(bg_img, cv2.COLOR_BGR2GRAY)
+def preserve_colors_remove_white(img, white_threshold=250):
+    """Remove white background while preserving original colors"""
+    if len(img.shape) != 3:
+        return img
     
-    # Use edge detection to find form boundaries
-    edges = cv2.Canny(gray, 50, 150, apertureSize=3)
+    # Convert to RGB for proper color handling
+    img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
     
-    # Find lines using HoughLines
-    lines = cv2.HoughLinesP(edges, 1, np.pi/180, threshold=100, minLineLength=100, maxLineGap=10)
+    # Create mask for white pixels
+    # A pixel is considered white if all RGB values are above threshold
+    white_mask = np.all(img_rgb >= white_threshold, axis=2)
     
-    if lines is not None:
-        # Find the bounding box of all detected lines
-        x_coords = []
-        y_coords = []
-        
-        for line in lines:
-            x1, y1, x2, y2 = line[0]
-            x_coords.extend([x1, x2])
-            y_coords.extend([y1, y2])
-        
-        if x_coords and y_coords:
-            x_min, x_max = min(x_coords), max(x_coords)
-            y_min, y_max = min(y_coords), max(y_coords)
-            
-            # Add some padding
-            padding = 20
-            x_min = max(0, x_min - padding)
-            y_min = max(0, y_min - padding)
-            x_max = min(bg_img.shape[1], x_max + padding)
-            y_max = min(bg_img.shape[0], y_max + padding)
-            
-            return np.float32([
-                [x_min, y_min],
-                [x_max, y_min],
-                [x_max, y_max],
-                [x_min, y_max]
-            ])
+    # Create alpha channel
+    alpha = np.where(white_mask, 0, 255).astype(np.uint8)
     
-    # Fallback: assume form takes up most of the page with margins
-    h, w = bg_img.shape[:2]
-    margin_x, margin_y = int(w * 0.05), int(h * 0.05)
+    # Convert back to BGR and add alpha
+    b, g, r = cv2.split(img)
+    return cv2.merge([b, g, r, alpha])
+
+def gentle_alignment(overlay_img, target_width, target_height):
+    """Gentle alignment that preserves aspect ratio and avoids distortion"""
     
-    return np.float32([
+    # Get overlay dimensions
+    overlay_h, overlay_w = overlay_img.shape[:2]
+    
+    # Detect form area conservatively
+    overlay_corners = detect_form_corners_conservative(overlay_img)
+    
+    # Calculate the actual form area in the overlay
+    form_x = int(overlay_corners[0][0])
+    form_y = int(overlay_corners[0][1])
+    form_w = int(overlay_corners[2][0] - overlay_corners[0][0])
+    form_h = int(overlay_corners[2][1] - overlay_corners[0][1])
+    
+    # Calculate scale to fit target while preserving aspect ratio
+    scale_x = target_width / form_w
+    scale_y = target_height / form_h
+    scale = min(scale_x, scale_y) * 0.95  # Slightly smaller to ensure fit
+    
+    # Calculate new dimensions
+    new_w = int(overlay_w * scale)
+    new_h = int(overlay_h * scale)
+    
+    # Resize with high-quality interpolation
+    resized = cv2.resize(overlay_img, (new_w, new_h), interpolation=cv2.INTER_LANCZOS4)
+    
+    # Create target-sized canvas
+    result = np.ones((target_height, target_width, 3), dtype=np.uint8) * 255
+    
+    # Center the resized image
+    start_y = (target_height - new_h) // 2
+    start_x = (target_width - new_w) // 2
+    
+    # Ensure we don't go out of bounds
+    start_y = max(0, start_y)
+    start_x = max(0, start_x)
+    end_y = min(target_height, start_y + new_h)
+    end_x = min(target_width, start_x + new_w)
+    
+    # Place the image
+    result[start_y:end_y, start_x:end_x] = resized[:end_y-start_y, :end_x-start_x]
+    
+    return result
+
+def precise_perspective_alignment(overlay_img, target_width, target_height):
+    """More precise perspective correction with color preservation"""
+    
+    # Detect corners more carefully
+    overlay_corners = detect_form_corners_conservative(overlay_img)
+    
+    # Define target area with realistic margins for CMS-1500 forms
+    # CMS-1500 forms typically have specific margin requirements
+    margin_x = int(target_width * 0.06)   # 6% margin horizontally
+    margin_y = int(target_height * 0.04)  # 4% margin vertically
+    
+    target_corners = np.float32([
         [margin_x, margin_y],
-        [w - margin_x, margin_y],
-        [w - margin_x, h - margin_y],
-        [margin_x, h - margin_y]
-    ])
-
-def order_corners(corners):
-    """Order corners as: top-left, top-right, bottom-right, bottom-left"""
-    # Calculate centroid
-    center = np.mean(corners, axis=0)
-    
-    # Sort by angle from centroid
-    angles = np.arctan2(corners[:, 1] - center[1], corners[:, 0] - center[0])
-    sorted_indices = np.argsort(angles)
-    
-    # Reorder to start from top-left
-    ordered = corners[sorted_indices]
-    
-    # Find top-left (smallest sum of coordinates)
-    sums = np.sum(ordered, axis=1)
-    top_left_idx = np.argmin(sums)
-    
-    # Reorder starting from top-left
-    ordered = np.roll(ordered, -top_left_idx, axis=0)
-    
-    return ordered
-
-def remove_white_background(img, threshold=240):
-    """Remove white background and create alpha channel"""
-    if len(img.shape) == 3:
-        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-    else:
-        gray = img
-    
-    # Create alpha mask (white becomes transparent)
-    alpha = np.where(gray >= threshold, 0, 255).astype(np.uint8)
-    
-    # Convert to BGRA
-    if len(img.shape) == 3:
-        b, g, r = cv2.split(img)
-        return cv2.merge([b, g, r, alpha])
-    else:
-        return cv2.merge([gray, gray, gray, alpha])
-
-def align_forms(overlay_img, bg_width, bg_height):
-    """Main function to align filled form with blank template"""
-    
-    # Create a blank background image for detection
-    bg_img = np.ones((bg_height, bg_width, 3), dtype=np.uint8) * 255
-    
-    # Detect corners in overlay
-    overlay_corners = detect_form_corners(overlay_img)
-    overlay_corners = order_corners(overlay_corners)
-    
-    # For the background, we'll assume the form should fill most of the page
-    # with appropriate margins
-    margin_ratio = 0.08  # 8% margin on each side
-    margin_x = int(bg_width * margin_ratio)
-    margin_y = int(bg_height * margin_ratio)
-    
-    bg_corners = np.float32([
-        [margin_x, margin_y],                          # top-left
-        [bg_width - margin_x, margin_y],               # top-right
-        [bg_width - margin_x, bg_height - margin_y],   # bottom-right
-        [margin_x, bg_height - margin_y]               # bottom-left
+        [target_width - margin_x, margin_y],
+        [target_width - margin_x, target_height - margin_y],
+        [margin_x, target_height - margin_y]
     ])
     
-    # Calculate perspective transform
-    M = cv2.getPerspectiveTransform(overlay_corners, bg_corners)
+    # Apply perspective transformation
+    M = cv2.getPerspectiveTransform(overlay_corners, target_corners)
     
-    # Apply transform
-    warped = cv2.warpPerspective(overlay_img, M, (bg_width, bg_height))
+    # Use high-quality interpolation
+    warped = cv2.warpPerspective(
+        overlay_img, M, (target_width, target_height),
+        flags=cv2.INTER_LANCZOS4,
+        borderMode=cv2.BORDER_CONSTANT,
+        borderValue=(255, 255, 255)  # White background
+    )
     
     return warped
 
-# Main processing function
-def create_overlay(background_pdf, overlay_pdf, output_pdf):
-    """Create aligned overlay from filled form onto blank template"""
+def create_overlay_advanced(background_pdf, overlay_pdf, output_pdf, alignment_method='gentle'):
+    """
+    Create aligned overlay with multiple alignment options
+    
+    alignment_method: 'gentle' (safer) or 'perspective' (more precise)
+    """
+    
+    print(f"Processing with {alignment_method} alignment...")
     
     # Load background PDF
     bg_doc = fitz.open(background_pdf)
     bg_pix = bg_doc[0].get_pixmap(dpi=300)
     bg_width, bg_height = bg_pix.width, bg_pix.height
+    print(f"Background size: {bg_width}x{bg_height}")
     
     # Load overlay PDF
     overlay_doc = fitz.open(overlay_pdf)
     overlay_pix = overlay_doc[0].get_pixmap(dpi=300)
+    print(f"Overlay size: {overlay_pix.width}x{overlay_pix.height}")
     
-    # Convert to numpy array
-    overlay_img = np.frombuffer(
-        overlay_pix.samples, 
-        dtype=np.uint8
-    ).reshape(overlay_pix.height, overlay_pix.width, overlay_pix.n)
+    # Convert to numpy array with proper color handling
+    overlay_samples = overlay_pix.samples
+    overlay_img = np.frombuffer(overlay_samples, dtype=np.uint8)
     
-    if overlay_pix.n == 4:
-        overlay_img = cv2.cvtColor(overlay_img, cv2.COLOR_BGRA2BGR)
-    elif overlay_pix.n == 1:
+    # Handle different color formats properly
+    if overlay_pix.n == 4:  # RGBA
+        overlay_img = overlay_img.reshape(overlay_pix.height, overlay_pix.width, 4)
+        overlay_img = cv2.cvtColor(overlay_img, cv2.COLOR_RGBA2BGR)
+    elif overlay_pix.n == 3:  # RGB
+        overlay_img = overlay_img.reshape(overlay_pix.height, overlay_pix.width, 3)
+        overlay_img = cv2.cvtColor(overlay_img, cv2.COLOR_RGB2BGR)
+    elif overlay_pix.n == 1:  # Grayscale
+        overlay_img = overlay_img.reshape(overlay_pix.height, overlay_pix.width)
         overlay_img = cv2.cvtColor(overlay_img, cv2.COLOR_GRAY2BGR)
+    else:
+        raise ValueError(f"Unsupported color format: {overlay_pix.n} channels")
     
-    # Align the forms
-    aligned_overlay = align_forms(overlay_img, bg_width, bg_height)
+    print(f"Overlay image shape after conversion: {overlay_img.shape}")
     
-    # Remove white background
-    overlay_rgba = remove_white_background(aligned_overlay, threshold=240)
+    # Choose alignment method
+    if alignment_method == 'gentle':
+        aligned_overlay = gentle_alignment(overlay_img, bg_width, bg_height)
+    else:
+        aligned_overlay = precise_perspective_alignment(overlay_img, bg_width, bg_height)
     
-    # Convert to PNG bytes
-    _, buf = cv2.imencode(".png", overlay_rgba)
+    # Remove white background while preserving colors
+    overlay_rgba = preserve_colors_remove_white(aligned_overlay, white_threshold=245)
+    
+    # Convert to PNG with high quality
+    encode_params = [cv2.IMWRITE_PNG_COMPRESSION, 1]  # Minimal compression
+    success, buf = cv2.imencode(".png", overlay_rgba, encode_params)
+    
+    if not success:
+        raise ValueError("Failed to encode overlay as PNG")
+    
     overlay_png_bytes = buf.tobytes()
     
     # Insert overlay into background PDF
@@ -201,17 +200,26 @@ def create_overlay(background_pdf, overlay_pdf, output_pdf):
     rect = fitz.Rect(0, 0, page.rect.width, page.rect.height)
     page.insert_image(rect, stream=overlay_png_bytes)
     
-    # Save output
-    bg_doc.save(output_pdf)
+    # Save with high quality
+    bg_doc.save(output_pdf, garbage=4, deflate=True)
     bg_doc.close()
     overlay_doc.close()
     
     print(f"✅ Overlay complete → {output_pdf}")
 
-# Usage
+# Usage with different methods
 if __name__ == "__main__":
-    background_pdf = "background.pdf"  # Your blank CMS-1500 form
-    overlay_pdf = "Sample 1500_2012_02_removed.pdf"  # Your filled form
-    output_pdf = "final_overlay.pdf"
+    background_pdf = "background.pdf"
+    overlay_pdf = "Sample 1500_2012_02_removed.pdf"
     
-    create_overlay(background_pdf, overlay_pdf, output_pdf)
+    # Try gentle alignment first (recommended)
+    try:
+        create_overlay_advanced(background_pdf, overlay_pdf, "final_overlay_gentle.pdf", 'gentle')
+    except Exception as e:
+        print(f"Gentle alignment failed: {e}")
+    
+    # Try perspective alignment as alternative
+    try:
+        create_overlay_advanced(background_pdf, overlay_pdf, "final_overlay_perspective.pdf", 'perspective')
+    except Exception as e:
+        print(f"Perspective alignment failed: {e}")
