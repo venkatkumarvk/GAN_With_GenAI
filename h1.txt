@@ -2,37 +2,56 @@ import fitz
 import cv2
 import numpy as np
 
-# === Step 1: Detect largest rectangular contour ===
+# === Detect largest rectangular contour or fallback to bounding box ===
 def detect_form_corners(img):
     gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-    gray = cv2.GaussianBlur(gray, (5, 5), 0)
-    edges = cv2.Canny(gray, 50, 150)
 
-    contours, _ = cv2.findContours(edges, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    # Boost contrast for faint borders
+    gray = cv2.equalizeHist(gray)
+
+    # Adaptive threshold for uneven edges
+    thresh = cv2.adaptiveThreshold(
+        gray, 255,
+        cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+        cv2.THRESH_BINARY_INV,
+        15, 9
+    )
+
+    # Close gaps in form lines
+    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (5, 5))
+    thresh = cv2.morphologyEx(thresh, cv2.MORPH_CLOSE, kernel)
+
+    contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
     if not contours:
         raise ValueError("No contours found for form boundary.")
 
-    # Find largest contour
     cnt = max(contours, key=cv2.contourArea)
 
-    # Approximate to polygon
+    # Try to get 4-corner polygon
     peri = cv2.arcLength(cnt, True)
-    approx = cv2.approxPolyDP(cnt, 0.02 * peri, True)
+    for eps in [0.02, 0.05, 0.08, 0.1]:
+        approx = cv2.approxPolyDP(cnt, eps * peri, True)
+        if len(approx) == 4:
+            return np.float32([p[0] for p in approx])
 
-    if len(approx) != 4:
-        raise ValueError("Form boundary not detected as quadrilateral.")
+    # Fallback to bounding box if no perfect 4 corners found
+    x, y, w, h = cv2.boundingRect(cnt)
+    return np.float32([
+        [x, y],
+        [x + w, y],
+        [x + w, y + h],
+        [x, y + h]
+    ])
 
-    return np.float32([p[0] for p in approx])
-
-# === Step 2: Remove white background ===
+# === Remove white background, keep transparency ===
 def remove_white_background(img):
     gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
     _, alpha = cv2.threshold(gray, 240, 255, cv2.THRESH_BINARY_INV)
     b, g, r = cv2.split(img)
     return cv2.merge([b, g, r, alpha])
 
-# === Step 3: Perspective transform ===
+# === Perspective warp to match background page ===
 def warp_to_background(overlay_img, overlay_corners, bg_width, bg_height):
     target_corners = np.float32([
         [0, 0],
@@ -44,40 +63,43 @@ def warp_to_background(overlay_img, overlay_corners, bg_width, bg_height):
     warped = cv2.warpPerspective(overlay_img, M, (bg_width, bg_height))
     return warped
 
-# === Step 4: Main processing ===
-background_pdf = "background.pdf"
-overlay_pdf = "Sample 1500_2012_02_removed.pdf"
+# === Main processing ===
+background_pdf = "background.pdf"  # Your blank form
+overlay_pdf = "Sample 1500_2012_02_removed.pdf"  # Filled form
 output_pdf = "final_overlay.pdf"
 
+# Load background PDF
 bg_doc = fitz.open(background_pdf)
-overlay_doc = fitz.open(overlay_pdf)
 
-# Background page dimensions in pixels
+# Get background size in pixels at 300 dpi
 bg_pix = bg_doc[0].get_pixmap(dpi=300)
 bg_width, bg_height = bg_pix.width, bg_pix.height
 
-# Rasterize overlay PDF
+# Load overlay PDF
+overlay_doc = fitz.open(overlay_pdf)
 pix = overlay_doc[0].get_pixmap(dpi=300)
 overlay_img = np.frombuffer(pix.samples, dtype=np.uint8).reshape(pix.height, pix.width, pix.n)
 if pix.n == 4:
     overlay_img = cv2.cvtColor(overlay_img, cv2.COLOR_BGRA2BGR)
 
-# Detect corners & warp
+# Detect form corners
 overlay_corners = detect_form_corners(overlay_img)
+
+# Warp overlay to match background
 overlay_warped = warp_to_background(overlay_img, overlay_corners, bg_width, bg_height)
 
-# Remove white background
+# Remove white background from warped overlay
 overlay_rgba = remove_white_background(overlay_warped)
 
-# Convert RGBA to PNG bytes
+# Convert to PNG bytes
 _, buf = cv2.imencode(".png", overlay_rgba)
 overlay_png_bytes = buf.tobytes()
 
-# Insert PNG onto background PDF
+# Insert overlay into background PDF at full-page size
 page = bg_doc[0]
 rect = fitz.Rect(0, 0, page.rect.width, page.rect.height)
 page.insert_image(rect, stream=overlay_png_bytes)
 
-# Save
+# Save output PDF
 bg_doc.save(output_pdf)
 print(f"✅ Overlay complete → {output_pdf}")
