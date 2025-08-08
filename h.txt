@@ -1,0 +1,64 @@
+import fitz  # PyMuPDF
+import cv2
+import numpy as np
+from PIL import Image
+import os
+
+# Convert a single-page PDF to an image, forcing output size
+def pdf_to_image(pdf_path, width=None, height=None, dpi=300):
+    if not os.path.exists(pdf_path):
+        raise FileNotFoundError(f"PDF file not found: {pdf_path}")
+    
+    doc = fitz.open(pdf_path)
+    if len(doc) == 0:
+        raise ValueError(f"No pages found in PDF: {pdf_path}")
+
+    page = doc.load_page(0)  # first page
+    pix = page.get_pixmap(dpi=dpi)
+
+    img = np.frombuffer(pix.samples, dtype=np.uint8).reshape(pix.height, pix.width, pix.n)
+    if pix.n == 4:
+        img = cv2.cvtColor(img, cv2.COLOR_BGRA2BGR)
+
+    # Resize if width/height specified
+    if width and height:
+        img = cv2.resize(img, (width, height))
+
+    return img
+
+# Remove white background (make it transparent)
+def remove_white_background(img):
+    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+    _, alpha = cv2.threshold(gray, 240, 255, cv2.THRESH_BINARY_INV)
+    b, g, r = cv2.split(img)
+    rgba = cv2.merge([b, g, r, alpha])
+    return rgba
+
+# Overlay transparent image onto background
+def overlay_transparent(background, overlay_rgba):
+    overlay_rgb = overlay_rgba[:, :, :3]
+    alpha = overlay_rgba[:, :, 3] / 255.0
+    alpha = np.stack([alpha] * 3, axis=-1)
+
+    blended = (overlay_rgb * alpha + background * (1 - alpha)).astype(np.uint8)
+    return blended
+
+# === Load and Process ===
+background_pdf = "background.pdf"
+overlay_pdf = "filled.pdf"
+
+# First, get background size
+bg_img_temp = pdf_to_image(background_pdf)
+h, w = bg_img_temp.shape[:2]
+
+# Now convert both PDFs to the same size
+bg_img = pdf_to_image(background_pdf, width=w, height=h)
+overlay_img = pdf_to_image(overlay_pdf, width=w, height=h)
+
+overlay_rgba = remove_white_background(overlay_img)
+
+# Overlay
+final_img = overlay_transparent(bg_img, overlay_rgba)
+
+# Save as PDF
+Image.fromarray(final_img).save("final_output.pdf", "PDF", resolution=300.0)
