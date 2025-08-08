@@ -11,23 +11,31 @@ def pdf_to_image(pdf_path, dpi=300, target_size=None):
     doc = fitz.open(pdf_path)
     if len(doc) == 0:
         raise ValueError(f"No pages in PDF: {pdf_path}")
-
     page = doc.load_page(0)
-    pix = page.get_pixmap(dpi=dpi)
+    
+    # Define a matrix to get a higher resolution
+    mat = fitz.Matrix(dpi / 72, dpi / 72)
+    pix = page.get_pixmap(matrix=mat)
+    
     img = np.frombuffer(pix.samples, dtype=np.uint8).reshape(pix.height, pix.width, pix.n)
+    
     if pix.n == 4:
         img = cv2.cvtColor(img, cv2.COLOR_BGRA2BGR)
-
+    
     # Force match to target size if given
     if target_size:
         img = cv2.resize(img, target_size, interpolation=cv2.INTER_LANCZOS4)
-
+    
     return img
 
 # === Remove white background (make it transparent) ===
 def remove_white_background(img):
     gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-    _, alpha = cv2.threshold(gray, 240, 255, cv2.THRESH_BINARY_INV)
+    
+    # Use a lower threshold to preserve light gray lines and boxes
+    # The value 220 is a good starting point, but you may need to adjust it
+    _, alpha = cv2.threshold(gray, 220, 255, cv2.THRESH_BINARY_INV)
+    
     b, g, r = cv2.split(img)
     return cv2.merge([b, g, r, alpha])
 
@@ -36,28 +44,46 @@ def overlay_transparent(background, overlay_rgba):
     overlay_rgb = overlay_rgba[:, :, :3]
     alpha = overlay_rgba[:, :, 3] / 255.0
     alpha = np.stack([alpha] * 3, axis=-1)
+    
+    # Blending the images with the alpha channel
     blended = (overlay_rgb * alpha + background * (1 - alpha)).astype(np.uint8)
     return blended
 
 # === Paths ===
-background_pdf = "background.pdf"  # Blank form
-overlay_pdf = "Sample 1500_2012_02_removed.pdf"  # Filled form
+# Replace these with your actual file paths
+background_pdf = "background.pdf"  # The blank form
+overlay_pdf = "Sample 1500_2012_02_removed.pdf"  # The filled form
 output_pdf = "final_output.pdf"
 
-# === Step 1: Load background normally to get its size ===
-bg_img = pdf_to_image(background_pdf, dpi=300)
-bg_h, bg_w = bg_img.shape[:2]
+# === Main execution block ===
+if __name__ == "__main__":
+    try:
+        # Step 1: Load background normally to get its size
+        bg_img = pdf_to_image(background_pdf, dpi=300)
+        bg_h, bg_w = bg_img.shape[:2]
+        print(f"Background image size: {bg_w}x{bg_h}")
 
-# === Step 2: Load overlay, resizing to match background size ===
-overlay_img = pdf_to_image(overlay_pdf, dpi=300, target_size=(bg_w, bg_h))
+        # Step 2: Load overlay, resizing to match background size
+        overlay_img = pdf_to_image(overlay_pdf, dpi=300, target_size=(bg_w, bg_h))
+        print(f"Overlay image resized to: {overlay_img.shape[1]}x{overlay_img.shape[0]}")
 
-# === Step 3: Remove white background from overlay ===
-overlay_rgba = remove_white_background(overlay_img)
+        # Step 3: Remove white background from overlay
+        # This function is the key to preserving the form's structure
+        overlay_rgba = remove_white_background(overlay_img)
+        print("White background removed from overlay.")
 
-# === Step 4: Overlay ===
-final_img = overlay_transparent(bg_img, overlay_rgba)
+        # Step 4: Overlay the transparent image onto the background
+        final_img = overlay_transparent(bg_img, overlay_rgba)
+        print("Images overlaid successfully.")
+        
+        # Step 5: Save the final PDF
+        # Ensure the image is converted to a PIL Image before saving
+        Image.fromarray(final_img).save(output_pdf, "PDF", resolution=300.0)
+        print(f"✅ Overlay complete → {output_pdf}")
 
-# === Step 5: Save final PDF ===
-Image.fromarray(final_img).save(output_pdf, "PDF", resolution=300.0)
-
-print(f"✅ Overlay complete → {output_pdf}")
+    except FileNotFoundError as e:
+        print(f"Error: {e}")
+    except ValueError as e:
+        print(f"Error: {e}")
+    except Exception as e:
+        print(f"An unexpected error occurred: {e}")
