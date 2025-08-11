@@ -1,0 +1,27 @@
+# Prepare filenames for upload
+timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+base_filename = os.path.splitext(filename)[0]
+
+# Extract first folder from azure_folder path
+input_folder_name = azure_folder.split('/')[0] if '/' in azure_folder else azure_folder
+
+# Upload CSV to blob storage
+csv_blob_name = f"{folder_path}{input_folder_name}_{base_filename}_{invoice_number}_{total_amount}_{timestamp}.csv"
+
+# Upload original PDF to appropriate folder
+source_folder = "source_documents/" + folder_path
+source_blob_name = f"{source_folder}{input_folder_name}_{filename}"
+
+  --
+  # Prepare filenames for upload
+timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+base_filename = os.path.splitext(filename)[0]
+
+# Extract first folder from local_folder path
+input_folder_name = Path(local_folder).parts[0] if len(Path(local_folder).parts) > 0 else Path(local_folder).name
+
+# Upload CSV to blob storage
+csv_blob_name = f"{folder_path}{input_folder_name}_{base_filename}_{invoice_number}_{total_amount}_{timestamp}.csv"
+  # Upload original PDF to appropriate folder
+source_folder = "source_documents/" + folder_path
+source_blob_name = f"{source_folder}{input_folder_name}_{filename}"
