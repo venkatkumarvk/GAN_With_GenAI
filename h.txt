@@ -251,3 +251,29 @@ def load_config(config_path: str, keyvault_url: str = None, logger=None) -> dict
         return 1
     
     return 0
+
+
+--
+from azure.identity import DefaultAzureCredential
+from azure.keyvault.secrets import SecretClient
+
+# Replace with your Key Vault name
+key_vault_name = "YOUR-KEYVAULT-NAME"
+KVUri = f"https://{key_vault_name}.vault.azure.net/"
+
+# Authenticate
+credential = DefaultAzureCredential()
+
+# Create client
+client = SecretClient(vault_url=KVUri, credential=credential)
+
+# Test: Set a secret
+secret_name = "TestSecret"
+secret_value = "HelloAzureKeyVault"
+set_secret = client.set_secret(secret_name, secret_value)
+print(f"Secret '{set_secret.name}' set with value: {set_secret.value}")
+
+# Test: Get the secret
+retrieved_secret = client.get_secret(secret_name)
+print(f"Retrieved Secret '{retrieved_secret.name}' value: {retrieved_secret.value}")
+
