@@ -175,3 +175,40 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+---
+def build_sql(self, src, tgt, comment_all=False):
+    src_schema, src_table = src.get("table", ("NA","NA"))
+    tgt_schema, tgt_table = tgt.get("table", ("NA","NA"))
+    src_col = src.get("column", "NA")
+    tgt_col = tgt.get("column", "NA")
+    src_table_comment = src.get("table_comment","")
+    src_col_comment = src.get("column_comment","")
+    tgt_table_comment = tgt.get("table_comment","")
+    tgt_col_comment = tgt.get("column_comment","")
+
+    comments = []
+    for c in [src_table_comment, src_col_comment, tgt_table_comment, tgt_col_comment]:
+        if c:
+            # Split multiline comments into lines
+            for line in str(c).splitlines():
+                comments.append(f"-- {line.strip()}")
+
+    comment_text = "\n".join(comments)
+    if comment_text: comment_text += "\n"  # add newline if comments exist
+
+    if comment_all or src.get("has_na") or tgt.get("has_na"):
+        return (
+            f"-- Mapping skipped due to NA\n"
+            f"-- {src_schema}.{src_table}.{src_col} → {tgt_schema}.{tgt_table}.{tgt_col}\n"
+            f"{comment_text}"
+            f"-- INSERT INTO {tgt_schema}.{tgt_table} ({tgt_col})\n"
+            f"-- SELECT DISTINCT {src_col} FROM {src_schema}.{src_table};\n"
+        )
+    else:
+        return (
+            f"{comment_text}"
+            f"INSERT INTO {tgt_schema}.{tgt_table} ({tgt_col})\n"
+            f"SELECT DISTINCT {src_col} FROM {src_schema}.{src_table};\n"
+        )
+
