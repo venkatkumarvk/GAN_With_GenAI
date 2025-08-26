@@ -1,180 +1,177 @@
-# insert_helper.py
-
 import os
-import json
-import pandas as pd
 import glob
-from typing import List, Dict, Tuple, Optional
+import pandas as pd
 from collections import defaultdict
 
 class InsertSQLGenerator:
-    def __init__(self,
-                 input_folder: str,
-                 output_folder: str = "generated_inserts",
-                 categories: Optional[Dict[str, Dict[str, str]]] = None):
+    def __init__(self, config: dict, input_folder: str, output_folder: str = "generated_inserts"):
         self.input_folder = input_folder
         self.output_folder = output_folder
-        self.categories = categories or {}
+        self.categories = config.get("categories", {})
         self.category_keys = list(self.categories.keys())  # preserve order
 
-    def get_excel_files(self) -> List[str]:
-        """Get all Excel files from the input folder"""
-        excel_patterns = ['*.xlsx', '*.xls', '*.xlsm']
-        excel_files = []
-        for pattern in excel_patterns:
-            excel_files.extend(glob.glob(os.path.join(self.input_folder, pattern)))
-        return excel_files
+    def get_excel_files(self):
+        patterns = ["*.xls", "*.xlsx", "*.xlsm"]
+        files = []
+        for p in patterns:
+            files.extend(glob.glob(os.path.join(self.input_folder, p)))
+        return files
 
-    def load_all_sheets(self, file_path: str) -> pd.DataFrame:
-        """Load and combine all sheets from Excel file"""
+    def load_all_sheets(self, file_path):
         try:
             xls = pd.ExcelFile(file_path)
-            all_sheets = []
-            for sheet in xls.sheet_names:
+            sheets = []
+            for sheet_name in xls.sheet_names:
                 try:
-                    df = pd.read_excel(file_path, sheet_name=sheet)
+                    df = pd.read_excel(file_path, sheet_name=sheet_name)
                     df.columns = df.columns.str.strip()
+                    # forward fill schema/table/column for merged cells
                     for cfg in self.categories.values():
-                        for col_key in ['schema_col', 'table_col', 'column_col']:
+                        for col_key in ["schema_col", "table_col", "column_col"]:
                             col = cfg.get(col_key)
                             if col in df.columns:
                                 df[col] = df[col].ffill()
-                    all_sheets.append(df)
+                    sheets.append(df)
                 except Exception as e:
-                    print(f"⚠️ Error reading sheet {sheet} in {os.path.basename(file_path)}: {e}")
-            return pd.concat(all_sheets, ignore_index=True) if all_sheets else pd.DataFrame()
+                    print(f"⚠️ Error reading sheet {sheet_name}: {e}")
+            return pd.concat(sheets, ignore_index=True) if sheets else pd.DataFrame()
         except Exception as e:
-            print(f"❌ Error loading {file_path}: {str(e)}")
+            print(f"❌ Error loading {file_path}: {e}")
             return pd.DataFrame()
 
-    def determine_flow_direction(self, row_mappings: Dict) -> List[Tuple[str, str]]:
-        """Determine flow between categories"""
-        flows = []
-        # Always generate forward flows
-        for i in range(len(self.category_keys)-1):
-            flows.append((self.category_keys[i], self.category_keys[i+1]))
-        return flows
-
-    def create_table_column_pairs(self, df: pd.DataFrame) -> List[Dict]:
-        """Create row mappings"""
-        pairs = []
-        seen = set()
-        valid_rows = df.dropna(how='all')
+    def create_row_mappings(self, df):
+        row_mappings = []
+        valid_rows = df.dropna(how="all")
         for _, row in valid_rows.iterrows():
-            row_mappings = {}
+            mapping = {}
             for cat in self.category_keys:
                 cfg = self.categories[cat]
-                schema = str(row.get(cfg['schema_col'], 'NA')).strip()
-                table = str(row.get(cfg['table_col'], 'NA')).strip()
-                column = str(row.get(cfg['column_col'], 'NA')).strip()
-                table_comment = str(row.get(cfg.get('table_comment_col', ''), '')).strip()
-                column_comment = str(row.get(cfg.get('column_comment_col', ''), '')).strip()
+                schema = str(row.get(cfg["schema_col"], "NA")).strip()
+                table = str(row.get(cfg["table_col"], "NA")).strip()
+                column = str(row.get(cfg["column_col"], "NA")).strip()
+                table_comment = str(row.get(cfg.get("table_comment_col", ""), "")).strip()
+                column_comment = str(row.get(cfg.get("column_comment_col", ""), "")).strip()
 
-                if schema in ['nan', 'None', '']: schema = 'NA'
-                if table in ['nan', 'None', '']: table = 'NA'
-                if column in ['nan', 'None', '']: column = 'NA'
+                if schema in ["nan", "None", ""]: schema = "NA"
+                if table in ["nan", "None", ""]: table = "NA"
+                if column in ["nan", "None", ""]: column = "NA"
 
-                row_mappings[cat] = {
+                mapping[cat] = {
                     "table": (schema, table),
                     "column": column,
                     "table_comment": table_comment,
                     "column_comment": column_comment,
                     "has_na": schema == "NA" or table == "NA" or column == "NA"
                 }
-            row_mappings["flows"] = self.determine_flow_direction(row_mappings)
+            row_mappings.append(mapping)
+        return row_mappings
 
-            sig = tuple((cat, d["table"], d["column"]) for cat, d in row_mappings.items() if cat != "flows")
-            if sig not in seen:
-                seen.add(sig)
-                pairs.append(row_mappings)
-        return pairs
+    def generate_sql_for_row(self, mapping):
+        edl = mapping.get("EDL", {})
+        rdmof = mapping.get("RDMOF", {})
+        original = mapping.get("Original_SSR", {})
 
-    def generate_insert_sql(self, src, src_col, tgt, tgt_col,
-                            src_has_na=False, tgt_has_na=False,
-                            src_table_comment="", src_col_comment="",
-                            tgt_table_comment="", tgt_col_comment="") -> str:
-        """Generate SQL with comments and NA handling"""
-        src_schema, src_tab = src
-        tgt_schema, tgt_tab = tgt
+        sql_list = []
+
+        # Row-wise fallback logic
+        if edl.get("has_na") and not rdmof.get("has_na") and not original.get("has_na"):
+            sql_list.append(self.build_sql(rdmof, original))
+        elif rdmof.get("has_na") and not edl.get("has_na") and not original.get("has_na"):
+            sql_list.append(self.build_sql(edl, original))
+        elif original.get("has_na") and not edl.get("has_na") and not rdmof.get("has_na"):
+            sql_list.append(self.build_sql(edl, rdmof))
+        elif not edl.get("has_na") and not rdmof.get("has_na") and not original.get("has_na"):
+            # Default order: EDL → RDMOF → Original
+            sql_list.append(self.build_sql(edl, rdmof))
+            sql_list.append(self.build_sql(rdmof, original))
+        else:
+            # If source or target NA → comment everything
+            sql_list.append(self.build_sql(edl, rdmof, comment_all=True))
+            sql_list.append(self.build_sql(rdmof, original, comment_all=True))
+
+        return sql_list
+
+    def build_sql(self, src, tgt, comment_all=False):
+        src_schema, src_table = src.get("table", ("NA","NA"))
+        tgt_schema, tgt_table = tgt.get("table", ("NA","NA"))
+        src_col = src.get("column", "NA")
+        tgt_col = tgt.get("column", "NA")
+        src_table_comment = src.get("table_comment","")
+        src_col_comment = src.get("column_comment","")
+        tgt_table_comment = tgt.get("table_comment","")
+        tgt_col_comment = tgt.get("column_comment","")
+
         comments = []
-        if src_table_comment: comments.append(f"Source table: {src_table_comment}")
-        if src_col_comment: comments.append(f"Source column: {src_col_comment}")
-        if tgt_table_comment: comments.append(f"Target table: {tgt_table_comment}")
-        if tgt_col_comment: comments.append(f"Target column: {tgt_col_comment}")
+        if src_table_comment: comments.append(f"Source table comment: {src_table_comment}")
+        if src_col_comment: comments.append(f"Source column comment: {src_col_comment}")
+        if tgt_table_comment: comments.append(f"Target table comment: {tgt_table_comment}")
+        if tgt_col_comment: comments.append(f"Target column comment: {tgt_col_comment}")
+
         comment_text = "\n".join([f"-- {c}" for c in comments]) + ("\n" if comments else "")
 
-        # NEW RULE: If either side is NA → comment out everything
-        if src_has_na or tgt_has_na:
+        if comment_all or src.get("has_na") or tgt.get("has_na"):
             return (
                 f"-- Mapping skipped due to NA\n"
-                f"-- From {src_schema}.{src_tab}.{src_col} → {tgt_schema}.{tgt_tab}.{tgt_col}\n"
+                f"-- {src_schema}.{src_table}.{src_col} → {tgt_schema}.{tgt_table}.{tgt_col}\n"
                 f"{comment_text}"
-                f"-- INSERT INTO {tgt_schema}.{tgt_tab} ({tgt_col})\n"
-                f"-- SELECT DISTINCT {src_col} FROM {src_schema}.{src_tab};\n"
+                f"-- INSERT INTO {tgt_schema}.{tgt_table} ({tgt_col})\n"
+                f"-- SELECT DISTINCT {src_col} FROM {src_schema}.{src_table};\n"
             )
         else:
             return (
                 f"{comment_text}"
-                f"INSERT INTO {tgt_schema}.{tgt_tab} ({tgt_col})\n"
-                f"SELECT DISTINCT {src_col} FROM {src_schema}.{src_tab};\n"
+                f"INSERT INTO {tgt_schema}.{tgt_table} ({tgt_col})\n"
+                f"SELECT DISTINCT {src_col} FROM {src_schema}.{src_table};\n"
             )
 
-    def process_single_file(self, file_path: str) -> List[str]:
-        """Process one Excel file"""
+    def process_file(self, file_path):
         df = self.load_all_sheets(file_path)
-        if df.empty:
-            return []
-        pairs = self.create_table_column_pairs(df)
-        statements = []
-        for pair in pairs:
-            for src_cat, tgt_cat in pair["flows"]:
-                if src_cat in pair and tgt_cat in pair:
-                    src, tgt = pair[src_cat], pair[tgt_cat]
-                    stmt = self.generate_insert_sql(
-                        src["table"], src["column"],
-                        tgt["table"], tgt["column"],
-                        src["has_na"], tgt["has_na"],
-                        src.get("table_comment",""), src.get("column_comment",""),
-                        tgt.get("table_comment",""), tgt.get("column_comment","")
-                    )
-                    statements.append(stmt)
-        return statements
+        if df.empty: return [], set()
+        row_maps = self.create_row_mappings(df)
+        all_sql = []
+        unique_set = set()
+        for row_map in row_maps:
+            for sql in self.generate_sql_for_row(row_map):
+                norm = " ".join(sql.split())
+                if norm not in unique_set:
+                    all_sql.append(sql)
+                    unique_set.add(norm)
+        return all_sql, unique_set
 
     def run(self):
-        """Generate one SQL file per Excel file, report stats"""
-        excel_files = self.get_excel_files()
-        if not excel_files:
-            print("❌ No Excel files found")
-            return
         os.makedirs(self.output_folder, exist_ok=True)
-
+        files = self.get_excel_files()
         total_unique = 0
-        for file in excel_files:
-            sql_statements = self.process_single_file(file)
-            if sql_statements:
-                # Deduplicate
-                seen = set()
-                unique_statements = []
-                for stmt in sql_statements:
-                    norm = " ".join(stmt.split())
-                    if norm not in seen:
-                        seen.add(norm)
-                        unique_statements.append(stmt)
 
-                out_file = os.path.splitext(os.path.basename(file))[0] + ".sql"
-                out_path = os.path.join(self.output_folder, out_file)
-                with open(out_path, "w", encoding="utf-8") as f:
-                    f.write(f"-- Generated from {os.path.basename(file)}\n")
-                    f.write(f"-- Categories: {' → '.join(self.category_keys)}\n")
-                    f.write(f"-- Total unique statements: {len(unique_statements)}\n\n")
-                    f.write("\n".join(unique_statements))
+        for f in files:
+            sql_list, unique_sql = self.process_file(f)
+            out_file = os.path.splitext(os.path.basename(f))[0] + ".sql"
+            out_path = os.path.join(self.output_folder, out_file)
+            with open(out_path, "w", encoding="utf-8") as fw:
+                fw.write("\n".join(sql_list))
 
-                total_unique += len(unique_statements)
-                print(f"✅ {out_file}: {len(unique_statements)} unique statements")
-            else:
-                print(f"⚠️ No valid mappings in {os.path.basename(file)}")
+            total_unique += len(unique_sql)
+            print(f"✅ {out_file}: {len(unique_sql)} unique statements")
 
-        print(f"\n📊 Summary:")
-        print(f"   Excel files processed : {len(excel_files)}")
-        print(f"   Total unique statements: {total_unique}")
-        print(f"   Categories: {' → '.join(self.category_keys)}")
+        print(f"\n📊 Processed {len(files)} Excel files")
+        print(f"Total unique statements: {total_unique}")
+        print(f"Categories: {' → '.join(self.category_keys)}")
+
+---
+import json
+from insert_helper import InsertSQLGenerator
+
+CONFIG_PATH = "config.json"
+
+def main():
+    with open(CONFIG_PATH) as f:
+        config = json.load(f)
+
+    input_folder = config.get("input_folder", "input_excel_files")
+    output_folder = config.get("output_folder", "generated_inserts")
+
+    generator = InsertSQLGenerator(config, input_folder, output_folder)
+    generator.run()
+
+if __name__ == "__main__":
+    main()
