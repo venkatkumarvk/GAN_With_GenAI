@@ -70,7 +70,7 @@ class InsertSQLGenerator:
         return row_mappings
 
     def generate_sql_for_row(self, mapping):
-        """Generate exactly ONE SQL statement per row based on fallback logic"""
+        """Generate SQL statements per row based on improved fallback logic"""
         edl = mapping.get("EDL", {})
         rdmof = mapping.get("RDMOF", {})
         original = mapping.get("Original_SSR", {})
@@ -79,27 +79,50 @@ class InsertSQLGenerator:
         rdmof_na = rdmof.get("has_na", True)
         original_na = original.get("has_na", True)
 
-        # Apply fallback logic - generate exactly ONE SQL per row
-        if edl_na and not rdmof_na and not original_na:
-            # EDL is NA → perform Original to RDMOF
-            return self.build_sql(original, rdmof, description="Original_SSR → RDMOF (EDL is NA)")
+        sql_statements = []
+
+        # Case 1: All values present - Generate BOTH Original→EDL AND EDL→RDMOF
+        if not original_na and not edl_na and not rdmof_na:
+            sql1 = self.build_sql(original, edl, description="Original_SSR → EDL (Complete flow - Step 1)")
+            sql2 = self.build_sql(edl, rdmof, description="EDL → RDMOF (Complete flow - Step 2)")
+            sql_statements.extend([sql1, sql2])
         
+        # Case 2: EDL is NA → Direct Original to RDMOF
+        elif edl_na and not rdmof_na and not original_na:
+            sql = self.build_sql(original, rdmof, description="Original_SSR → RDMOF (EDL is NA - Direct mapping)")
+            sql_statements.append(sql)
+        
+        # Case 3: RDMOF is NA → Original to EDL only
         elif rdmof_na and not edl_na and not original_na:
-            # RDMOF is NA → perform Original to EDL
-            return self.build_sql(original, edl, description="Original_SSR → EDL (RDMOF is NA)")
+            sql = self.build_sql(original, edl, description="Original_SSR → EDL (RDMOF is NA - Partial mapping)")
+            sql_statements.append(sql)
         
+        # Case 4: Original is NA → EDL to RDMOF only
         elif original_na and not edl_na and not rdmof_na:
-            # Original is NA → perform EDL to RDMOF
-            return self.build_sql(edl, rdmof, description="EDL → RDMOF (Original_SSR is NA)")
+            sql = self.build_sql(edl, rdmof, description="EDL → RDMOF (Original_SSR is NA - Partial mapping)")
+            sql_statements.append(sql)
         
-        elif not edl_na and not rdmof_na and not original_na:
-            # Nothing is NA → perform Original → EDL → RDMOF (but only generate ONE statement)
-            # Choose the most logical single transformation: Original → EDL
-            return self.build_sql(original, edl, description="Original_SSR → EDL (Normal flow)")
+        # Case 5: Only Original and EDL (RDMOF NA)
+        elif not original_na and not edl_na and rdmof_na:
+            sql = self.build_sql(original, edl, description="Original_SSR → EDL (RDMOF is NA)")
+            sql_statements.append(sql)
         
+        # Case 6: Only EDL and RDMOF (Original NA)
+        elif original_na and not edl_na and not rdmof_na:
+            sql = self.build_sql(edl, rdmof, description="EDL → RDMOF (Original_SSR is NA)")
+            sql_statements.append(sql)
+        
+        # Case 7: Only Original and RDMOF (EDL NA) - Direct mapping
+        elif not original_na and edl_na and not rdmof_na:
+            sql = self.build_sql(original, rdmof, description="Original_SSR → RDMOF (EDL is NA - Direct mapping)")
+            sql_statements.append(sql)
+        
+        # Case 8: Multiple NAs or other cases
         else:
-            # Multiple NAs or other cases → do nothing (return commented placeholder)
-            return self.build_commented_placeholder(mapping, "Multiple categories have NA values")
+            sql = self.build_commented_placeholder(mapping, "Multiple categories have NA values")
+            sql_statements.append(sql)
+
+        return sql_statements
 
     def build_sql(self, src, tgt, description="", comment_all=False):
         """Build SQL statement from source to target"""
@@ -119,14 +142,13 @@ class InsertSQLGenerator:
         
         for c in [src_table_comment, src_col_comment, tgt_table_comment, tgt_col_comment]:
             if c and c != "nan":
-                # Split multiline comments into lines
                 for line in str(c).splitlines():
                     if line.strip():
                         comments.append(f"-- {line.strip()}")
 
         comment_text = "\n".join(comments)
         if comment_text: 
-            comment_text += "\n"  # add newline if comments exist
+            comment_text += "\n"
 
         if comment_all or src.get("has_na") or tgt.get("has_na"):
             return (
@@ -149,9 +171,9 @@ class InsertSQLGenerator:
         return (
             f"-- {reason}\n"
             f"-- Row skipped: No valid transformation possible\n"
-            f"-- Original_SSR: {mapping.get('Original_SSR', {}).get('has_na', 'Unknown')}\n"
-            f"-- EDL: {mapping.get('EDL', {}).get('has_na', 'Unknown')}\n"
-            f"-- RDMOF: {mapping.get('RDMOF', {}).get('has_na', 'Unknown')}\n"
+            f"-- Original_SSR: {'NA' if mapping.get('Original_SSR', {}).get('has_na', True) else 'Valid'}\n"
+            f"-- EDL: {'NA' if mapping.get('EDL', {}).get('has_na', True) else 'Valid'}\n"
+            f"-- RDMOF: {'NA' if mapping.get('RDMOF', {}).get('has_na', True) else 'Valid'}\n"
         )
 
     def process_file(self, file_path):
@@ -163,22 +185,25 @@ class InsertSQLGenerator:
         all_sql = []
         unique_set = set()
         skipped_count = 0
+        total_statements = 0
         
-        for row_map in row_maps:
-            # Generate exactly ONE SQL per row
-            sql = self.generate_sql_for_row(row_map)
+        for i, row_map in enumerate(row_maps, 1):
+            # Generate SQL statements for this row (can be multiple)
+            sql_list = self.generate_sql_for_row(row_map)
             
-            if sql:
-                # Normalize for duplicate detection
-                sql_normalized = " ".join(sql.split())
-                
-                if sql_normalized not in unique_set:
-                    all_sql.append(sql)
-                    unique_set.add(sql_normalized)
-                else:
-                    skipped_count += 1
+            for sql in sql_list:
+                if sql:
+                    total_statements += 1
+                    # Normalize for duplicate detection
+                    sql_normalized = " ".join(sql.split())
+                    
+                    if sql_normalized not in unique_set:
+                        all_sql.append(sql)
+                        unique_set.add(sql_normalized)
+                    else:
+                        skipped_count += 1
         
-        print(f"   Processed {len(row_maps)} rows, generated {len(all_sql)} unique SQL statements")
+        print(f"   Processed {len(row_maps)} rows, generated {total_statements} statements ({len(all_sql)} unique)")
         if skipped_count > 0:
             print(f"   Skipped {skipped_count} duplicate statements")
             
@@ -206,8 +231,8 @@ class InsertSQLGenerator:
                 
                 with open(out_path, "w", encoding="utf-8") as fw:
                     fw.write(f"-- Generated SQL from: {os.path.basename(f)}\n")
-                    fw.write(f"-- Total statements: {len(sql_list)}\n")
-                    fw.write(f"-- Fallback logic applied\n\n")
+                    fw.write(f"-- Total unique statements: {len(sql_list)}\n")
+                    fw.write(f"-- Enhanced fallback logic applied\n\n")
                     fw.write("\n".join(sql_list))
 
                 total_unique += len(unique_sql)
@@ -251,7 +276,6 @@ if __name__ == "__main__":
     main()
 
 # config.json
-"""
 {
   "input_folder": "input_excel_files",
   "output_folder": "generated_inserts",
@@ -279,4 +303,3 @@ if __name__ == "__main__":
     }
   }
 }
-"""
