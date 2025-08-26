@@ -187,3 +187,39 @@ class InsertSQLGenerator:
                 print(f"⚠️ No valid SQL generated for {os.path.basename(f)}")
 
         print(f"\n📊 Summary: Total unique statements: {total_unique}")
+
+---
+def generate_sql_for_row(self, mapping):
+    edl = mapping.get("EDL", {})
+    rdmof = mapping.get("RDMOF", {})
+    original = mapping.get("Original_SSR", {})
+
+    edl_na = edl.get("has_na", True)
+    rdmof_na = rdmof.get("has_na", True)
+    original_na = original.get("has_na", True)
+
+    sql_statements = []
+
+    # 1️⃣ All present → Original→EDL + EDL→RDMOF
+    if not original_na and not edl_na and not rdmof_na:
+        sql_statements.append(self.build_sql(original, edl, description="Original → EDL"))
+        sql_statements.append(self.build_sql(edl, rdmof, description="EDL → RDMOF"))
+
+    # 2️⃣ Original→RDMOF (EDL NA)
+    elif not original_na and edl_na and not rdmof_na:
+        sql_statements.append(self.build_sql(original, rdmof, description="Original → RDMOF"))
+
+    # 3️⃣ Original→EDL (RDMOF NA)
+    elif not original_na and not edl_na and rdmof_na:
+        sql_statements.append(self.build_sql(original, edl, description="Original → EDL"))
+
+    # 4️⃣ EDL→RDMOF (Original NA)
+    elif original_na and not edl_na and not rdmof_na:
+        sql_statements.append(self.build_sql(edl, rdmof, description="EDL → RDMOF"))
+
+    # 5️⃣ Anything else → placeholder
+    else:
+        sql_statements.append(self.build_commented_placeholder(mapping, "Multiple categories have NA values"))
+
+    return sql_statements
+
