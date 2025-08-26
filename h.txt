@@ -1,76 +1,49 @@
-# insert_helper.py
 import os
 import glob
 import pandas as pd
 
 class InsertSQLGenerator:
-    def __init__(self, config: dict, input_folder: str, output_folder: str = "generated_inserts"):
-        self.input_folder = input_folder
-        self.output_folder = output_folder
-        self.categories = config.get("categories", {})
-        self.category_keys = list(self.categories.keys())
-
-    def get_excel_files(self):
-        patterns = ["*.xls", "*.xlsx", "*.xlsm"]
-        files = []
-        for p in patterns:
-            files.extend(glob.glob(os.path.join(self.input_folder, p)))
-        return files
+    def __init__(self, config=None):
+        self.config = config or {}
 
     def load_all_sheets(self, file_path):
+        """Load all sheets in Excel and concatenate non-empty sheets that contain 'Category'."""
         try:
             xls = pd.ExcelFile(file_path)
-            sheets = []
-            for sheet_name in xls.sheet_names:
-                try:
-                    df = pd.read_excel(file_path, sheet_name=sheet_name)
-                    df.columns = df.columns.str.strip()
-                    for cfg in self.categories.values():
-                        for col_key in ["schema_col", "table_col", "column_col"]:
-                            col = cfg.get(col_key)
-                            if col in df.columns:
-                                df[col] = df[col].ffill()
-                    sheets.append(df)
-                except Exception as e:
-                    print(f"⚠️ Error reading sheet {sheet_name}: {e}")
-            return pd.concat(sheets, ignore_index=True) if sheets else pd.DataFrame()
+            df_list = []
+            for sheet in xls.sheet_names:
+                df_sheet = pd.read_excel(xls, sheet_name=sheet)
+                if not df_sheet.empty and "Category" in df_sheet.columns:
+                    df_list.append(df_sheet)
+            if df_list:
+                return pd.concat(df_list, ignore_index=True)
+            return pd.DataFrame()
         except Exception as e:
-            print(f"❌ Error loading {file_path}: {e}")
+            print(f"Error loading Excel {file_path}: {e}")
             return pd.DataFrame()
 
     def create_row_mappings(self, df):
-        row_mappings = []
-        valid_rows = df.dropna(how="all")
-        for _, row in valid_rows.iterrows():
-            mapping = {}
-            for cat in self.category_keys:
-                cfg = self.categories[cat]
-                schema = str(row.get(cfg["schema_col"], "NA")).strip()
-                table = str(row.get(cfg["table_col"], "NA")).strip()
-                column = str(row.get(cfg["column_col"], "NA")).strip()
-                table_comment = str(row.get(cfg.get("table_comment_col", ""), "")).strip()
-                column_comment = str(row.get(cfg.get("column_comment_col", ""), "")).strip()
+        """Create a list of dicts containing value + NA status per row."""
+        row_maps = []
+        for _, row in df.iterrows():
+            mapping = {
+                "Original_SSR": {"value": row.get("Original_SSR"), "has_na": pd.isna(row.get("Original_SSR"))},
+                "EDL": {"value": row.get("EDL"), "has_na": pd.isna(row.get("EDL"))},
+                "RDMOF": {"value": row.get("RDMOF"), "has_na": pd.isna(row.get("RDMOF"))},
+            }
+            row_maps.append(mapping)
+        return row_maps
 
-                schema = "NA" if schema in ["nan", "None", ""] else schema
-                table = "NA" if table in ["nan", "None", ""] else table
-                column = "NA" if column in ["nan", "None", ""] else column
-                table_comment = "" if table_comment in ["nan", "None"] else table_comment
-                column_comment = "" if column_comment in ["nan", "None"] else column_comment
+    def build_sql(self, src, dest, description=""):
+        """Return SQL string for copying data."""
+        return f"-- {description}\nINSERT INTO {dest['value']}_TABLE (COLUMN) SELECT COLUMN FROM {src['value']}_TABLE;"
 
-                mapping[cat] = {
-                    "table": (schema, table),
-                    "column": column,
-                    "table_comment": table_comment,
-                    "column_comment": column_comment,
-                    "has_na": schema == "NA" or table == "NA" or column == "NA"
-                }
-            row_mappings.append(mapping)
-        return row_mappings
+    def build_commented_placeholder(self, mapping, reason):
+        """Return a commented line for skipped rows."""
+        return f"-- Skipped: {reason}"
 
     def generate_sql_for_row(self, mapping, row_number=None):
-        """
-        Generate SQL statements per row with row number comments.
-        """
+        """Generate SQL statements based on NA conditions for a single row."""
         edl = mapping.get("EDL", {})
         rdmof = mapping.get("RDMOF", {})
         original = mapping.get("Original_SSR", {})
@@ -80,7 +53,6 @@ class InsertSQLGenerator:
         original_na = original.get("has_na", True)
 
         sql_statements = []
-
         row_comment = f"-- Row {row_number} mapping: " if row_number is not None else "-- Row mapping: "
 
         # 1️⃣ All present → Original→EDL + EDL→RDMOF
@@ -90,68 +62,30 @@ class InsertSQLGenerator:
             sql_statements.append(f"{row_comment}EDL → RDMOF")
             sql_statements.append(self.build_sql(edl, rdmof, description="EDL → RDMOF"))
 
-        # 2️⃣ Original→RDMOF (EDL NA)
+        # 2️⃣ Original→RDMOF (EDL NA only)
         elif not original_na and edl_na and not rdmof_na:
             sql_statements.append(f"{row_comment}Original → RDMOF (EDL NA)")
             sql_statements.append(self.build_sql(original, rdmof, description="Original → RDMOF"))
 
-        # 3️⃣ Original→EDL (RDMOF NA)
+        # 3️⃣ Original→EDL (RDMOF NA only)
         elif not original_na and not edl_na and rdmof_na:
             sql_statements.append(f"{row_comment}Original → EDL (RDMOF NA)")
             sql_statements.append(self.build_sql(original, edl, description="Original → EDL"))
 
-        # 4️⃣ EDL→RDMOF (Original NA)
+        # 4️⃣ EDL→RDMOF (Original NA only)
         elif original_na and not edl_na and not rdmof_na:
             sql_statements.append(f"{row_comment}EDL → RDMOF (Original NA)")
             sql_statements.append(self.build_sql(edl, rdmof, description="EDL → RDMOF"))
 
-        # 5️⃣ Anything else → placeholder
+        # 5️⃣ Skip all other partial or invalid combinations
         else:
             sql_statements.append(f"{row_comment}Skipped due to multiple NA values")
             sql_statements.append(self.build_commented_placeholder(mapping, "Multiple categories have NA values"))
 
         return sql_statements
 
-    def build_sql(self, src, tgt, description="", comment_all=False):
-        src_schema, src_table = src.get("table", ("NA", "NA"))
-        tgt_schema, tgt_table = tgt.get("table", ("NA", "NA"))
-        src_col = src.get("column", "NA")
-        tgt_col = tgt.get("column", "NA")
-
-        comments = [f"-- {description}"] if description else []
-
-        for c in [src.get("table_comment", ""), src.get("column_comment", ""),
-                  tgt.get("table_comment", ""), tgt.get("column_comment", "")]:
-            if c:
-                comments.extend([f"-- {line.strip()}" for line in str(c).splitlines() if line.strip()])
-
-        comment_text = "\n".join(comments)
-        if comment_text:
-            comment_text += "\n"
-
-        if comment_all or src.get("has_na") or tgt.get("has_na"):
-            return (
-                f"{comment_text}"
-                f"-- Mapping skipped due to NA values\n"
-                f"-- {src_schema}.{src_table}.{src_col} → {tgt_schema}.{tgt_table}.{tgt_col}\n"
-            )
-        else:
-            return (
-                f"{comment_text}"
-                f"INSERT INTO {tgt_schema}.{tgt_table} ({tgt_col})\n"
-                f"SELECT DISTINCT {src_col} FROM {src_schema}.{src_table};\n"
-            )
-
-    def build_commented_placeholder(self, mapping, reason):
-        return (
-            f"-- {reason}\n"
-            f"-- Row skipped: No valid transformation possible\n"
-            f"-- Original_SSR: {'NA' if mapping.get('Original_SSR', {}).get('has_na', True) else 'Valid'}\n"
-            f"-- EDL: {'NA' if mapping.get('EDL', {}).get('has_na', True) else 'Valid'}\n"
-            f"-- RDMOF: {'NA' if mapping.get('RDMOF', {}).get('has_na', True) else 'Valid'}\n"
-        )
-
     def process_file(self, file_path):
+        """Process a single Excel file and return unique SQL statements."""
         df = self.load_all_sheets(file_path)
         if df.empty:
             return [], set()
@@ -170,30 +104,24 @@ class InsertSQLGenerator:
 
         return all_sql, unique_set
 
-    def run(self):
-        os.makedirs(self.output_folder, exist_ok=True)
-        files = self.get_excel_files()
-        if not files:
-            print(f"❌ No Excel files found in {self.input_folder}")
-            return
+    def process_folder(self, folder_path, output_folder):
+        """Process all Excel files in a folder and write consolidated SQLs."""
+        os.makedirs(output_folder, exist_ok=True)
+        excel_files = glob.glob(os.path.join(folder_path, "*.xlsx"))
 
-        total_unique = 0
-        print(f"🔄 Processing {len(files)} Excel file(s)...")
+        for file_path in excel_files:
+            all_sql, _ = self.process_file(file_path)
+            file_name = os.path.splitext(os.path.basename(file_path))[0]
+            output_file = os.path.join(output_folder, f"{file_name}_consolidated.sql")
 
-        for f in files:
-            print(f"\n📄 Processing: {os.path.basename(f)}")
-            sql_list, unique_sql = self.process_file(f)
+            with open(output_file, "w") as f:
+                f.write("\n\n".join(all_sql))
+            print(f"Processed {file_path} → {output_file}")
 
-            if sql_list:
-                out_file = os.path.splitext(os.path.basename(f))[0] + ".sql"
-                out_path = os.path.join(self.output_folder, out_file)
-                with open(out_path, "w", encoding="utf-8") as fw:
-                    fw.write(f"-- Generated SQL from: {os.path.basename(f)}\n")
-                    fw.write(f"-- Total unique statements: {len(sql_list)}\n\n")
-                    fw.write("\n".join(sql_list))
-                total_unique += len(unique_sql)
-                print(f"✅ {out_file}: {len(unique_sql)} unique statements")
-            else:
-                print(f"⚠️ No valid SQL generated for {os.path.basename(f)}")
 
-        print(f"\n📊 Summary: Total unique statements: {total_unique}")
+# =======================
+# Example usage
+# =======================
+# config = {}  # Optional configuration dictionary
+# generator = InsertSQLGenerator(config)
+# generator.process_folder("input_folder_path", "output_folder_path")
