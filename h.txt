@@ -220,18 +220,19 @@ def generate_sql_for_row(self, mapping):
 
     sql_list = []
 
-    # Updated fallback logic
-    if edl.get("has_na") and not original.get("has_na") and not rdmof.get("has_na"):
+    # Row-wise single evaluation
+    if edl.get("has_na") and original.get("has_data") and rdmof.get("has_data"):
         sql_list.append(self.build_sql(original, rdmof))
-    elif rdmof.get("has_na") and not original.get("has_na") and not edl.get("has_na"):
+    elif rdmof.get("has_na") and original.get("has_data") and edl.get("has_data"):
         sql_list.append(self.build_sql(original, edl))
-    elif original.get("has_na") and not edl.get("has_na") and not rdmof.get("has_na"):
+    elif original.get("has_na") and edl.get("has_data") and rdmof.get("has_data"):
         sql_list.append(self.build_sql(edl, rdmof))
-    elif not edl.get("has_na") and not rdmof.get("has_na") and not original.get("has_na"):
+    elif original.get("has_data") and edl.get("has_data") and rdmof.get("has_data"):
         # Default order: Original → EDL → RDMOF
         sql_list.append(self.build_sql(original, edl))
         sql_list.append(self.build_sql(edl, rdmof))
-    # else do nothing if sources/targets invalid
+    # else do nothing if none valid
 
     return sql_list
+
 
