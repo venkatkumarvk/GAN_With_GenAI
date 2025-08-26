@@ -211,4 +211,27 @@ def build_sql(self, src, tgt, comment_all=False):
             f"INSERT INTO {tgt_schema}.{tgt_table} ({tgt_col})\n"
             f"SELECT DISTINCT {src_col} FROM {src_schema}.{src_table};\n"
         )
+----
+
+def generate_sql_for_row(self, mapping):
+    edl = mapping.get("EDL", {})
+    rdmof = mapping.get("RDMOF", {})
+    original = mapping.get("Original_SSR", {})
+
+    sql_list = []
+
+    # Updated fallback logic
+    if edl.get("has_na") and not original.get("has_na") and not rdmof.get("has_na"):
+        sql_list.append(self.build_sql(original, rdmof))
+    elif rdmof.get("has_na") and not original.get("has_na") and not edl.get("has_na"):
+        sql_list.append(self.build_sql(original, edl))
+    elif original.get("has_na") and not edl.get("has_na") and not rdmof.get("has_na"):
+        sql_list.append(self.build_sql(edl, rdmof))
+    elif not edl.get("has_na") and not rdmof.get("has_na") and not original.get("has_na"):
+        # Default order: Original → EDL → RDMOF
+        sql_list.append(self.build_sql(original, edl))
+        sql_list.append(self.build_sql(edl, rdmof))
+    # else do nothing if sources/targets invalid
+
+    return sql_list
 
