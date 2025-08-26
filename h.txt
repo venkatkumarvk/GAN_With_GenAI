@@ -34,7 +34,6 @@ class InsertSQLGenerator:
                 try:
                     df = pd.read_excel(file_path, sheet_name=sheet)
                     df.columns = df.columns.str.strip()
-                    # Forward fill schema/table/column values for merged cells
                     for cfg in self.categories.values():
                         for col_key in ['schema_col', 'table_col', 'column_col']:
                             col = cfg.get(col_key)
@@ -43,30 +42,17 @@ class InsertSQLGenerator:
                     all_sheets.append(df)
                 except Exception as e:
                     print(f"⚠️ Error reading sheet {sheet} in {os.path.basename(file_path)}: {e}")
-            if all_sheets:
-                return pd.concat(all_sheets, ignore_index=True)
-            else:
-                return pd.DataFrame()
+            return pd.concat(all_sheets, ignore_index=True) if all_sheets else pd.DataFrame()
         except Exception as e:
             print(f"❌ Error loading {file_path}: {str(e)}")
             return pd.DataFrame()
 
     def determine_flow_direction(self, row_mappings: Dict) -> List[Tuple[str, str]]:
         """Determine flow between categories"""
-        valid_categories = [c for c, i in row_mappings.items() if not i.get('has_na', False)]
         flows = []
-
-        # Original forward flow
-        original_flow = [(self.category_keys[i], self.category_keys[i+1])
-                         for i in range(len(self.category_keys)-1)]
-        for src, tgt in original_flow:
-            flows.append((src, tgt))
-
-        # Reverse flows if missing
-        if 'EDL' not in valid_categories and 'Original_SSR' in valid_categories and 'RDMOF' in valid_categories:
-            flows.append(('RDMOF', 'Original_SSR'))
-        if 'RDMOF' not in valid_categories and 'Original_SSR' in valid_categories and 'EDL' in valid_categories:
-            flows.append(('EDL', 'Original_SSR'))
+        # Always generate forward flows
+        for i in range(len(self.category_keys)-1):
+            flows.append((self.category_keys[i], self.category_keys[i+1]))
         return flows
 
     def create_table_column_pairs(self, df: pd.DataFrame) -> List[Dict]:
@@ -84,9 +70,9 @@ class InsertSQLGenerator:
                 table_comment = str(row.get(cfg.get('table_comment_col', ''), '')).strip()
                 column_comment = str(row.get(cfg.get('column_comment_col', ''), '')).strip()
 
-                if schema in ['nan', 'None']: schema = 'NA'
-                if table in ['nan', 'None']: table = 'NA'
-                if column in ['nan', 'None']: column = 'NA'
+                if schema in ['nan', 'None', '']: schema = 'NA'
+                if table in ['nan', 'None', '']: table = 'NA'
+                if column in ['nan', 'None', '']: column = 'NA'
 
                 row_mappings[cat] = {
                     "table": (schema, table),
@@ -96,6 +82,7 @@ class InsertSQLGenerator:
                     "has_na": schema == "NA" or table == "NA" or column == "NA"
                 }
             row_mappings["flows"] = self.determine_flow_direction(row_mappings)
+
             sig = tuple((cat, d["table"], d["column"]) for cat, d in row_mappings.items() if cat != "flows")
             if sig not in seen:
                 seen.add(sig)
@@ -116,14 +103,21 @@ class InsertSQLGenerator:
         if tgt_col_comment: comments.append(f"Target column: {tgt_col_comment}")
         comment_text = "\n".join([f"-- {c}" for c in comments]) + ("\n" if comments else "")
 
-        if src_has_na and tgt_has_na:
-            return f"-- Both source and target NA\n{comment_text}-- INSERT skipped\n"
-        elif src_has_na:
-            return f"-- Source NA → inserting NULL\n{comment_text}INSERT INTO {tgt_schema}.{tgt_tab} ({tgt_col}) SELECT NULL;\n"
-        elif tgt_has_na:
-            return f"-- Target NA → skipped\n{comment_text}-- INSERT INTO {tgt_schema}.{tgt_tab} ({tgt_col}) SELECT DISTINCT {src_col} FROM {src_schema}.{src_tab};\n"
+        # NEW RULE: If either side is NA → comment out everything
+        if src_has_na or tgt_has_na:
+            return (
+                f"-- Mapping skipped due to NA\n"
+                f"-- From {src_schema}.{src_tab}.{src_col} → {tgt_schema}.{tgt_tab}.{tgt_col}\n"
+                f"{comment_text}"
+                f"-- INSERT INTO {tgt_schema}.{tgt_tab} ({tgt_col})\n"
+                f"-- SELECT DISTINCT {src_col} FROM {src_schema}.{src_tab};\n"
+            )
         else:
-            return f"{comment_text}INSERT INTO {tgt_schema}.{tgt_tab} ({tgt_col}) SELECT DISTINCT {src_col} FROM {src_schema}.{src_tab};\n"
+            return (
+                f"{comment_text}"
+                f"INSERT INTO {tgt_schema}.{tgt_tab} ({tgt_col})\n"
+                f"SELECT DISTINCT {src_col} FROM {src_schema}.{src_tab};\n"
+            )
 
     def process_single_file(self, file_path: str) -> List[str]:
         """Process one Excel file"""
@@ -147,50 +141,40 @@ class InsertSQLGenerator:
         return statements
 
     def run(self):
-        """Generate one SQL file per Excel file"""
+        """Generate one SQL file per Excel file, report stats"""
         excel_files = self.get_excel_files()
         if not excel_files:
             print("❌ No Excel files found")
             return
         os.makedirs(self.output_folder, exist_ok=True)
 
+        total_unique = 0
         for file in excel_files:
             sql_statements = self.process_single_file(file)
             if sql_statements:
+                # Deduplicate
+                seen = set()
+                unique_statements = []
+                for stmt in sql_statements:
+                    norm = " ".join(stmt.split())
+                    if norm not in seen:
+                        seen.add(norm)
+                        unique_statements.append(stmt)
+
                 out_file = os.path.splitext(os.path.basename(file))[0] + ".sql"
                 out_path = os.path.join(self.output_folder, out_file)
                 with open(out_path, "w", encoding="utf-8") as f:
                     f.write(f"-- Generated from {os.path.basename(file)}\n")
-                    f.write("\n".join(sql_statements))
-                print(f"✅ File generated: {out_file} with {len(sql_statements)} statements")
+                    f.write(f"-- Categories: {' → '.join(self.category_keys)}\n")
+                    f.write(f"-- Total unique statements: {len(unique_statements)}\n\n")
+                    f.write("\n".join(unique_statements))
+
+                total_unique += len(unique_statements)
+                print(f"✅ {out_file}: {len(unique_statements)} unique statements")
             else:
                 print(f"⚠️ No valid mappings in {os.path.basename(file)}")
 
-
-----
-import json
-from insert_helper import InsertSQLGenerator
-
-def main():
-    try:
-        with open("schema_config.json", "r") as f:
-            config = json.load(f)
-
-        print("🚀 Starting INSERT SQL Generation...")
-        generator = InsertSQLGenerator(
-            input_folder=config["input_folder"],
-            output_folder=config.get("output_folder", "generated_inserts"),
-            categories=config["categories"]
-        )
-        generator.run()
-
-    except FileNotFoundError:
-        print("❌ schema_config.json not found")
-    except KeyError as e:
-        print(f"❌ Missing config key: {e}")
-    except Exception as e:
-        print(f"❌ Error: {e}")
-
-if __name__ == "__main__":
-    main()
-
+        print(f"\n📊 Summary:")
+        print(f"   Excel files processed : {len(excel_files)}")
+        print(f"   Total unique statements: {total_unique}")
+        print(f"   Categories: {' → '.join(self.category_keys)}")
