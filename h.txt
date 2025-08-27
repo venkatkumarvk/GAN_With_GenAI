@@ -25,11 +25,14 @@ class InsertSQLGenerator:
                 try:
                     df = pd.read_excel(file_path, sheet_name=sheet_name)
                     df.columns = df.columns.str.strip()
+                    
+                    # Only forward-fill comment columns, not main mapping columns
                     for cfg in self.categories.values():
-                        for col_key in ["schema_col", "table_col", "column_col"]:
+                        for col_key in ["table_comment_col", "column_comment_col"]:
                             col = cfg.get(col_key)
                             if col in df.columns:
                                 df[col] = df[col].ffill()
+                    
                     sheets.append(df)
                 except Exception as e:
                     print(f"⚠️ Error reading sheet {sheet_name}: {e}")
@@ -43,7 +46,6 @@ class InsertSQLGenerator:
         if pd.isna(value) or value is None:
             return True
         if isinstance(value, str):
-            # Strip whitespace and check various representations
             clean_value = str(value).strip().lower()
             if clean_value in ["", "nan", "none", "null", "na", "#n/a", "#na"]:
                 return True
@@ -67,13 +69,13 @@ class InsertSQLGenerator:
                 table_comment_raw = row.get(cfg.get("table_comment_col", ""), "")
                 column_comment_raw = row.get(cfg.get("column_comment_col", ""), "")
 
-                # Check if values are NA using enhanced detection
+                # NA detection
                 schema_is_na = self.is_na_value(schema_raw)
                 table_is_na = self.is_na_value(table_raw)
                 column_is_na = self.is_na_value(column_raw)
                 has_na = schema_is_na or table_is_na or column_is_na
 
-                # Clean values for output
+                # Keep original NA values, don't fill forward
                 schema = "NA" if schema_is_na else str(schema_raw).strip()
                 table = "NA" if table_is_na else str(table_raw).strip()
                 column = "NA" if column_is_na else str(column_raw).strip()
@@ -88,7 +90,6 @@ class InsertSQLGenerator:
                     "has_na": has_na
                 }
                 
-                # Debug output
                 print(f"   {cat}: Schema={schema}, Table={table}, Column={column}, Has_NA={has_na}")
             
             row_mappings.append(mapping)
@@ -225,72 +226,3 @@ class InsertSQLGenerator:
                 print(f"⚠️ No valid SQL generated for {os.path.basename(f)}")
 
         print(f"\n📊 Summary: Total unique statements: {total_unique}")
-
-
-# Example usage with config
-if __name__ == "__main__":
-    config = {
-        "categories": {
-            "Original_SSR": {
-                "schema_col": "Original SSR Schema",
-                "table_col": "Original SSR Table",
-                "column_col": "Original SSR Column",
-                "table_comment_col": "Original SSR Table Comment",
-                "column_comment_col": "Original SSR Column Comment"
-            },
-            "EDL": {
-                "schema_col": "EDL Schema",
-                "table_col": "EDL Table", 
-                "column_col": "EDL Column",
-                "table_comment_col": "EDL Table Comment",
-                "column_comment_col": "EDL Column Comment"
-            },
-            "RDMOF": {
-                "schema_col": "RDMOF Schema",
-                "table_col": "RDMOF Table",
-                "column_col": "RDMOF Column", 
-                "table_comment_col": "RDMOF Table Comment",
-                "column_comment_col": "RDMOF Column Comment"
-            }
-        }
-    }
-    
-    generator = InsertSQLGenerator(config, "input_folder", "output_folder")
-    generator.run()
-
-
----
-def generate_sql_for_row(self, mapping):
-    """Generate SQL statements per row with multiple cases applied per row."""
-    edl = mapping.get("EDL", {})
-    rdmof = mapping.get("RDMOF", {})
-    original = mapping.get("Original_SSR", {})
-
-    edl_na = edl.get("has_na", True)
-    rdmof_na = rdmof.get("has_na", True)
-    original_na = original.get("has_na", True)
-
-    sql_statements = []
-    print(f" 🎯 Case Analysis: Original_NA={original_na}, EDL_NA={edl_na}, RDMOF_NA={rdmof_na}")
-
-    # Check for Original_SSR to EDL mapping
-    if not original_na and not edl_na:
-        print("✅ Found mapping: Original_SSR → EDL")
-        sql_statements.append(self.build_sql(original, edl, description="Original_SSR → EDL"))
-
-    # Check for EDL to RDMOF mapping
-    if not edl_na and not rdmof_na:
-        print("✅ Found mapping: EDL → RDMOF")
-        sql_statements.append(self.build_sql(edl, rdmof, description="EDL → RDMOF"))
-
-    # Check for Original_SSR to RDMOF mapping (when EDL is NA)
-    if not original_na and edl_na and not rdmof_na:
-        print("✅ Found mapping: Original_SSR → RDMOF (EDL is NA)")
-        sql_statements.append(self.build_sql(original, rdmof, description="Original_SSR → RDMOF (EDL is NA)"))
-    
-    # If no valid transformations, comment out the row.
-    if not sql_statements:
-        print("⚠️ No valid transformations found for this row. Commenting out.")
-        sql_statements.append(self.build_commented_placeholder(mapping, "No valid transformation possible"))
-
-    return sql_statements
