@@ -1,0 +1,391 @@
+# helper.py
+import os
+import json
+import pandas as pd
+import re
+from typing import List, Dict, Tuple, Optional
+from collections import defaultdict
+from pathlib import Path
+
+
+class DatabricksSchemaGenerator:
+    def __init__(self,
+                 input_folder: str,
+                 output_base_folder: str = "generated_schemas",
+                 categories: Optional[Dict[str, Dict[str, str]]] = None,
+                 generate_drop_statements: bool = False):
+        self.input_folder = input_folder
+        self.output_base_folder = output_base_folder
+        self.categories_config = categories or {}
+        self.generate_drop_statements = generate_drop_statements
+
+    def map_datatype(self, datatype: str) -> str:
+        if pd.isna(datatype) or not datatype or str(datatype).strip() == '':
+            return 'STRING'
+        dtype = str(datatype).upper().strip()
+
+        if m := re.match(r'VARCHAR2\((\d+)\s*BYTE\)', dtype):
+            return f'STRING'
+        if m := re.match(r'VARCHAR2\((\d+)\)', dtype):
+            return f'STRING'
+        if m := re.match(r'NUMBER\((\d+),\s*(\d+)\)', dtype):
+            return f'DECIMAL({m.group(1)},{m.group(2)})'
+        if m := re.match(r'NUMBER\((\d+)\)', dtype):
+            return 'INT' if int(m.group(1)) <= 10 else 'BIGINT'
+        if 'TIMESTAMP' in dtype:
+            return 'TIMESTAMP'
+        if 'DATE' in dtype:
+            return 'DATE'
+        if 'CHAR' in dtype:
+            return 'STRING'
+        if 'CLOB' in dtype:
+            return 'STRING'
+        if 'BLOB' in dtype:
+            return 'BINARY'
+        return 'STRING'
+
+    def get_excel_files(self) -> List[str]:
+        """Get all Excel files from input folder"""
+        excel_files = []
+        input_path = Path(self.input_folder)
+        
+        if not input_path.exists():
+            print(f"❌ Input folder does not exist: {self.input_folder}")
+            return excel_files
+            
+        # Get all Excel files
+        for file_path in input_path.glob("*.xlsx"):
+            excel_files.append(str(file_path))
+        for file_path in input_path.glob("*.xls"):
+            excel_files.append(str(file_path))
+            
+        return sorted(excel_files)
+
+    def load_excel_data(self, excel_file_path: str) -> pd.DataFrame:
+        """Load and combine all sheets from an Excel file"""
+        try:
+            # Read all sheets
+            all_sheets = pd.read_excel(excel_file_path, sheet_name=None)
+            
+            # Combine all sheets
+            combined_df = pd.DataFrame()
+            
+            for sheet_name, df in all_sheets.items():
+                print(f"  📋 Processing sheet: {sheet_name} ({len(df)} rows)")
+                
+                # Clean column names
+                df.columns = df.columns.str.strip()
+                
+                # Add sheet identifier if multiple sheets exist
+                if len(all_sheets) > 1:
+                    df['_source_sheet'] = sheet_name
+                
+                # Append to combined dataframe
+                if combined_df.empty:
+                    combined_df = df.copy()
+                else:
+                    combined_df = pd.concat([combined_df, df], ignore_index=True, sort=False)
+
+            # Forward fill only for schema and table columns
+            for cfg in self.categories_config.values():
+                for col_key in ['schema_col', 'table_col']:
+                    col = cfg.get(col_key)
+                    if col and col in combined_df.columns:
+                        combined_df[col] = combined_df[col].ffill()
+
+            # Filter out rows where schema is NA/empty
+            for cfg in self.categories_config.values():
+                schema_col = cfg.get("schema_col")
+                if schema_col and schema_col in combined_df.columns:
+                    combined_df = combined_df[
+                        (combined_df[schema_col].notna()) &
+                        (combined_df[schema_col].astype(str).str.upper() != "NA") &
+                        (combined_df[schema_col].astype(str).str.strip() != "")
+                    ]
+
+            print(f"  ✅ Combined data: {len(combined_df)} total rows")
+            return combined_df
+
+        except Exception as e:
+            print(f"❌ Error loading Excel file {excel_file_path}: {e}")
+            return pd.DataFrame()
+
+    def extract_tables(self, df: pd.DataFrame, file_name: str) -> Dict[str, Dict[str, any]]:
+        result = {}
+
+        for cat, cfg in self.categories_config.items():
+            schema_col = cfg.get('schema_col')
+            table_col = cfg.get('table_col')
+            column_col = cfg.get('column_col')
+            datatype_col = cfg.get('datatype_col', '')
+            column_comment_col = cfg.get('column_comment_col', '')
+            table_comment_col = cfg.get('table_comment_col', '')
+
+            if not (schema_col and table_col and column_col):
+                print(f"⚠️  Skipping category {cat}: Missing required columns")
+                continue
+
+            # Check if all required columns exist in dataframe
+            required_cols = [schema_col, table_col, column_col]
+            missing_cols = [col for col in required_cols if col not in df.columns]
+            if missing_cols:
+                print(f"⚠️  Skipping category {cat} for {file_name}: Missing columns {missing_cols}")
+                continue
+
+            tables = defaultdict(list)
+            table_comments = {}
+
+            # Filter for this category - only rows with data in all required columns
+            filtered_df = df[
+                df[schema_col].notna() &
+                df[table_col].notna() &
+                df[column_col].notna() &
+                (df[schema_col].astype(str).str.strip() != '') &
+                (df[table_col].astype(str).str.strip() != '') &
+                (df[column_col].astype(str).str.strip() != '')
+            ].copy()
+
+            if filtered_df.empty:
+                print(f"⚠️  No data found for category {cat} in {file_name}")
+                continue
+
+            # Track unique combinations to avoid duplicates
+            seen_combinations = set()
+            
+            print(f"🔍 Processing category {cat} for {file_name}: {len(filtered_df)} rows")
+
+            for idx, row in filtered_df.iterrows():
+                try:
+                    schema = str(row[schema_col]).strip()
+                    table = str(row[table_col]).strip()
+                    column = str(row[column_col]).strip()
+                    
+                    # Create unique key for this table-column combination
+                    table_key = (schema.lower(), table.lower())
+                    column_key = (schema.lower(), table.lower(), column.lower())
+                    
+                    # Skip if we've already processed this exact combination
+                    if column_key in seen_combinations:
+                        continue
+                    
+                    seen_combinations.add(column_key)
+                    
+                    # Get additional data
+                    dtype = str(row.get(datatype_col, '')).strip() if datatype_col and datatype_col in df.columns else ''
+                    comment = str(row.get(column_comment_col, '')).strip() if column_comment_col and column_comment_col in df.columns else ''
+                    table_comment = str(row.get(table_comment_col, '')).strip() if table_comment_col and table_comment_col in df.columns else ''
+
+                    # Add column to table
+                    tables[table_key].append((column, self.map_datatype(dtype), comment))
+
+                    # Store table comment (only once per table)
+                    if table_comment and table_key not in table_comments:
+                        table_comments[table_key] = table_comment
+
+                except Exception as e:
+                    print(f"⚠️  Error processing row {idx} in category {cat} for {file_name}: {e}")
+                    continue
+
+            result[cat] = {
+                'tables': dict(tables),
+                'table_comments': table_comments
+            }
+            
+            print(f"✅ Category {cat} for {file_name}: Found {len(tables)} unique tables")
+
+        return result
+
+    def generate_schema_sql(self, schema: str, table: str, columns: List[Tuple[str, str, str]],
+                            table_comment: str, category: str) -> str:
+        sql = f"-- {category} - {table} Table Schema\n"
+        sql += f"CREATE TABLE IF NOT EXISTS external_catalog.{schema}.{table} (\n"
+        
+        column_definitions = []
+        for col, dtype, comment in columns:
+            col_def = f"  `{col}` {dtype}"
+            if comment and comment.strip() and comment.lower() not in ['nan', 'none', '']:
+                # Escape single quotes in comments
+                escaped_comment = comment.replace("'", "''")
+                col_def += f" COMMENT '{escaped_comment}'"
+            column_definitions.append(col_def)
+        
+        sql += ",\n".join(column_definitions)
+        sql += "\n)"
+        
+        if table_comment and table_comment.strip() and table_comment.lower() not in ['nan', 'none', '']:
+            escaped_table_comment = table_comment.replace("'", "''")
+            sql += f"\nCOMMENT '{escaped_table_comment}'"
+        
+        sql += ";\n"
+        return sql
+
+    def generate_drop_sql(self, schema: str, table: str, category: str) -> str:
+        return f"-- {category} - Drop {table} Table\nDROP TABLE IF EXISTS external_catalog.{schema}.{table};\n"
+
+    def create_folder_structure(self):
+        """Create simple folder structure with create and drop folders"""
+        os.makedirs(os.path.join(self.output_base_folder, "create"), exist_ok=True)
+        if self.generate_drop_statements:
+            os.makedirs(os.path.join(self.output_base_folder, "drop"), exist_ok=True)
+
+    def process_single_file(self, excel_file_path: str):
+        """Process a single Excel file and create one consolidated file per Excel file"""
+        file_name = os.path.basename(excel_file_path)
+        base_name = Path(excel_file_path).stem
+        
+        print(f"\n🚀 Processing file: {file_name}")
+        
+        df = self.load_excel_data(excel_file_path)
+        if df.empty:
+            print(f"❌ No data to process in {file_name}")
+            return
+
+        print(f"📊 Loaded {len(df)} total rows from {file_name}")
+        print(f"📋 Available columns: {list(df.columns)}")
+
+        all_create_sql = []
+        all_drop_sql = []
+        total_tables = 0
+
+        all_extracted = self.extract_tables(df, file_name)
+
+        for cat, data in all_extracted.items():
+            tables = data['tables']
+            table_comments = data['table_comments']
+
+            if not tables:
+                print(f"⚠️  No tables found for category {cat} in {file_name}")
+                continue
+
+            table_count = 0
+
+            for (schema, table), columns in tables.items():
+                comment = table_comments.get((schema, table), '')
+
+                # CREATE SQL
+                create_sql = self.generate_schema_sql(schema, table, columns, comment, cat)
+                all_create_sql.append(create_sql)
+
+                # DROP SQL
+                if self.generate_drop_statements:
+                    drop_sql = self.generate_drop_sql(schema, table, cat)
+                    all_drop_sql.append(drop_sql)
+
+                table_count += 1
+
+            print(f"✅ {cat} in {file_name}: {table_count} tables processed.")
+            total_tables += table_count
+
+        # Create ONE consolidated CREATE file per Excel file
+        if all_create_sql:
+            create_file = os.path.join(self.output_base_folder, "create", f"{base_name}.sql")
+            with open(create_file, 'w', encoding='utf-8') as f:
+                f.write(f"-- CREATE statements for {file_name}\n")
+                f.write(f"-- Generated from all sheets and categories\n")
+                f.write(f"-- Total tables: {total_tables}\n\n")
+                f.write("\n\n".join(all_create_sql))
+            print(f"✅ Created consolidated CREATE file: {base_name}.sql")
+
+        # Create ONE consolidated DROP file per Excel file  
+        if self.generate_drop_statements and all_drop_sql:
+            drop_file = os.path.join(self.output_base_folder, "drop", f"{base_name}.sql")
+            with open(drop_file, 'w', encoding='utf-8') as f:
+                f.write(f"-- DROP statements for {file_name}\n")
+                f.write(f"-- Generated from all sheets and categories\n")
+                f.write(f"-- Total tables: {total_tables}\n\n")
+                f.write("\n\n".join(all_drop_sql))
+            print(f"✅ Created consolidated DROP file: {base_name}.sql")
+
+        print(f"📦 {file_name}: {total_tables} tables processed")
+
+    def run(self):
+        """Process all Excel files in input folder"""
+        print(f"🚀 Starting schema generation from folder: {self.input_folder}")
+        
+        excel_files = self.get_excel_files()
+        if not excel_files:
+            print("❌ No Excel files found in input folder.")
+            return
+
+        print(f"📁 Found {len(excel_files)} Excel files to process")
+        
+        # Create folder structure once
+        self.create_folder_structure()
+        
+        total_files_processed = 0
+        
+        for excel_file in excel_files:
+            try:
+                self.process_single_file(excel_file)
+                total_files_processed += 1
+            except Exception as e:
+                print(f"❌ Error processing {excel_file}: {e}")
+                continue
+
+        print(f"\n🎉 Processing complete!")
+        print(f"📊 Total files processed: {total_files_processed}/{len(excel_files)}")
+        print(f"📁 All outputs saved in: {self.output_base_folder}")
+        print(f"📂 Structure:")
+        print(f"   └── {self.output_base_folder}/")
+        print(f"       ├── create/ ({total_files_processed} SQL files)")
+        print(f"       └── drop/ ({total_files_processed} SQL files)")
+
+
+# main.py
+import json
+from helper import DatabricksSchemaGenerator
+
+def main():
+    try:
+        with open("schema_config.json", 'r') as f:
+            config = json.load(f)
+
+        generator = DatabricksSchemaGenerator(
+            input_folder=config["input_folder"],
+            output_base_folder=config.get("output_base_folder", "generated_schemas"),
+            categories=config["categories"],
+            generate_drop_statements=config.get("generate_drop_statements", False)
+        )
+        generator.run()
+
+    except FileNotFoundError:
+        print("❌ schema_config.json not found.")
+    except Exception as e:
+        print(f"❌ Error: {e}")
+
+if __name__ == "__main__":
+    main()
+
+
+# Updated schema_config.json
+{
+  "input_folder": "input_excel_files",
+  "output_base_folder": "generated_schemas",
+  "generate_drop_statements": true,
+  "categories": {
+    "RDMOF": {
+      "schema_col": "RDMOF - Schema",
+      "table_col": "RDMOF - Physical Table Name",
+      "column_col": "RDMOF - Physical Column Name",
+      "datatype_col": "RDMOF - Data Type",
+      "column_comment_col": "RDMOF - Column Definition",
+      "table_comment_col": "RDMOF - Table Definition"
+    },
+    "EDL": {
+      "schema_col": "EDL- Schema",
+      "table_col": "EDL - Physical Table Name",
+      "column_col": "EDL - Physical Column Name",
+      "datatype_col": "EDL - Data Type",
+      "column_comment_col": "EDL - Column Definition",
+      "table_comment_col": "EDL - Table Definition"
+    },
+    "Original_SSR": {
+      "schema_col": "Original SSR - Schema",
+      "table_col": "Original SSR - Physical Table Name",
+      "column_col": "Original SSR - Physical Column Name",
+      "datatype_col": "Original SSR - Data Type",
+      "column_comment_col": "Original SSR - Column Definition",
+      "table_comment_col": "Original SSR - Table Definition"
+    }
+  }
+}
