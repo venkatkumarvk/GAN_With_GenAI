@@ -1,0 +1,99 @@
+import os
+import pandas as pd
+
+def excel_to_formatted_text(excel_file_path, output_folder, empty_value='"\"\"'):
+    """
+    Convert all sheets in an Excel file to formatted text files.
+    Each sheet will be written in the same output file, with comments indicating sheet names.
+    """
+    try:
+        # Extract base name without extension
+        base_name = os.path.splitext(os.path.basename(excel_file_path))[0]
+        output_file_path = os.path.join(output_folder, f"{base_name}_formatted.txt")
+
+        with open(output_file_path, 'w', encoding='utf-8', newline='') as f:
+            # Process each sheet in the Excel file
+            sheet_names = pd.ExcelFile(excel_file_path).sheet_names
+            for sheet in sheet_names:
+                df = pd.read_excel(excel_file_path, sheet_name=sheet, header=None, skiprows=1)
+
+                # Add sheet name as comment
+                f.write(f"-- Sheet: {sheet}\n")
+
+                # Process rows
+                for _, row in df.iterrows():
+                    formatted_values = []
+                    for value in row:
+                        if pd.isna(value) or value == '' or str(value).strip() == '':
+                            formatted_values.append(empty_value)
+                        else:
+                            str_value = str(value).replace('\n', ' ').replace('\r', ' ').replace('"', '""')
+                            str_value = ' '.join(str_value.split())
+                            formatted_values.append(f'"{str_value}"')
+
+                    formatted_row = "(" + ",".join(formatted_values) + "),"
+                    f.write(formatted_row + "\n")
+
+                f.write("\n")  # Blank line between sheets
+
+        print(f"✅ Successfully converted '{excel_file_path}' → '{output_file_path}'")
+        return True
+    except Exception as e:
+        print(f"❌ Error processing {excel_file_path}: {str(e)}")
+        return False
+
+
+def process_folder(input_folder, output_folder, empty_value='"\"\"'):
+    """
+    Process all Excel files in input_folder and generate formatted text files in output_folder.
+    """
+    if not os.path.exists(output_folder):
+        os.makedirs(output_folder)
+
+    excel_files = [f for f in os.listdir(input_folder) if f.lower().endswith(('.xls', '.xlsx'))]
+
+    if not excel_files:
+        print("⚠️ No Excel files found in input folder.")
+        return
+
+    for file in excel_files:
+        file_path = os.path.join(input_folder, file)
+        excel_to_formatted_text(file_path, output_folder, empty_value)
+
+
+------
+{
+    "input_folder": "input_excels",
+    "output_folder": "output_texts",
+    "empty_value": "\"\""
+}
+
+------
+  import json
+import os
+from helper import process_folder
+
+def main():
+    # Load config.json
+    config_path = "config.json"
+    if not os.path.exists(config_path):
+        print("❌ config.json not found!")
+        return
+
+    with open(config_path, "r") as f:
+        config = json.load(f)
+
+    input_folder = config.get("input_folder", "input_excels")
+    output_folder = config.get("output_folder", "output_texts")
+    empty_value = config.get("empty_value", "\"\"")
+
+    print("=== Excel to Text Conversion ===")
+    print(f"Input folder: {input_folder}")
+    print(f"Output folder: {output_folder}")
+    print(f"Empty value representation: {empty_value}")
+    print("="*50)
+
+    process_folder(input_folder, output_folder, empty_value)
+
+if __name__ == "__main__":
+    main()
