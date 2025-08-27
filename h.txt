@@ -257,3 +257,40 @@ if __name__ == "__main__":
     
     generator = InsertSQLGenerator(config, "input_folder", "output_folder")
     generator.run()
+
+
+---
+def generate_sql_for_row(self, mapping):
+    """Generate SQL statements per row with multiple cases applied per row."""
+    edl = mapping.get("EDL", {})
+    rdmof = mapping.get("RDMOF", {})
+    original = mapping.get("Original_SSR", {})
+
+    edl_na = edl.get("has_na", True)
+    rdmof_na = rdmof.get("has_na", True)
+    original_na = original.get("has_na", True)
+
+    sql_statements = []
+    print(f" 🎯 Case Analysis: Original_NA={original_na}, EDL_NA={edl_na}, RDMOF_NA={rdmof_na}")
+
+    # Check for Original_SSR to EDL mapping
+    if not original_na and not edl_na:
+        print("✅ Found mapping: Original_SSR → EDL")
+        sql_statements.append(self.build_sql(original, edl, description="Original_SSR → EDL"))
+
+    # Check for EDL to RDMOF mapping
+    if not edl_na and not rdmof_na:
+        print("✅ Found mapping: EDL → RDMOF")
+        sql_statements.append(self.build_sql(edl, rdmof, description="EDL → RDMOF"))
+
+    # Check for Original_SSR to RDMOF mapping (when EDL is NA)
+    if not original_na and edl_na and not rdmof_na:
+        print("✅ Found mapping: Original_SSR → RDMOF (EDL is NA)")
+        sql_statements.append(self.build_sql(original, rdmof, description="Original_SSR → RDMOF (EDL is NA)"))
+    
+    # If no valid transformations, comment out the row.
+    if not sql_statements:
+        print("⚠️ No valid transformations found for this row. Commenting out.")
+        sql_statements.append(self.build_commented_placeholder(mapping, "No valid transformation possible"))
+
+    return sql_statements
