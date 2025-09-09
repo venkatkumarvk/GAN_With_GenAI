@@ -604,3 +604,86 @@ for r in range(2):  # first 2 pages of reference
         res = compare_pages_with_template(ref_pdf, r, target_pdf, t)
         results.append(res)
         print(res)
+---------
+import fitz  # PyMuPDF
+import cv2
+import numpy as np
+import pandas as pd
+
+
+def pdf_to_images(pdf_path, dpi=150):
+    """Convert all PDF pages to grayscale OpenCV images."""
+    doc = fitz.open(pdf_path)
+    images = []
+    for page_num in range(len(doc)):
+        page = doc[page_num]
+        pix = page.get_pixmap(matrix=fitz.Matrix(dpi/72, dpi/72))
+        img = np.frombuffer(pix.samples, dtype=np.uint8).reshape(pix.height, pix.width, pix.n)
+        if pix.n == 3:
+            img = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY)
+        elif pix.n == 4:
+            img = cv2.cvtColor(img, cv2.COLOR_RGBA2GRAY)
+        images.append(img)
+    return images
+
+
+def preprocess(img):
+    """Preprocess image to enhance structure, reduce text noise."""
+    return cv2.adaptiveThreshold(img, 255, cv2.ADAPTIVE_THRESH_MEAN_C,
+                                 cv2.THRESH_BINARY, 15, 10)
+
+
+def get_page_content_ratio(pdf_path, page_num):
+    """Compute content ratio for PDF page."""
+    doc = fitz.open(pdf_path)
+    page = doc[page_num]
+    rect = page.rect
+    page_area = rect.width * rect.height
+
+    blocks = page.get_text("blocks")
+    content_area = 0
+    for b in blocks:
+        x0, y0, x1, y1 = b[:4]
+        content_area += (x1 - x0) * (y1 - y0)
+
+    for img in page.get_images(full=True):
+        bbox = page.get_image_bbox(img)
+        content_area += bbox.width * bbox.height
+
+    return (content_area / page_area) * 100
+
+
+def compare_pdfs(ref_pdf, input_pdf, dpi=150):
+    """Compare all pages of two PDFs using template matching + content ratio."""
+    ref_images = pdf_to_images(ref_pdf, dpi)
+    input_images = pdf_to_images(input_pdf, dpi)
+
+    results = []
+    for i, ref_img in enumerate(ref_images):
+        ref_proc = preprocess(ref_img)
+        ref_ratio = get_page_content_ratio(ref_pdf, i)
+
+        for j, tgt_img in enumerate(input_images):
+            tgt_proc = preprocess(cv2.resize(tgt_img, (ref_img.shape[1], ref_img.shape[0])))
+            tgt_ratio = get_page_content_ratio(input_pdf, j)
+
+            result = cv2.matchTemplate(ref_proc, tgt_proc, cv2.TM_CCOEFF_NORMED)
+            similarity = result.max()
+
+            results.append({
+                "ref_page": i + 1,
+                "input_page": j + 1,
+                "ref_ratio": round(ref_ratio, 2),
+                "input_ratio": round(tgt_ratio, 2),
+                "template_similarity": round(float(similarity), 4)
+            })
+    return pd.DataFrame(results)
+
+
+# ---------------- Example Usage ----------------
+ref_pdf = "reference.pdf"
+input_pdf = "input.pdf"
+
+df = compare_pdfs(ref_pdf, input_pdf)
+print(df)
+df.to_csv("pdf_template_matching_results.csv", index=False)
