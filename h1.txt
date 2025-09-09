@@ -738,3 +738,21 @@ def compare_multiple_refs_with_logs(ref_pdfs, input_pdf, dpi=150, threshold=0.8)
     print(f"✅ Completed {len(all_results)} comparisons in {total_runtime:.2f} sec")
     return all_results
 
+# List of reference PDFs (can be 1 or many)
+ref_pdfs = [
+    "ref_form1.pdf",
+    "ref_form2.pdf"
+]
+
+# Input PDF to check against
+input_pdf = "input_claim.pdf"
+
+# Run comparison
+results = compare_multiple_refs_with_logs(ref_pdfs, input_pdf, dpi=150, threshold=0.8)
+
+# Print summary
+print("\n==== Final Results ====")
+for ref, ref_page, inp_page, score, matched in results:
+    status = "MATCHED" if matched else "NOT MATCHED"
+    print(f"{ref}: Ref Page {ref_page} vs Input Page {inp_page} "
+          f"=> Score={score:.4f} → {status}")
