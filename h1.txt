@@ -687,3 +687,54 @@ input_pdf = "input.pdf"
 df = compare_pdfs(ref_pdf, input_pdf)
 print(df)
 df.to_csv("pdf_template_matching_results.csv", index=False)
+
+----------
+import cv2
+import numpy as np
+from pdf2image import convert_from_path
+import time
+
+def pdf_to_images(pdf_path, dpi=150):
+    """Convert PDF to list of grayscale images."""
+    pages = convert_from_path(pdf_path, dpi=dpi)
+    return [cv2.cvtColor(np.array(p), cv2.COLOR_RGB2GRAY) for p in pages]
+
+def compare_pdfs_with_logs(ref_pdf, input_pdf, dpi=150, threshold=0.8):
+    ref_pages = pdf_to_images(ref_pdf, dpi)
+    input_pages = pdf_to_images(input_pdf, dpi)
+
+    results = []
+    start = time.time()
+
+    for i, ref_img in enumerate(ref_pages, 1):
+        for j, inp_img in enumerate(input_pages, 1):
+            # Template matching
+            res = cv2.matchTemplate(inp_img, ref_img, cv2.TM_CCOEFF_NORMED)
+            _, max_val, _, _ = cv2.minMaxLoc(res)
+
+            matched = max_val >= threshold
+            results.append((i, j, max_val, matched))
+
+            # Print log
+            status = "✅ MATCHED" if matched else "❌ NOT MATCHED"
+            print(f"[{ref_pdf}] Ref Page {i} vs Input Page {j}: "
+                  f"Score={max_val:.4f} → {status}")
+
+    runtime = time.time() - start
+    print(f"\n⏱ Runtime for {ref_pdf}: {runtime:.2f} sec\n")
+    return results, runtime
+
+
+def compare_multiple_refs_with_logs(ref_pdfs, input_pdf, dpi=150, threshold=0.8):
+    all_results = []
+    total_start = time.time()
+
+    for ref_pdf in ref_pdfs:
+        results, _ = compare_pdfs_with_logs(ref_pdf, input_pdf, dpi, threshold)
+        for r in results:
+            all_results.append((ref_pdf, *r))  # include filename
+
+    total_runtime = time.time() - total_start
+    print(f"✅ Completed {len(all_results)} comparisons in {total_runtime:.2f} sec")
+    return all_results
+
