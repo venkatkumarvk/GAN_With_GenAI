@@ -1,0 +1,606 @@
+{
+  "azure_openai": {
+    "api_version": "2023-12-01-preview",
+    "default": {
+      "api_key": "your-default-api-key",
+      "azure_endpoint": "https://your-default-endpoint.openai.azure.com/",
+      "deployment_name": "your-default-deployment-name"
+    },
+    "models": {
+      "invoice": {
+        "api_key": "your-invoice-api-key",
+        "azure_endpoint": "https://your-invoice-endpoint.openai.azure.com/",
+        "deployment_name": "gpt-4-vision-invoice"
+      },
+      "eob": {
+        "api_key": "your-eob-api-key", 
+        "azure_endpoint": "https://your-eob-endpoint.openai.azure.com/",
+        "deployment_name": "gpt-4-vision-eob"
+      },
+      "claim": {
+        "api_key": "your-claim-api-key",
+        "azure_endpoint": "https://your-claim-endpoint.openai.azure.com/",
+        "deployment_name": "gpt-4-vision-claim"
+      }
+    }
+  },
+  "azure_storage": {
+    "connection_string": "your-connection-string",
+    "input_container": "input-pdfs",
+    "output_container": "processed-results",
+    "input_archive_container": "archived-inputs",
+    "high_confidence_folder": "high_confidence/",
+    "low_confidence_folder": "low_confidence/"
+  },
+  "processing": {
+    "batch_size": 10,
+    "confidence_threshold": 80,
+    "zoom_factor": 2.0,
+    "timeout_seconds": 300,
+    "document_types": {
+      "invoice": {
+        "extraction_fields": ["invoice_number", "total_amount", "date", "vendor"],
+        "prompt_module": "invoice_prompt"
+      },
+      "eob": {
+        "extraction_fields": ["eob_number", "patient_name", "service_date", "paid_amount", "provider"],
+        "prompt_module": "eob_prompt"
+      },
+      "claim": {
+        "extraction_fields": ["claim_number", "patient_id", "diagnosis_code", "procedure_code", "claim_amount"],
+        "prompt_module": "claim_prompt",
+        "overlay_support": true,
+        "overlay_config": {
+          "overlay_pdf_path": "claim_overlay.pdf",
+          "reference_templates": [
+            "claim_template_cms1500.pdf",
+            "claim_template_ub04.pdf"
+          ],
+          "similarity_threshold": 0.85,
+          "content_density_threshold": 0.3
+        }
+      }
+    }
+  },
+  "archive": {
+    "blob_input_move_on": true,
+    "archive_name_format": "archive_{timestamp}.zip",
+    "processed_folder": "processed/",
+    "unprocessed_folder": "unprocessed/"
+  }
+}
+
+------------------------
+
+  import fitz  # PyMuPDF
+import cv2
+import numpy as np
+from PIL import Image
+import os
+import io
+from pathlib import Path
+import logging
+
+
+class OverlayProcessor:
+    def __init__(self, config, logger):
+        self.config = config
+        self.logger = logger
+        self.overlay_cache = {}
+        self.reference_cache = {}
+    
+    def pdf_to_image(self, pdf_bytes, width=None, height=None, dpi=300, page_num=0):
+        """
+        Convert a single page of PDF bytes to image array.
+        
+        Args:
+            pdf_bytes: PDF content as bytes
+            width: Target width (optional)
+            height: Target height (optional)
+            dpi: DPI for conversion
+            page_num: Page number to convert (0-based)
+            
+        Returns:
+            numpy array: Image array
+        """
+        try:
+            doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+            
+            if len(doc) <= page_num:
+                self.logger.warning(f"Page {page_num} not found in PDF (has {len(doc)} pages)")
+                return None
+            
+            page = doc.load_page(page_num)
+            pix = page.get_pixmap(dpi=dpi)
+            
+            img = np.frombuffer(pix.samples, dtype=np.uint8).reshape(pix.height, pix.width, pix.n)
+            if pix.n == 4:
+                img = cv2.cvtColor(img, cv2.COLOR_BGRA2BGR)
+            
+            # Resize if width/height specified
+            if width and height:
+                img = cv2.resize(img, (width, height))
+            
+            doc.close()
+            return img
+            
+        except Exception as e:
+            self.logger.error(f"Error converting PDF to image: {str(e)}")
+            return None
+    
+    def remove_white_background(self, img):
+        """Remove white background and make it transparent."""
+        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+        _, alpha = cv2.threshold(gray, 240, 255, cv2.THRESH_BINARY_INV)
+        b, g, r = cv2.split(img)
+        rgba = cv2.merge([b, g, r, alpha])
+        return rgba
+    
+    def overlay_transparent(self, background, overlay_rgba):
+        """Overlay transparent image onto background."""
+        overlay_rgb = overlay_rgba[:, :, :3]
+        alpha = overlay_rgba[:, :, 3] / 255.0
+        alpha = np.stack([alpha] * 3, axis=-1)
+        
+        blended = (overlay_rgb * alpha + background * (1 - alpha)).astype(np.uint8)
+        return blended
+    
+    def calculate_content_density(self, img):
+        """
+        Calculate content density to determine if document is mostly empty.
+        
+        Returns:
+            float: Content density ratio (0-1)
+        """
+        try:
+            gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+            # Consider non-white pixels as content
+            _, binary = cv2.threshold(gray, 240, 255, cv2.THRESH_BINARY_INV)
+            content_pixels = np.count_nonzero(binary)
+            total_pixels = binary.size
+            density = content_pixels / total_pixels
+            
+            self.logger.debug(f"Content density: {density:.3f}")
+            return density
+            
+        except Exception as e:
+            self.logger.error(f"Error calculating content density: {str(e)}")
+            return 1.0  # Assume filled if error
+    
+    def compare_with_reference_templates(self, img, reference_templates, similarity_threshold):
+        """
+        Compare document with reference templates to determine if it matches a known empty template.
+        
+        Args:
+            img: Input image
+            reference_templates: List of reference template file paths
+            similarity_threshold: Similarity threshold (0-1)
+            
+        Returns:
+            bool: True if matches a reference template
+        """
+        try:
+            for template_path in reference_templates:
+                if not os.path.exists(template_path):
+                    self.logger.warning(f"Reference template not found: {template_path}")
+                    continue
+                
+                # Load reference template (cache it)
+                if template_path not in self.reference_cache:
+                    with open(template_path, 'rb') as f:
+                        template_bytes = f.read()
+                    template_img = self.pdf_to_image(template_bytes)
+                    if template_img is not None:
+                        self.reference_cache[template_path] = template_img
+                    else:
+                        continue
+                
+                template_img = self.reference_cache[template_path]
+                
+                # Resize both images to same size for comparison
+                h, w = img.shape[:2]
+                template_resized = cv2.resize(template_img, (w, h))
+                
+                # Calculate similarity using structural similarity
+                gray1 = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+                gray2 = cv2.cvtColor(template_resized, cv2.COLOR_BGR2GRAY)
+                
+                # Simple correlation coefficient
+                correlation = cv2.matchTemplate(gray1, gray2, cv2.TM_CCOEFF_NORMED)[0][0]
+                
+                self.logger.debug(f"Similarity with {os.path.basename(template_path)}: {correlation:.3f}")
+                
+                if correlation >= similarity_threshold:
+                    self.logger.info(f"Document matches reference template: {os.path.basename(template_path)}")
+                    return True
+            
+            return False
+            
+        except Exception as e:
+            self.logger.error(f"Error comparing with reference templates: {str(e)}")
+            return False
+    
+    def needs_overlay(self, pdf_bytes, page_num, overlay_config):
+        """
+        Determine if a document page needs overlay based on content density and reference matching.
+        
+        Args:
+            pdf_bytes: PDF content as bytes
+            page_num: Page number to check
+            overlay_config: Overlay configuration
+            
+        Returns:
+            bool: True if overlay is needed
+        """
+        try:
+            img = self.pdf_to_image(pdf_bytes, page_num=page_num)
+            if img is None:
+                return False
+            
+            # Check content density
+            content_density = self.calculate_content_density(img)
+            density_threshold = overlay_config.get("content_density_threshold", 0.3)
+            
+            if content_density > density_threshold:
+                self.logger.info(f"Page {page_num + 1} has high content density ({content_density:.3f}), no overlay needed")
+                return False
+            
+            # Check against reference templates
+            reference_templates = overlay_config.get("reference_templates", [])
+            similarity_threshold = overlay_config.get("similarity_threshold", 0.85)
+            
+            if reference_templates:
+                matches_template = self.compare_with_reference_templates(
+                    img, reference_templates, similarity_threshold
+                )
+                if matches_template:
+                    self.logger.info(f"Page {page_num + 1} matches reference template and has low content density, overlay needed")
+                    return True
+            
+            # If no reference templates, use only content density
+            if content_density <= density_threshold:
+                self.logger.info(f"Page {page_num + 1} has low content density ({content_density:.3f}), overlay needed")
+                return True
+            
+            return False
+            
+        except Exception as e:
+            self.logger.error(f"Error determining if overlay needed: {str(e)}")
+            return False
+    
+    def apply_overlay_to_page(self, pdf_bytes, page_num, overlay_pdf_path):
+        """
+        Apply overlay to a specific page of the PDF.
+        
+        Args:
+            pdf_bytes: Original PDF content as bytes
+            page_num: Page number to overlay
+            overlay_pdf_path: Path to overlay PDF
+            
+        Returns:
+            bytes: Modified PDF page as bytes
+        """
+        try:
+            # Load overlay PDF (cache it)
+            if overlay_pdf_path not in self.overlay_cache:
+                if not os.path.exists(overlay_pdf_path):
+                    self.logger.error(f"Overlay PDF not found: {overlay_pdf_path}")
+                    return None
+                
+                with open(overlay_pdf_path, 'rb') as f:
+                    self.overlay_cache[overlay_pdf_path] = f.read()
+            
+            overlay_bytes = self.overlay_cache[overlay_pdf_path]
+            
+            # Convert both to images
+            background_img = self.pdf_to_image(pdf_bytes, page_num=page_num)
+            if background_img is None:
+                return None
+            
+            h, w = background_img.shape[:2]
+            overlay_img = self.pdf_to_image(overlay_bytes, width=w, height=h)
+            if overlay_img is None:
+                return None
+            
+            # Apply overlay
+            overlay_rgba = self.remove_white_background(overlay_img)
+            final_img = self.overlay_transparent(background_img, overlay_rgba)
+            
+            # Convert back to PDF bytes
+            pil_image = Image.fromarray(final_img)
+            pdf_buffer = io.BytesIO()
+            pil_image.save(pdf_buffer, "PDF", resolution=300.0)
+            pdf_buffer.seek(0)
+            
+            self.logger.debug(f"Applied overlay to page {page_num + 1}")
+            return pdf_buffer.getvalue()
+            
+        except Exception as e:
+            self.logger.error(f"Error applying overlay to page {page_num + 1}: {str(e)}")
+            return None
+    
+    def process_pdf_with_overlay(self, pdf_bytes, overlay_config):
+        """
+        Process entire PDF, applying overlay to pages that need it.
+        
+        Args:
+            pdf_bytes: Original PDF content as bytes
+            overlay_config: Overlay configuration
+            
+        Returns:
+            bytes: Modified PDF with overlays applied where needed
+        """
+        try:
+            doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+            overlay_pdf_path = overlay_config.get("overlay_pdf_path")
+            
+            if not overlay_pdf_path or not os.path.exists(overlay_pdf_path):
+                self.logger.error(f"Overlay PDF not found: {overlay_pdf_path}")
+                return pdf_bytes
+            
+            modified_doc = fitz.open()  # New empty document
+            pages_modified = 0
+            
+            for page_num in range(len(doc)):
+                self.logger.info(f"Processing page {page_num + 1}/{len(doc)}")
+                
+                # Check if this page needs overlay
+                if self.needs_overlay(pdf_bytes, page_num, overlay_config):
+                    # Apply overlay to this page
+                    overlaid_page_bytes = self.apply_overlay_to_page(pdf_bytes, page_num, overlay_pdf_path)
+                    
+                    if overlaid_page_bytes:
+                        # Add modified page to new document
+                        temp_doc = fitz.open(stream=overlaid_page_bytes, filetype="pdf")
+                        modified_doc.insert_pdf(temp_doc)
+                        temp_doc.close()
+                        pages_modified += 1
+                    else:
+                        # If overlay failed, use original page
+                        original_page = doc.load_page(page_num)
+                        modified_doc.new_page(width=original_page.rect.width, height=original_page.rect.height)
+                        modified_doc[-1].show_pdf_page(modified_doc[-1].rect, doc, page_num)
+                else:
+                    # Use original page without overlay
+                    original_page = doc.load_page(page_num)
+                    modified_doc.new_page(width=original_page.rect.width, height=original_page.rect.height)
+                    modified_doc[-1].show_pdf_page(modified_doc[-1].rect, doc, page_num)
+            
+            # Convert modified document to bytes
+            result_bytes = modified_doc.write()
+            
+            doc.close()
+            modified_doc.close()
+            
+            self.logger.info(f"Overlay processing complete: {pages_modified}/{len(doc)} pages modified")
+            return result_bytes
+            
+        except Exception as e:
+            self.logger.error(f"Error processing PDF with overlay: {str(e)}")
+            return pdf_bytes  # Return original if processing fails
+
+  -------
+  # In your main() function, update the argument parser:
+
+def main():
+    parser = argparse.ArgumentParser(description="Process PDF files using Azure OpenAI with document type support")
+    parser.add_argument("--apitype", choices=["general", "batch"], required=True, 
+                      help="API type to use (general or batch)")
+    parser.add_argument("--source", choices=["azure", "local"], required=True,
+                      help="Source location of PDF files (azure or local)")
+    parser.add_argument("--folder", required=True, 
+                      help="Folder path (in Azure Blob Storage or local filesystem)")
+    parser.add_argument("--doctype", choices=["invoice", "eob", "claim"], required=True,
+                      help="Document type to process (invoice, eob, or claim)")
+    parser.add_argument("--config", default="config.json", 
+                      help="Path to configuration file")
+    parser.add_argument("--log-level", choices=["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"],
+                     default="INFO", help="Set the logging level")
+    parser.add_argument("--no-archive", action="store_true",
+                     help="Disable archiving regardless of config setting")
+    # ADD THIS NEW ARGUMENT
+    parser.add_argument("--claim-overlay", action="store_true",
+                     help="Enable overlay processing for claim documents (only works with --doctype claim)")
+
+  ------
+  def process_azure_pdf_files(config, api_type, azure_folder, doc_type, claim_overlay_enabled, logger):
+    """
+    Process PDF files from Azure Blob Storage with archiving and overlay support.
+    
+    Parameters:
+    - config: Configuration dictionary
+    - api_type: 'batch' or 'general'
+    - azure_folder: Folder path in Azure Blob Storage
+    - doc_type: Document type ('invoice', 'eob', 'claim')
+    - claim_overlay_enabled: Boolean flag for overlay processing
+    - logger: Logger instance
+    """
+    # Get document-specific configuration including model config
+    extraction_fields, systemprompt, prompt_template, model_config = get_document_config(config, doc_type)
+    logger.info(f"Processing {doc_type} documents with fields: {extraction_fields}")
+    logger.info(f"Using prompt module: {config['processing']['document_types'][doc_type]['prompt_module']}")
+    logger.info(f"Overlay processing enabled: {claim_overlay_enabled and doc_type == 'claim'}")
+    
+    # Initialize overlay processor if needed
+    overlay_processor = None
+    overlay_config = None
+    
+    if claim_overlay_enabled and doc_type == 'claim':
+        doc_config = config["processing"]["document_types"]["claim"]
+        if doc_config.get("overlay_support", False):
+            overlay_config = doc_config.get("overlay_config", {})
+            overlay_processor = OverlayProcessor(config, logger)
+            logger.info(f"Initialized overlay processor with config: {overlay_config}")
+        else:
+            logger.warning("Claim overlay requested but not configured in config file")
+    
+    # ... rest of existing initialization code ...
+    
+    # Process each PDF
+    for i, blob_name in enumerate(pdf_blobs):
+        file_processed_successfully = False
+        
+        try:
+            logger.info(f"Processing file {i+1}/{len(pdf_blobs)}: {blob_name}")
+            
+            # Download blob to memory
+            logger.debug(f"Downloading blob: {blob_name}")
+            blob_content = storage_helper.download_blob_to_memory(blob_name)
+            
+            if blob_content is None:
+                logger.error(f"Could not download blob: {blob_name}")
+                unprocessed_files.append(blob_name)
+                continue
+            
+            # Apply overlay processing if enabled and configured
+            processed_blob_content = blob_content
+            if overlay_processor and overlay_config:
+                logger.info(f"Applying overlay processing to {filename}")
+                processed_blob_content = overlay_processor.process_pdf_with_overlay(blob_content, overlay_config)
+            
+            # Extract pages as base64 strings (use processed content)
+            filename = blob_name.split('/')[-1]
+            logger.info(f"Extracting pages from {filename}")
+            pages = pdf_processor.extract_pdf_pages(processed_blob_content)
+            
+            # ... rest of existing processing code remains the same ...
+            
+            # When uploading, use original content for source PDF but processed content could be saved separately
+            if csv_content:
+                # ... existing CSV upload code ...
+                
+                # Upload original PDF to appropriate folder
+                source_folder = f"source_documents/{doc_type}/" + folder_path
+                source_blob_name = f"{source_folder}{filename}"
+                logger.info(f"Uploading source PDF to {source_blob_name}")
+                source_success, source_url = storage_helper.upload_to_storage(
+                    source_blob_name,
+                    blob_content,  # Use original content
+                    "application/pdf"
+                )
+                
+                # If overlay was applied, also save the processed version
+                if overlay_processor and processed_blob_content != blob_content:
+                    processed_folder = f"processed_documents/{doc_type}/" + folder_path
+                    processed_blob_name = f"{processed_folder}overlaid_{filename}"
+                    logger.info(f"Uploading overlay-processed PDF to {processed_blob_name}")
+                    processed_success, processed_url = storage_helper.upload_to_storage(
+                        processed_blob_name,
+                        processed_blob_content,  # Use processed content
+                        "application/pdf"
+                    )
+                    if processed_success:
+                        logger.info(f"Processed PDF URL: {processed_url}")
+                
+                # ... rest of existing upload logic ...
+  ------
+  # In main() function, add validation and update the process call:
+
+def main():
+    # ... existing argument parsing ...
+    
+    args = parser.parse_args()
+    
+    try:
+        # Load configuration
+        config = load_config(args.config)
+        
+        # Validate overlay usage
+        if args.claim_overlay and args.doctype != "claim":
+            logger.warning("--claim-overlay flag only works with --doctype claim, ignoring overlay")
+            claim_overlay_enabled = False
+        else:
+            claim_overlay_enabled = args.claim_overlay
+        
+        # ... existing validation code ...
+        
+        # Process PDF files from Azure
+        if args.source == "azure":
+            process_azure_pdf_files(config, args.apitype, args.folder, args.doctype, claim_overlay_enabled, logger)
+        else:
+            logger.error("Local processing with overlay not implemented")
+            return 1
+
+
+  ----------
+  # Add this import at the top of your main script (h2.py):
+
+from overlay_processor import OverlayProcessor
+
+
+--------
+
+  import fitz  # PyMuPDF
+import cv2
+import numpy as np
+
+
+def get_page_image(pdf_path, page_num, dpi=150):
+    """Convert PDF page to grayscale image (numpy array)."""
+    doc = fitz.open(pdf_path)
+    page = doc[page_num]
+    pix = page.get_pixmap(matrix=fitz.Matrix(dpi/72, dpi/72))
+    img = np.frombuffer(pix.samples, dtype=np.uint8).reshape(pix.height, pix.width, pix.n)
+    if pix.n == 3:
+        img = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY)
+    elif pix.n == 4:
+        img = cv2.cvtColor(img, cv2.COLOR_RGBA2GRAY)
+    return img
+
+
+def get_page_content_ratio(pdf_path, page_num):
+    """Compute content ratio based on bounding boxes of text/images."""
+    doc = fitz.open(pdf_path)
+    page = doc[page_num]
+    rect = page.rect
+    page_area = rect.width * rect.height
+
+    blocks = page.get_text("blocks")
+    content_area = 0
+    for b in blocks:
+        x0, y0, x1, y1 = b[:4]
+        content_area += (x1 - x0) * (y1 - y0)
+
+    for img in page.get_images(full=True):
+        bbox = page.get_image_bbox(img)
+        content_area += bbox.width * bbox.height
+
+    return (content_area / page_area) * 100
+
+
+def compare_pages_with_template(ref_pdf, ref_page, target_pdf, target_page):
+    """Compare template similarity using cv2.matchTemplate + ratio."""
+    # Ratios
+    ref_ratio = get_page_content_ratio(ref_pdf, ref_page)
+    tgt_ratio = get_page_content_ratio(target_pdf, target_page)
+
+    # Images
+    ref_img = get_page_image(ref_pdf, ref_page)
+    tgt_img = get_page_image(target_pdf, target_page)
+
+    # Resize target to reference size
+    tgt_img = cv2.resize(tgt_img, (ref_img.shape[1], ref_img.shape[0]))
+
+    # Template matching (use normalized correlation coefficient)
+    result = cv2.matchTemplate(ref_img, tgt_img, cv2.TM_CCOEFF_NORMED)
+    similarity = result.max()  # best match score (between -1 and 1)
+
+    return {
+        "ref_page": ref_page + 1,
+        "target_page": target_page + 1,
+        "ref_ratio": round(ref_ratio, 2),
+        "target_ratio": round(tgt_ratio, 2),
+        "template_similarity": round(float(similarity), 4)
+    }
+
+
+# ---------------- Example Usage ----------------
+ref_pdf = "reference.pdf"
+target_pdf = "sample.pdf"
+
+results = []
+for r in range(2):  # first 2 pages of reference
+    for t in range(2):  # first 2 pages of target
+        res = compare_pages_with_template(ref_pdf, r, target_pdf, t)
+        results.append(res)
+        print(res)
