@@ -1,0 +1,715 @@
+config.json
+
+  {
+  "azure_openai": {
+    "api_version": "2023-12-01-preview",
+    "default": {
+      "api_key": "your-default-api-key",
+      "azure_endpoint": "https://your-default-endpoint.openai.azure.com/",
+      "deployment_name": "your-default-deployment-name"
+    },
+    "models": {
+      "invoice": {
+        "api_key": "your-invoice-api-key",
+        "azure_endpoint": "https://your-invoice-endpoint.openai.azure.com/",
+        "deployment_name": "gpt-4-vision-invoice"
+      },
+      "eob": {
+        "api_key": "your-eob-api-key", 
+        "azure_endpoint": "https://your-eob-endpoint.openai.azure.com/",
+        "deployment_name": "gpt-4-vision-eob"
+      },
+      "claim": {
+        "api_key": "your-claim-api-key",
+        "azure_endpoint": "https://your-claim-endpoint.openai.azure.com/",
+        "deployment_name": "gpt-4-vision-claim"
+      }
+    }
+  },
+  "azure_storage": {
+    "connection_string": "your-connection-string",
+    "input_container": "input-pdfs",
+    "output_container": "processed-results",
+    "input_archive_container": "archived-inputs",
+    "high_confidence_folder": "high_confidence/",
+    "low_confidence_folder": "low_confidence/"
+  },
+  "processing": {
+    "batch_size": 10,
+    "confidence_threshold": 80,
+    "zoom_factor": 2.0,
+    "timeout_seconds": 300,
+    "document_types": {
+      "invoice": {
+        "extraction_fields": ["invoice_number", "total_amount", "date", "vendor"],
+        "prompt_module": "invoice_prompt",
+        "overlay_enabled": false
+      },
+      "eob": {
+        "extraction_fields": ["eob_number", "patient_name", "service_date", "paid_amount", "provider"],
+        "prompt_module": "eob_prompt",
+        "overlay_enabled": false
+      },
+      "claim": {
+        "extraction_fields": ["claim_number", "patient_id", "diagnosis_code", "procedure_code", "claim_amount"],
+        "prompt_module": "claim_prompt",
+        "overlay_enabled": true,
+        "overlay_config": {
+          "reference_pdf_path": "reference_files/claim_reference.pdf",
+          "overlay_pdf_path": "reference_files/claim_overlay.pdf",
+          "similarity_threshold": 0.7,
+          "content_density_threshold": 0.3,
+          "use_prompt_detection": true
+        },
+        "preprocessing_enabled": true,
+        "preprocessing_config": {
+          "enhance_contrast": true,
+          "denoise": true,
+          "sharpen": true,
+          "binarize": false,
+          "deskew": true,
+          "upscale_factor": 1.5,
+          "fix_font_issues": true,
+          "morph_operations": true
+        }
+      }
+    }
+  },
+  "archive": {
+    "blob_input_move_on": true,
+    "archive_name_format": "archive_{timestamp}.zip",
+    "processed_folder": "processed/",
+    "unprocessed_folder": "unprocessed/"
+  }
+}
+
+-----
+
+  import cv2
+import numpy as np
+from PIL import Image, ImageEnhance
+import logging
+from scipy import ndimage
+
+
+class ImagePreprocessor:
+    """
+    Image preprocessing to handle font issues, improve OCR quality,
+    and enhance document readability for AI vision models.
+    """
+    
+    def __init__(self, config, logger=None):
+        """
+        Initialize preprocessor with configuration.
+        
+        Args:
+            config: Preprocessing configuration dictionary
+            logger: Logger instance
+        """
+        self.config = config
+        self.logger = logger or logging.getLogger("image_preprocessor")
+        
+        # Default settings
+        self.enhance_contrast = config.get("enhance_contrast", True)
+        self.denoise = config.get("denoise", True)
+        self.sharpen = config.get("sharpen", True)
+        self.binarize = config.get("binarize", False)
+        self.deskew = config.get("deskew", True)
+        self.upscale_factor = config.get("upscale_factor", 1.5)
+        self.fix_font_issues = config.get("fix_font_issues", True)
+        self.morph_operations = config.get("morph_operations", True)
+        
+        self.logger.info("ImagePreprocessor initialized with settings:")
+        self.logger.info(f"  Enhance contrast: {self.enhance_contrast}")
+        self.logger.info(f"  Denoise: {self.denoise}")
+        self.logger.info(f"  Sharpen: {self.sharpen}")
+        self.logger.info(f"  Binarize: {self.binarize}")
+        self.logger.info(f"  Deskew: {self.deskew}")
+        self.logger.info(f"  Upscale factor: {self.upscale_factor}")
+        self.logger.info(f"  Fix font issues: {self.fix_font_issues}")
+        self.logger.info(f"  Morphological operations: {self.morph_operations}")
+    
+    def upscale_image(self, img):
+        """
+        Upscale image for better resolution.
+        Helps with small or poorly rendered fonts.
+        """
+        if self.upscale_factor <= 1.0:
+            return img
+        
+        try:
+            h, w = img.shape[:2]
+            new_h = int(h * self.upscale_factor)
+            new_w = int(w * self.upscale_factor)
+            
+            # Use LANCZOS for high-quality upscaling
+            upscaled = cv2.resize(img, (new_w, new_h), interpolation=cv2.INTER_LANCZOS4)
+            
+            self.logger.debug(f"Upscaled image from {w}x{h} to {new_w}x{new_h}")
+            return upscaled
+        except Exception as e:
+            self.logger.error(f"Error upscaling image: {str(e)}")
+            return img
+    
+    def enhance_contrast(self, img):
+        """
+        Enhance contrast using CLAHE (Contrast Limited Adaptive Histogram Equalization).
+        Helps make faint or low-contrast text more readable.
+        """
+        try:
+            # Convert to LAB color space
+            lab = cv2.cvtColor(img, cv2.COLOR_BGR2LAB)
+            l, a, b = cv2.split(lab)
+            
+            # Apply CLAHE to L channel
+            clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+            l = clahe.apply(l)
+            
+            # Merge channels and convert back to BGR
+            lab = cv2.merge([l, a, b])
+            enhanced = cv2.cvtColor(lab, cv2.COLOR_LAB2BGR)
+            
+            self.logger.debug("Applied contrast enhancement")
+            return enhanced
+        except Exception as e:
+            self.logger.error(f"Error enhancing contrast: {str(e)}")
+            return img
+    
+    def denoise_image(self, img):
+        """
+        Remove noise from image.
+        Helps clean up scanned documents with artifacts.
+        """
+        try:
+            # Use Non-Local Means Denoising
+            denoised = cv2.fastNlMeansDenoisingColored(img, None, 10, 10, 7, 21)
+            
+            self.logger.debug("Applied denoising")
+            return denoised
+        except Exception as e:
+            self.logger.error(f"Error denoising image: {str(e)}")
+            return img
+    
+    def sharpen_image(self, img):
+        """
+        Sharpen image to make text edges clearer.
+        Critical for fixing blurry or poorly rendered fonts.
+        """
+        try:
+            # Create sharpening kernel
+            kernel = np.array([[-1, -1, -1],
+                             [-1,  9, -1],
+                             [-1, -1, -1]])
+            
+            sharpened = cv2.filter2D(img, -1, kernel)
+            
+            self.logger.debug("Applied sharpening")
+            return sharpened
+        except Exception as e:
+            self.logger.error(f"Error sharpening image: {str(e)}")
+            return img
+    
+    def deskew_image(self, img):
+        """
+        Detect and correct skew in scanned documents.
+        Helps with misaligned scans.
+        """
+        try:
+            # Convert to grayscale
+            gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+            
+            # Detect edges
+            edges = cv2.Canny(gray, 50, 150, apertureSize=3)
+            
+            # Detect lines using Hough transform
+            lines = cv2.HoughLines(edges, 1, np.pi / 180, 200)
+            
+            if lines is not None and len(lines) > 0:
+                # Calculate average angle
+                angles = []
+                for line in lines[:20]:  # Use first 20 lines
+                    rho, theta = line[0]
+                    angle = (theta * 180 / np.pi) - 90
+                    if -45 < angle < 45:  # Filter reasonable angles
+                        angles.append(angle)
+                
+                if angles:
+                    median_angle = np.median(angles)
+                    
+                    # Only deskew if angle is significant
+                    if abs(median_angle) > 0.5:
+                        # Rotate image
+                        h, w = img.shape[:2]
+                        center = (w // 2, h // 2)
+                        rotation_matrix = cv2.getRotationMatrix2D(center, median_angle, 1.0)
+                        deskewed = cv2.warpAffine(img, rotation_matrix, (w, h), 
+                                                  flags=cv2.INTER_CUBIC,
+                                                  borderMode=cv2.BORDER_REPLICATE)
+                        
+                        self.logger.debug(f"Deskewed image by {median_angle:.2f} degrees")
+                        return deskewed
+            
+            return img
+        except Exception as e:
+            self.logger.error(f"Error deskewing image: {str(e)}")
+            return img
+    
+    def fix_font_rendering(self, img):
+        """
+        Apply morphological operations to fix font rendering issues.
+        Helps with broken characters like '0' appearing as 'Ø' or '8'.
+        """
+        try:
+            # Convert to grayscale
+            gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+            
+            # Apply adaptive thresholding to separate text from background
+            thresh = cv2.adaptiveThreshold(gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+                                          cv2.THRESH_BINARY, 11, 2)
+            
+            # Invert so text is white on black background
+            thresh_inv = cv2.bitwise_not(thresh)
+            
+            # Define kernels for morphological operations
+            # Small kernel to close small gaps in characters
+            kernel_close = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2, 2))
+            
+            # Medium kernel to connect broken parts
+            kernel_dilate = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (1, 1))
+            
+            # Close small gaps (fixes slashes through numbers)
+            closed = cv2.morphologyEx(thresh_inv, cv2.MORPH_CLOSE, kernel_close)
+            
+            # Slight dilation to strengthen character strokes
+            dilated = cv2.dilate(closed, kernel_dilate, iterations=1)
+            
+            # Slight erosion to restore character width
+            eroded = cv2.erode(dilated, kernel_dilate, iterations=1)
+            
+            # Invert back
+            fixed = cv2.bitwise_not(eroded)
+            
+            # Convert back to BGR
+            fixed_bgr = cv2.cvtColor(fixed, cv2.COLOR_GRAY2BGR)
+            
+            self.logger.debug("Applied font rendering fixes")
+            return fixed_bgr
+        except Exception as e:
+            self.logger.error(f"Error fixing font rendering: {str(e)}")
+            return img
+    
+    def apply_morphological_operations(self, img):
+        """
+        Apply morphological operations to improve character clarity.
+        Helps separate overlapping characters and fill gaps.
+        """
+        try:
+            # Convert to grayscale
+            gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+            
+            # Apply binary threshold
+            _, binary = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+            
+            # Define kernel
+            kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (2, 2))
+            
+            # Opening (erosion followed by dilation) - removes noise
+            opening = cv2.morphologyEx(binary, cv2.MORPH_OPEN, kernel, iterations=1)
+            
+            # Closing (dilation followed by erosion) - fills small holes
+            closing = cv2.morphologyEx(opening, cv2.MORPH_CLOSE, kernel, iterations=1)
+            
+            # Convert back to BGR
+            result = cv2.cvtColor(closing, cv2.COLOR_GRAY2BGR)
+            
+            self.logger.debug("Applied morphological operations")
+            return result
+        except Exception as e:
+            self.logger.error(f"Error applying morphological operations: {str(e)}")
+            return img
+    
+    def binarize_image(self, img):
+        """
+        Convert to black and white.
+        Useful for very clean documents but may lose detail.
+        """
+        try:
+            gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+            
+            # Use Otsu's thresholding
+            _, binary = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+            
+            # Convert back to BGR
+            binary_bgr = cv2.cvtColor(binary, cv2.COLOR_GRAY2BGR)
+            
+            self.logger.debug("Applied binarization")
+            return binary_bgr
+        except Exception as e:
+            self.logger.error(f"Error binarizing image: {str(e)}")
+            return img
+    
+    def process_image(self, img):
+        """
+        Apply all enabled preprocessing steps in optimal order.
+        
+        Args:
+            img: Input image (BGR format from OpenCV)
+        
+        Returns:
+            Processed image
+        """
+        try:
+            processed = img.copy()
+            
+            # Step 1: Upscale (do first for better quality in subsequent steps)
+            if self.upscale_factor > 1.0:
+                processed = self.upscale_image(processed)
+            
+            # Step 2: Deskew (correct orientation early)
+            if self.deskew:
+                processed = self.deskew_image(processed)
+            
+            # Step 3: Denoise (remove artifacts before enhancement)
+            if self.denoise:
+                processed = self.denoise_image(processed)
+            
+            # Step 4: Fix font rendering issues (CRITICAL for your use case)
+            if self.fix_font_issues:
+                processed = self.fix_font_rendering(processed)
+            
+            # Step 5: Enhance contrast
+            if self.enhance_contrast:
+                processed = self.enhance_contrast_img(processed)
+            
+            # Step 6: Sharpen
+            if self.sharpen:
+                processed = self.sharpen_image(processed)
+            
+            # Step 7: Morphological operations
+            if self.morph_operations:
+                processed = self.apply_morphological_operations(processed)
+            
+            # Step 8: Binarize (optional, last step)
+            if self.binarize:
+                processed = self.binarize_image(processed)
+            
+            self.logger.info("Image preprocessing completed successfully")
+            return processed
+            
+        except Exception as e:
+            self.logger.error(f"Error in image preprocessing pipeline: {str(e)}")
+            return img
+    
+    def enhance_contrast_img(self, img):
+        """Wrapper for enhance_contrast to avoid naming conflict."""
+        return self.enhance_contrast(img)
+
+
+  ------
+
+  def get_document_config(config, doc_type):
+    """
+    Get configuration for a specific document type including model configuration.
+    
+    Args:
+        config: Full configuration dictionary
+        doc_type: Document type ('invoice', 'eob', 'claim')
+    
+    Returns:
+        tuple: (extraction_fields, systemprompt, prompt_template, model_config, overlay_config)
+    """
+    document_types = config["processing"]["document_types"]
+    
+    if doc_type not in document_types:
+        raise ValueError(f"Unsupported document type: {doc_type}. Available types: {list(document_types.keys())}")
+    
+    doc_config = document_types[doc_type]
+    extraction_fields = doc_config["extraction_fields"]
+    prompt_module_name = doc_config["prompt_module"]
+    
+    # Get model configuration for this document type
+    azure_openai_config = config["azure_openai"]
+    api_version = azure_openai_config["api_version"]
+    
+    # Check if document type has specific model configuration
+    if doc_type in azure_openai_config.get("models", {}):
+        model_config = azure_openai_config["models"][doc_type].copy()
+        model_config["api_version"] = api_version
+    else:
+        # Use default configuration
+        default_config = azure_openai_config.get("default", {})
+        model_config = default_config.copy()
+        model_config["api_version"] = api_version
+    
+    # Dynamically import the prompt module
+    try:
+        prompt_module = importlib.import_module(prompt_module_name)
+        
+        # Get systemprompt and prompt from the module
+        if not hasattr(prompt_module, 'systemprompt'):
+            raise AttributeError(f"Module '{prompt_module_name}' missing 'systemprompt' variable")
+        if not hasattr(prompt_module, 'prompt'):
+            raise AttributeError(f"Module '{prompt_module_name}' missing 'prompt' variable")
+            
+        systemprompt = prompt_module.systemprompt
+        prompt_template = prompt_module.prompt
+        
+    except ImportError as e:
+        raise ImportError(f"Could not import prompt module '{prompt_module_name}': {str(e)}")
+    except AttributeError as e:
+        raise AttributeError(f"Error accessing prompt variables: {str(e)}")
+    
+    # Get overlay configuration for this document type
+    overlay_enabled = doc_config.get("overlay_enabled", False)
+    overlay_config = doc_config.get("overlay_config", {}) if overlay_enabled else None
+    
+    # Get preprocessing configuration for this document type
+    preprocessing_enabled = doc_config.get("preprocessing_enabled", False)
+    preprocessing_config = doc_config.get("preprocessing_config", {}) if preprocessing_enabled else None
+    
+    return extraction_fields, systemprompt, prompt_template, model_config, overlay_config, preprocessing_config
+
+  ------
+
+  pdfprocessor
+
+  # Add this import at the top of helper.py
+from preprocessing_utils import ImagePreprocessor
+
+# Update PDFProcessor class
+class PDFProcessor:
+    def __init__(self, config, logger, doc_type=None, extraction_fields=None, preprocessing_config=None):
+        self.config = config
+        self.logger = logger
+        self.doc_type = doc_type or "invoice"
+        self.extraction_fields = extraction_fields or config["processing"].get("extraction_fields", ["invoice_number", "total_amount", "date", "vendor"])
+        
+        # Initialize preprocessor if configuration provided
+        self.preprocessor = None
+        if preprocessing_config:
+            self.preprocessor = ImagePreprocessor(preprocessing_config, logger)
+            self.logger.info(f"Image preprocessing enabled for {self.doc_type}")
+        else:
+            self.logger.info(f"Image preprocessing disabled for {self.doc_type}")
+        
+        # Log the processor configuration
+        self.logger.info(f"PDFProcessor initialized for document type: {self.doc_type}")
+        self.logger.info(f"Extraction fields: {self.extraction_fields}")
+    
+    def extract_pdf_pages(self, pdf_content):
+        """
+        Extract pages from PDF as base64 encoded images with optional preprocessing.
+        
+        Args:
+            pdf_content: PDF file content as bytes
+            
+        Returns:
+            List of tuples: [(page_number, base64_string), ...]
+        """
+        import fitz
+        import base64
+        import cv2
+        import numpy as np
+        
+        try:
+            doc = fitz.open(stream=pdf_content, filetype="pdf")
+            pages = []
+            zoom_factor = self.config["processing"].get("zoom_factor", 2.0)
+            
+            for page_num in range(len(doc)):
+                try:
+                    page = doc.load_page(page_num)
+                    
+                    # Render page to pixmap
+                    mat = fitz.Matrix(zoom_factor, zoom_factor)
+                    pix = page.get_pixmap(matrix=mat)
+                    
+                    # Convert to numpy array
+                    img = np.frombuffer(pix.samples, dtype=np.uint8).reshape(pix.height, pix.width, pix.n)
+                    
+                    # Convert to BGR if necessary
+                    if pix.n == 4:  # RGBA
+                        img = cv2.cvtColor(img, cv2.COLOR_RGBA2BGR)
+                    elif pix.n == 1:  # Grayscale
+                        img = cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
+                    
+                    # Apply preprocessing if enabled
+                    if self.preprocessor:
+                        self.logger.debug(f"Applying preprocessing to page {page_num + 1}")
+                        img = self.preprocessor.process_image(img)
+                    
+                    # Convert back to bytes
+                    _, buffer = cv2.imencode('.png', img)
+                    img_bytes = buffer.tobytes()
+                    
+                    # Encode to base64
+                    base64_string = base64.b64encode(img_bytes).decode('utf-8')
+                    
+                    pages.append((page_num, base64_string))
+                    self.logger.debug(f"Successfully extracted and {'preprocessed ' if self.preprocessor else ''}page {page_num + 1}")
+                    
+                except Exception as e:
+                    self.logger.error(f"Error extracting page {page_num + 1}: {str(e)}")
+                    continue
+            
+            doc.close()
+            return pages
+            
+        except Exception as e:
+            self.logger.error(f"Error opening PDF: {str(e)}")
+            return []
+    
+    # ... rest of the PDFProcessor methods remain the same ...
+
+----
+
+  helper
+
+  # Add this import at the top of your file:
+from overlay_utils import OverlayProcessor
+from preprocessing_utils import ImagePreprocessor
+
+# Update the process_azure_pdf_files function beginning:
+def process_azure_pdf_files(config, api_type, azure_folder, doc_type, logger, enable_overlay=None, enable_preprocessing=None):
+    """
+    Process PDF files from Azure Blob Storage with archiving, overlay, and preprocessing support.
+    
+    Parameters:
+    - config: Configuration dictionary
+    - api_type: 'batch' or 'general'
+    - azure_folder: Folder path in Azure Blob Storage
+    - doc_type: Document type ('invoice', 'eob', 'claim')
+    - logger: Logger instance
+    - enable_overlay: Override overlay setting (True/False/None for config default)
+    - enable_preprocessing: Override preprocessing setting (True/False/None for config default)
+    """
+    # Get document-specific configuration including model config, overlay config, and preprocessing config
+    extraction_fields, systemprompt, prompt_template, model_config, overlay_config, preprocessing_config = get_document_config(config, doc_type)
+    logger.info(f"Processing {doc_type} documents with fields: {extraction_fields}")
+    logger.info(f"Using prompt module: {config['processing']['document_types'][doc_type]['prompt_module']}")
+    logger.info(f"Using Azure OpenAI model configuration:")
+    logger.info(f"  Endpoint: {model_config.get('azure_endpoint')}")
+    logger.info(f"  Deployment: {model_config.get('deployment_name')}")
+    logger.info(f"  API Version: {model_config.get('api_version')}")
+    
+    # Handle preprocessing configuration
+    use_preprocessing = False
+    if enable_preprocessing is not None:
+        use_preprocessing = enable_preprocessing
+    elif preprocessing_config is not None:
+        use_preprocessing = True
+    
+    if use_preprocessing and preprocessing_config:
+        logger.info(f"Image preprocessing enabled for {doc_type} documents")
+        logger.info(f"  Preprocessing config: {preprocessing_config}")
+    else:
+        logger.info(f"Image preprocessing disabled for {doc_type} documents")
+        preprocessing_config = None
+    
+    # Initialize overlay processor if needed
+    overlay_processor = None
+    use_overlay = False
+    
+    if enable_overlay is not None:
+        use_overlay = enable_overlay
+    elif overlay_config is not None:
+        use_overlay = True
+    
+    if use_overlay and overlay_config:
+        overlay_processor = OverlayProcessor(overlay_config, logger)
+        logger.info(f"Overlay processing enabled for {doc_type} documents")
+        logger.info(f"  Reference PDF: {overlay_config.get('reference_pdf_path')}")
+        logger.info(f"  Overlay PDF: {overlay_config.get('overlay_pdf_path')}")
+        logger.info(f"  Similarity threshold: {overlay_config.get('similarity_threshold', 0.7)}")
+        logger.info(f"  Content density threshold: {overlay_config.get('content_density_threshold', 0.3)}")
+    else:
+        logger.info(f"Overlay processing disabled for {doc_type} documents")
+    
+    # ... rest of initialization code (storage_helper, pdf_processor, ai_client) ...
+
+----
+
+  # In your main() function, update the argument parser:
+
+def main():
+    parser = argparse.ArgumentParser(description="Process PDF files using Azure OpenAI with document type support")
+    parser.add_argument("--apitype", choices=["general", "batch"], required=True, 
+                      help="API type to use (general or batch)")
+    parser.add_argument("--source", choices=["azure", "local"], required=True,
+                      help="Source location of PDF files (azure or local)")
+    parser.add_argument("--folder", required=True, 
+                      help="Folder path (in Azure Blob Storage or local filesystem)")
+    parser.add_argument("--doctype", choices=["invoice", "eob", "claim"], required=True,
+                      help="Document type to process (invoice, eob, or claim)")
+    parser.add_argument("--config", default="config.json", 
+                      help="Path to configuration file")
+    parser.add_argument("--log-level", choices=["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"],
+                     default="INFO", help="Set the logging level")
+    parser.add_argument("--no-archive", action="store_true",
+                     help="Disable archiving regardless of config setting")
+    parser.add_argument("--claim-overlay", action="store_true",
+                     help="Force enable overlay for claim documents (overrides config)")
+    parser.add_argument("--no-overlay", action="store_true",
+                     help="Disable overlay processing regardless of config setting")
+    parser.add_argument("--enable-preprocessing", action="store_true",
+                     help="Force enable image preprocessing (overrides config)")
+    parser.add_argument("--no-preprocessing", action="store_true",
+                     help="Disable image preprocessing regardless of config setting")
+
+
+  ----
+  # In your main() function, after argument parsing and config loading:
+
+    try:
+        # Load configuration
+        config = load_config(args.config)
+        
+        # Validate document type exists in config
+        if args.doctype not in config["processing"]["document_types"]:
+            available_types = list(config["processing"]["document_types"].keys())
+            raise ValueError(f"Document type '{args.doctype}' not found in config. Available types: {available_types}")
+        
+        # Handle overlay arguments
+        enable_overlay = None
+        if args.claim_overlay:
+            enable_overlay = True
+            logger.info("Overlay enabled via command line argument")
+        elif args.no_overlay:
+            enable_overlay = False
+            logger.info("Overlay disabled via command line argument")
+        
+        # Handle preprocessing arguments
+        enable_preprocessing = None
+        if args.enable_preprocessing:
+            enable_preprocessing = True
+            logger.info("Preprocessing enabled via command line argument")
+        elif args.no_preprocessing:
+            enable_preprocessing = False
+            logger.info("Preprocessing disabled via command line argument")
+        
+        # Override archive setting if --no-archive is specified
+        if args.no_archive:
+            if "archive" not in config:
+                config["archive"] = {}
+            config["archive"]["blob_input_move_on"] = False
+        
+        # Set up logger
+        log_level = getattr(logging, args.log_level)
+        logger = setup_logger(config, log_level, args.doctype)
+        
+        logger.info(f"Starting PDF processing with source: {args.source}, folder: {args.folder}, API type: {args.apitype}, document type: {args.doctype}")
+        
+        # Log archiving configuration
+        archive_enabled = config.get("archive", {}).get("blob_input_move_on", False)
+        if args.source == "azure":
+            logger.info(f"Archiving enabled: {archive_enabled}")
+            if archive_enabled:
+                archive_container = config["azure_storage"].get("input_archive_container")
+                logger.info(f"Archive container: {archive_container}")
+        
+        # Process PDF files from Azure
+        if args.source == "azure":
+            process_azure_pdf_files(config, args.apitype, args.folder, args.doctype, logger, enable_overlay, enable_preprocessing)
+        else:
+            logger.error("Local processing with document types not implemented in this example")
+            return 1
