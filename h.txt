@@ -1,3 +1,253 @@
+fontconvert.py
+
+import os
+import cv2
+import numpy as np
+from PIL import Image, ImageDraw, ImageFont
+import fitz
+import logging
+from pathlib import Path
+from io import BytesIO
+
+
+class FormatConverter:
+    """
+    Convert various document formats to processable images.
+    Pure Python - No external dependencies, no font files needed.
+    """
+    
+    def __init__(self, config, logger=None):
+        self.config = config
+        self.logger = logger or logging.getLogger("format_converter")
+        self.supported_formats = config.get("processing", {}).get("supported_formats", [
+            "pdf", "docx", "doc", "jpg", "jpeg", "png", "tif", "tiff", "bmp"
+        ])
+        
+        self.docx_available = False
+        try:
+            from docx import Document
+            self.docx_available = True
+            self.logger.info("python-docx available - DOCX/DOC conversion enabled")
+        except ImportError:
+            self.logger.warning("python-docx not installed - DOCX/DOC files will be skipped")
+        
+        self.logger.info(f"FormatConverter initialized")
+        self.logger.info(f"Supported formats: {self.supported_formats}")
+    
+    def get_file_extension(self, filename):
+        """Get file extension without dot."""
+        return Path(filename).suffix.lower().lstrip('.')
+    
+    def is_supported_format(self, filename):
+        """Check if file format is supported."""
+        ext = self.get_file_extension(filename)
+        
+        if ext in ['docx', 'doc'] and not self.docx_available:
+            return False
+        
+        return ext in self.supported_formats
+    
+    def convert_to_images(self, file_content, filename):
+        """
+        Convert any supported format to list of images.
+        
+        Args:
+            file_content: File content as bytes
+            filename: Original filename (to determine format)
+        
+        Returns:
+            List of tuples: [(page_number, numpy_image), ...]
+        """
+        ext = self.get_file_extension(filename)
+        
+        if not self.is_supported_format(filename):
+            self.logger.error(f"Unsupported file format: {ext}")
+            return []
+        
+        self.logger.info(f"Converting {ext.upper()} file: {filename}")
+        
+        try:
+            if ext == 'pdf':
+                return self._convert_pdf(file_content)
+            elif ext in ['docx', 'doc']:
+                return self._convert_docx(file_content)
+            elif ext in ['jpg', 'jpeg', 'png', 'tif', 'tiff', 'bmp']:
+                return self._convert_image(file_content)
+            else:
+                self.logger.error(f"Format {ext} not implemented")
+                return []
+        
+        except Exception as e:
+            self.logger.error(f"Error converting {ext} file: {str(e)}")
+            return []
+    
+    def _convert_pdf(self, pdf_content):
+        """Convert PDF to images using PyMuPDF."""
+        try:
+            doc = fitz.open(stream=pdf_content, filetype="pdf")
+            images = []
+            zoom_factor = self.config.get("processing", {}).get("zoom_factor", 2.0)
+            
+            for page_num in range(len(doc)):
+                page = doc.load_page(page_num)
+                mat = fitz.Matrix(zoom_factor, zoom_factor)
+                pix = page.get_pixmap(matrix=mat)
+                
+                img = np.frombuffer(pix.samples, dtype=np.uint8).reshape(pix.height, pix.width, pix.n)
+                
+                if pix.n == 4:
+                    img = cv2.cvtColor(img, cv2.COLOR_RGBA2BGR)
+                elif pix.n == 1:
+                    img = cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
+                
+                images.append((page_num, img))
+                self.logger.debug(f"Converted PDF page {page_num + 1}")
+            
+            doc.close()
+            self.logger.info(f"Successfully converted PDF to {len(images)} images")
+            return images
+        
+        except Exception as e:
+            self.logger.error(f"Error converting PDF: {str(e)}")
+            return []
+    
+    def _convert_docx(self, docx_content):
+        """
+        Convert DOCX/DOC to images using python-docx + Pillow.
+        No font files needed - uses PIL's default font.
+        """
+        if not self.docx_available:
+            self.logger.error("python-docx not available - cannot convert DOCX/DOC")
+            return []
+        
+        try:
+            from docx import Document
+            
+            doc = Document(BytesIO(docx_content))
+            
+            full_text = []
+            for para in doc.paragraphs:
+                text = para.text.strip()
+                if text:
+                    full_text.append(text)
+            
+            for table in doc.tables:
+                for row in table.rows:
+                    row_text = ' | '.join([cell.text.strip() for cell in row.cells])
+                    if row_text.strip():
+                        full_text.append(row_text)
+            
+            if not full_text:
+                self.logger.warning("Empty DOCX document")
+                full_text = ["[Empty Document]"]
+            
+            pages = self._split_text_into_pages(full_text)
+            
+            images = []
+            for page_num, page_text in enumerate(pages):
+                img = self._text_to_image(page_text)
+                images.append((page_num, img))
+            
+            self.logger.info(f"Successfully converted DOCX to {len(images)} images")
+            return images
+        
+        except Exception as e:
+            self.logger.error(f"Error converting DOCX: {str(e)}")
+            return []
+    
+    def _split_text_into_pages(self, text_lines, max_lines_per_page=45):
+        """Split text into pages."""
+        pages = []
+        current_page = []
+        
+        for line in text_lines:
+            estimated_lines = max(1, (len(line) + 79) // 80)
+            
+            if len(current_page) + estimated_lines > max_lines_per_page and current_page:
+                pages.append('\n'.join(current_page))
+                current_page = []
+            
+            current_page.append(line)
+        
+        if current_page:
+            pages.append('\n'.join(current_page))
+        
+        return pages if pages else ["[Empty Page]"]
+    
+    def _text_to_image(self, text, width=2480, height=3508):
+        """
+        Convert text to image (A4 size at 300 DPI).
+        Uses PIL's default font - NO external font files needed.
+        """
+        try:
+            img = Image.new('RGB', (width, height), color='white')
+            draw = ImageDraw.Draw(img)
+            
+            font = ImageFont.load_default()
+            
+            margin = 80
+            line_height = 20
+            y = margin
+            max_width = width - (2 * margin)
+            char_width = 10
+            
+            for paragraph in text.split('\n'):
+                if not paragraph.strip():
+                    y += line_height
+                    continue
+                
+                words = paragraph.split(' ')
+                current_line = ''
+                
+                for word in words:
+                    test_line = current_line + word + ' '
+                    estimated_width = len(test_line) * char_width
+                    
+                    if estimated_width < max_width:
+                        current_line = test_line
+                    else:
+                        if current_line:
+                            draw.text((margin, y), current_line.strip(), fill='black', font=font)
+                            y += line_height
+                        current_line = word + ' '
+                    
+                    if y > height - margin - 100:
+                        draw.text((margin, y), "[Content continues...]", fill='gray', font=font)
+                        break
+                
+                if current_line and y < height - margin - 100:
+                    draw.text((margin, y), current_line.strip(), fill='black', font=font)
+                    y += line_height
+                
+                y += line_height // 2
+            
+            img_array = np.array(img)
+            img_bgr = cv2.cvtColor(img_array, cv2.COLOR_RGB2BGR)
+            
+            return img_bgr
+        
+        except Exception as e:
+            self.logger.error(f"Error creating text image: {str(e)}")
+            blank = np.ones((height, width, 3), dtype=np.uint8) * 255
+            return blank
+    
+    def _convert_image(self, image_content):
+        """Convert image file (JPG, PNG, etc.) to numpy array."""
+        try:
+            nparr = np.frombuffer(image_content, np.uint8)
+            img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+            
+            if img is None:
+                raise ValueError("Failed to decode image")
+            
+            self.logger.info(f"Successfully converted image")
+            return [(0, img)]
+        
+        except Exception as e:
+            self.logger.error(f"Error converting image: {str(e)}")
+            return []
+-------------------------
+old
 #fontconvert.py
 
 import os
