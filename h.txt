@@ -519,7 +519,7 @@ import shutil
 import logging
 import traceback
 import fitz  # PyMuPDF
-from PIL import Image
+from PIL import Image, ImageDraw, ImageFont
 from datetime import datetime
 
 from helper import (
@@ -537,6 +537,70 @@ logging.basicConfig(
     filename='document_processing.log',
     filemode='a'  # Append mode to keep historical logs
 )
+
+def extract_first_page_image(file_path):
+    """
+    Extract first page image from various document types
+    """
+    try:
+        # PDF handling
+        if file_path.lower().endswith('.pdf'):
+            doc = fitz.open(file_path)
+            
+            # Check if document has pages
+            if len(doc) == 0:
+                logging.error(f"Empty PDF: {file_path}")
+                return _create_blank_image()
+            
+            page = doc.load_page(0)
+            pix = page.get_pixmap()
+            
+            # Validate pixmap
+            if not pix or pix.width <= 0 or pix.height <= 0:
+                logging.error(f"Invalid PDF page: {file_path}")
+                return _create_blank_image()
+            
+            img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
+            doc.close()
+        
+        # DOCX handling
+        elif file_path.lower().endswith('.docx'):
+            from docx import Document
+            doc = Document(file_path)
+            
+            # Create image from first paragraph text
+            text = "\n".join([p.text for p in doc.paragraphs[:3]])
+            img = Image.new("RGB", (800, 600), "white")
+            draw = ImageDraw.Draw(img)
+            draw.text((10, 10), text, fill="black")
+        
+        # Image handling
+        elif file_path.lower().endswith(('.jpg', '.jpeg', '.png')):
+            img = Image.open(file_path)
+        
+        else:
+            logging.error(f"Unsupported file type: {file_path}")
+            return _create_blank_image()
+        
+        # Resize and convert to bytes
+        img = img.resize((800, 600), Image.LANCZOS)
+        buf = io.BytesIO()
+        img.save(buf, format="PNG")
+        return buf.getvalue()
+    
+    except Exception as e:
+        logging.error(f"Critical error extracting image from {file_path}: {e}")
+        logging.error(traceback.format_exc())
+        return _create_blank_image()
+
+def _create_blank_image():
+    """
+    Create a blank white image for error cases
+    """
+    img = Image.new('RGB', (800, 600), color='white')
+    buf = io.BytesIO()
+    img.save(buf, format="PNG")
+    return buf.getvalue()
 
 def extract_page_image(file_path, page_number):
     """
@@ -581,15 +645,6 @@ def extract_page_image(file_path, page_number):
         logging.error(f"Error extracting page {page_number} from {file_path}: {e}")
         logging.error(traceback.format_exc())
         return _create_blank_image()
-
-def _create_blank_image():
-    """
-    Create a blank white image for error cases
-    """
-    img = Image.new('RGB', (800, 600), color='white')
-    buf = io.BytesIO()
-    img.save(buf, format="PNG")
-    return buf.getvalue()
 
 def classify_page(document_image, client, deployment_name, cfg):
     """
@@ -673,45 +728,6 @@ def classify_page(document_image, client, deployment_name, cfg):
         
         return default_main, default_sub, 0.1, f"Error in page classification: {str(e)}"
 
-def extract_specific_pages(input_path, pages):
-    """
-    Extract specific pages from a document with precise naming
-    """
-    try:
-        # Open the source document
-        doc = fitz.open(input_path)
-        output = fitz.open()
-        
-        # Extract specified pages (adjust page numbers to 0-indexed)
-        for page_num in pages:
-            output.insert_pdf(doc, from_page=page_num, to_page=page_num)
-        
-        # Get original filename (without extension)
-        original_filename = os.path.splitext(os.path.basename(input_path))[0]
-        
-        # Create page range string (e.g., "pages_5_7")
-        # Add 1 to page numbers for human-readable format
-        page_range_str = "_".join(map(str, [p+1 for p in pages]))
-        
-        # Generate output filename maintaining original filename
-        output_filename = f"{original_filename}_pages_{page_range_str}.pdf"
-        
-        # Get the output directory (same as input directory)
-        output_dir = os.path.dirname(input_path)
-        output_path = os.path.join(output_dir, output_filename)
-        
-        # Save the extracted pages
-        output.save(output_path)
-        output.close()
-        doc.close()
-        
-        return output_path
-    
-    except Exception as e:
-        logging.error(f"Error extracting specific pages: {e}")
-        logging.error(traceback.format_exc())
-        return None
-
 def process_documents():
     """
     Page-level document classification
@@ -732,6 +748,9 @@ def process_documents():
         # Set up directories
         input_dir = cfg['paths']['input_dir']
         output_dir = cfg['paths']['output_dir']
+        source_dir = os.path.join(output_dir, 'source')
+        classified_dir = os.path.join(output_dir, 'classified')
+        unclassified_dir = os.path.join(output_dir, 'unclassified')
         
         # Logging for processing session
         processing_timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -754,18 +773,34 @@ def process_documents():
             if not os.path.isfile(fpath) or fname.startswith('.'):
                 continue
 
+            # Determine file type
+            file_type = os.path.splitext(fname)[1].lower()
+            
+            # Skip non-processable file types
+            if file_type not in ['.pdf', '.jpg', '.jpeg', '.png', '.docx']:
+                logging.warning(f"Unsupported file type: {fname}")
+                continue
+
             # Count total documents
             stats['total_documents'] += 1
 
             try:
-                # Open PDF to get page count
-                doc = fitz.open(fpath)
-                total_pages = len(doc)
+                # Open PDF to get page count (for PDFs)
+                if file_type == '.pdf':
+                    doc = fitz.open(fpath)
+                    total_pages = len(doc)
+                    doc.close()
+                else:
+                    total_pages = 1  # For non-PDF files
+
                 stats['total_pages'] += total_pages
-                doc.close()
+
+                # Copy original document to source directory
+                shutil.copy(fpath, os.path.join(source_dir, fname))
 
                 # Page-level classification
                 classified_pages_by_category = {}
+                unclassified_pages = []
 
                 for page_num in range(total_pages):
                     # Extract page image
@@ -779,15 +814,6 @@ def process_documents():
                         cfg
                     )
 
-                    # Track page classification
-                    page_info = {
-                        'page_number': page_num,
-                        'main_category': main_cat,
-                        'subcategory': sub_cat,
-                        'confidence': confidence,
-                        'reasoning': reasoning
-                    }
-
                     # Determine page destination
                     confidence_threshold = cfg['classification'].get('confidence_threshold', 0.5)
                     if confidence >= confidence_threshold:
@@ -799,6 +825,7 @@ def process_documents():
                         
                         stats['classified_pages'] += 1
                     else:
+                        unclassified_pages.append(page_num)
                         stats['unclassified_pages'] += 1
 
                     # Update page classification details
@@ -811,41 +838,52 @@ def process_documents():
                 for category, pages in classified_pages_by_category.items():
                     main_cat, sub_cat = category.split('|')
                     
-                    # Extract pages
-                    extracted_doc_path = extract_specific_pages(fpath, pages)
-                    
-                    if extracted_doc_path:
-                        # Move to classified directory
-                        dest_dir = os.path.join(output_dir, "classified", main_cat, sub_cat)
-                        os.makedirs(dest_dir, exist_ok=True)
-                        
-                        # Determine destination filename
-                        dest_filename = os.path.basename(extracted_doc_path)
-                        dest_path = os.path.join(dest_dir, dest_filename)
-                        
-                        # Move extracted document
-                        shutil.move(extracted_doc_path, dest_path)
+                    # Create classified directory
+                    cat_dest_dir = os.path.join(classified_dir, main_cat, sub_cat)
+                    os.makedirs(cat_dest_dir, exist_ok=True)
 
-                # Handle unclassified pages if any
-                unclassified_pages = [
-                    page_num for page_num in range(total_pages) 
-                    if all(page_num not in pages for pages in classified_pages_by_category.values())
-                ]
-                
-                if unclassified_pages:
-                    unclassified_doc_path = extract_specific_pages(fpath, unclassified_pages)
+                    # Create new PDF with classified pages
+                    doc = fitz.open(fpath)
+                    output = fitz.open()
                     
-                    if unclassified_doc_path:
-                        # Move to unclassified directory
-                        dest_dir = os.path.join(output_dir, "unclassified")
-                        os.makedirs(dest_dir, exist_ok=True)
-                        
-                        # Determine destination filename
-                        dest_filename = os.path.basename(unclassified_doc_path)
-                        dest_path = os.path.join(dest_dir, dest_filename)
-                        
-                        # Move unclassified document
-                        shutil.move(unclassified_doc_path, dest_path)
+                    # Extract specified pages
+                    for page_num in pages:
+                        output.insert_pdf(doc, from_page=page_num, to_page=page_num)
+                    
+                    # Generate output filename
+                    page_range_str = "_".join(map(str, [p+1 for p in pages]))
+                    output_filename = f"{os.path.splitext(fname)[0]}_pages_{page_range_str}.pdf"
+                    
+                    # Save classified pages PDF
+                    output_path = os.path.join(cat_dest_dir, output_filename)
+                    output.save(output_path)
+                    
+                    output.close()
+                    doc.close()
+
+                # Handle unclassified pages
+                if unclassified_pages:
+                    # Create unclassified directory
+                    os.makedirs(unclassified_dir, exist_ok=True)
+
+                    # Create new PDF with unclassified pages
+                    doc = fitz.open(fpath)
+                    output = fitz.open()
+                    
+                    # Extract unclassified pages
+                    for page_num in unclassified_pages:
+                        output.insert_pdf(doc, from_page=page_num, to_page=page_num)
+                    
+                    # Generate unclassified filename
+                    page_range_str = "_".join(map(str, [p+1 for p in unclassified_pages]))
+                    unclassified_filename = f"{os.path.splitext(fname)[0]}_unclassified_pages_{page_range_str}.pdf"
+                    
+                    # Save unclassified pages PDF
+                    unclassified_path = os.path.join(unclassified_dir, unclassified_filename)
+                    output.save(unclassified_path)
+                    
+                    output.close()
+                    doc.close()
 
             except Exception as e:
                 logging.error(f"Processing error for {fname}: {e}")
@@ -864,4 +902,3 @@ def process_documents():
 
 if __name__ == "__main__":
     process_documents()
-
