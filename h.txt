@@ -287,9 +287,10 @@ def _create_blank_image():
     img.save(buf, format="PNG")
     return buf.getvalue()
 
+
 def classify_document(document_image, client, deployment_name, cfg):
     """
-    Robust document classification method
+    Robust document classification method compatible with Azure GPT-4o
     """
     try:
         # Validate image input
@@ -320,17 +321,29 @@ def classify_document(document_image, client, deployment_name, cfg):
         If unsure, choose the most likely category with an appropriate confidence score.
         """
 
-        # Make API call
+        # ✅ Azure-compliant chat completion with image input
         response = client.chat.completions.create(
             model=deployment_name,
             messages=[
-                {"role": "system", "content": prompt},
-                {"role": "user", "content": [
-                    {
-                        "type": "image",
-                        "image_base64": base64_image
-                    }
-                ]}
+                {
+                    "role": "system",
+                    "content": prompt
+                },
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": "Please classify this document image."
+                        },
+                        {
+                            "type": "image_url",
+                            "image_url": {
+                                "url": f"data:image/png;base64,{base64_image}"
+                            }
+                        }
+                    ]
+                }
             ],
             response_format={"type": "json_object"}
         )
@@ -338,7 +351,6 @@ def classify_document(document_image, client, deployment_name, cfg):
         # Parse response
         result = json.loads(response.choices[0].message.content)
 
-        # Extract and validate classification
         main_category = result.get('main_category', 'unknown')
         subcategory = result.get('subcategory', 'unknown')
         confidence_score = float(result.get('confidence_score', 0.0))
@@ -347,17 +359,11 @@ def classify_document(document_image, client, deployment_name, cfg):
         # Validate categories
         if main_category not in cfg['categories']:
             main_category = list(cfg['categories'].keys())[0]
-        
-        if main_category != 'unknown' and subcategory not in cfg['categories'][main_category]:
+
+        if subcategory not in cfg['categories'].get(main_category, []):
             subcategory = cfg['categories'][main_category][0]
 
-        # Log classification result
-        logging.info(f"Classification Result:\n" + json.dumps({
-            'main_category': main_category,
-            'subcategory': subcategory,
-            'confidence_score': confidence_score,
-            'reasoning': reasoning
-        }, indent=2))
+        logging.info("Classification Result:\n" + json.dumps(result, indent=2))
 
         return main_category, subcategory, confidence_score, reasoning
 
@@ -365,11 +371,11 @@ def classify_document(document_image, client, deployment_name, cfg):
         logging.error(f"Classification error: {e}")
         logging.error(traceback.format_exc())
         
-        # Fallback classification
         default_main = list(cfg['categories'].keys())[0]
         default_sub = cfg['categories'][default_main][0]
         
         return default_main, default_sub, 0.1, f"Error in classification: {str(e)}"
+
 
 def process_documents():
     """
@@ -502,94 +508,4 @@ config.json
   }
 }
 
---
-updated code
-
-def classify_document(document_image, client, deployment_name, cfg):
-    """
-    Robust document classification method compatible with Azure GPT-4o
-    """
-    try:
-        # Validate image input
-        if not isinstance(document_image, bytes):
-            raise ValueError("Invalid image input type")
-
-        # Convert image to base64
-        base64_image = base64.b64encode(document_image).decode('utf-8')
-
-        # Prepare reference categories for prompt
-        categories_str = json.dumps(cfg['categories'], indent=2)
-
-        # Detailed classification prompt
-        prompt = f"""
-        Carefully analyze this document image and classify it into the most appropriate category.
-
-        Available Categories:
-        {categories_str}
-
-        Provide your classification in this JSON format:
-        {{
-            "main_category": "exact main category",
-            "subcategory": "exact subcategory",
-            "confidence_score": 0.0-1.0,
-            "reasoning": "brief explanation"
-        }}
-
-        If unsure, choose the most likely category with an appropriate confidence score.
-        """
-
-        # ✅ Azure-compliant chat completion with image input
-        response = client.chat.completions.create(
-            model=deployment_name,
-            messages=[
-                {
-                    "role": "system",
-                    "content": prompt
-                },
-                {
-                    "role": "user",
-                    "content": [
-                        {
-                            "type": "text",
-                            "text": "Please classify this document image."
-                        },
-                        {
-                            "type": "image_url",
-                            "image_url": {
-                                "url": f"data:image/png;base64,{base64_image}"
-                            }
-                        }
-                    ]
-                }
-            ],
-            response_format={"type": "json_object"}
-        )
-
-        # Parse response
-        result = json.loads(response.choices[0].message.content)
-
-        main_category = result.get('main_category', 'unknown')
-        subcategory = result.get('subcategory', 'unknown')
-        confidence_score = float(result.get('confidence_score', 0.0))
-        reasoning = result.get('reasoning', 'No reasoning provided')
-
-        # Validate categories
-        if main_category not in cfg['categories']:
-            main_category = list(cfg['categories'].keys())[0]
-
-        if subcategory not in cfg['categories'].get(main_category, []):
-            subcategory = cfg['categories'][main_category][0]
-
-        logging.info("Classification Result:\n" + json.dumps(result, indent=2))
-
-        return main_category, subcategory, confidence_score, reasoning
-
-    except Exception as e:
-        logging.error(f"Classification error: {e}")
-        logging.error(traceback.format_exc())
-        
-        default_main = list(cfg['categories'].keys())[0]
-        default_sub = cfg['categories'][default_main][0]
-        
-        return default_main, default_sub, 0.1, f"Error in classification: {str(e)}"
 
