@@ -1,150 +1,10 @@
-config
-
-{
-  "azure_openai": {
-    "api_key": "YOUR_AZURE_OPENAI_KEY",
-    "endpoint": "https://YOUR-RESOURCE-NAME.openai.azure.com/",
-    "deployment_name": "gpt-4o",
-    "api_version": "2024-05-01-preview"
-  },
-  "categories": {
-    "cms1500": ["cadwell", "rhymlink"],
-    "invoice": ["tesla", "amazon"],
-    "scheduling": ["email", "iomrequest"]
-  },
-  "paths": {
-    "reference_dir": "reference",
-    "input_dir": "input_docs",
-    "output_dir": "output"
-  }
-}
-
-----
-help
-
-import os
-import json
-import hashlib
-import logging
-from openai import AzureOpenAI
-
-# Configure logging
-logging.basicConfig(
-    level=logging.INFO, 
-    format='%(asctime)s - %(levelname)s: %(message)s',
-    filename='document_processing.log',
-    filemode='w'
-)
-
-def load_config(config_path="config.json"):
-    """
-    Load configuration from JSON file with error handling
-    """
-    try:
-        with open(config_path, "r") as f:
-            return json.load(f)
-    except FileNotFoundError:
-        logging.error(f"Config file not found: {config_path}")
-        raise
-    except json.JSONDecodeError:
-        logging.error(f"Invalid JSON in config file: {config_path}")
-        raise
-
-def compute_reference_hash(ref_dir):
-    """
-    Compute a hash of reference directory contents
-    """
-    hasher = hashlib.sha256()
-    
-    for root, _, files in os.walk(ref_dir):
-        for f in sorted(files):
-            path = os.path.join(root, f)
-            
-            # Update hash with file path and modification time
-            hasher.update(path.encode())
-            hasher.update(str(os.path.getmtime(path)).encode())
-            
-            # Include file contents for precise tracking
-            try:
-                with open(path, 'rb') as file:
-                    hasher.update(file.read())
-            except Exception as e:
-                logging.warning(f"Could not read file {path} for hashing: {e}")
-    
-    return hasher.hexdigest()
-
-def fine_tune_if_new_reference(cfg):
-    """
-    Check if reference data has changed
-    """
-    ref_dir = cfg["paths"]["reference_dir"]
-    hash_file = os.path.join(ref_dir, ".reference_hash")
-    
-    try:
-        # Compute current reference hash
-        hash_now = compute_reference_hash(ref_dir)
-        
-        # Check if hash file exists
-        if os.path.exists(hash_file):
-            with open(hash_file, 'r') as f:
-                last_hash = f.read().strip()
-        else:
-            last_hash = ''
-        
-        # Compare hashes
-        if hash_now != last_hash:
-            logging.info("🚀 New reference data detected")
-            
-            # Save new hash
-            with open(hash_file, 'w') as f:
-                f.write(hash_now)
-            
-            return True
-        
-        return False
-    
-    except Exception as e:
-        logging.error(f"Reference check error: {e}")
-        return False
-
-def get_azure_client(cfg):
-    """
-    Initialize Azure OpenAI client
-    """
-    try:
-        client = AzureOpenAI(
-            api_key=cfg["azure_openai"]["api_key"],
-            api_version=cfg["azure_openai"]["api_version"],
-            azure_endpoint=cfg["azure_openai"]["endpoint"]
-        )
-        return client, cfg["azure_openai"]["deployment_name"]
-    except Exception as e:
-        logging.error(f"Azure client initialization error: {e}")
-        raise
-
-def prepare_directories(cfg):
-    """
-    Prepare necessary directories for processing
-    """
-    # Ensure input and output directories exist
-    directories = [
-        cfg['paths']['input_dir'],
-        cfg['paths']['output_dir'],
-        os.path.join(cfg['paths']['output_dir'], 'source'),
-        os.path.join(cfg['paths']['output_dir'], 'classified'),
-        os.path.join(cfg['paths']['output_dir'], 'unclassified')
-    ]
-    
-    for dir_path in directories:
-        os.makedirs(dir_path, exist_ok=True)
-
----¨
 import os
 import io
 import json
 import base64
 import shutil
 import logging
+import traceback
 import fitz  # PyMuPDF
 from PIL import Image
 
@@ -152,7 +12,8 @@ from helper import (
     load_config, 
     fine_tune_if_new_reference, 
     get_azure_client, 
-    prepare_directories
+    prepare_directories,
+    prepare_reference_metadata
 )
 
 # Configure logging
@@ -201,80 +62,96 @@ def extract_first_page_image(file_path):
 
 def classify_document(document_image, client, deployment_name, cfg):
     """
-    GPT-4o based document classification
+    Dynamic reference-based document classification
     """
+    # Prepare reference metadata for prompt
+    ref_dir = cfg['paths']['reference_dir']
+    reference_metadata = prepare_reference_metadata(ref_dir)
+    
     # Convert image to base64
     base64_image = base64.b64encode(document_image).decode('utf-8')
     
-    # Prepare reference categories for prompt
-    categories_str = ", ".join([
-        f"{main_cat}: {', '.join(subcats)}" 
+    # Construct detailed category description
+    categories_description = "\n".join([
+        f"{main_cat}: " + ", ".join(subcats) + 
+        f" (Total Reference Documents: {sum(subcat['document_count'] for subcat in reference_metadata[main_cat].values())}"
         for main_cat, subcats in cfg['categories'].items()
     ])
 
-    # Detailed classification prompt
+    # Comprehensive classification prompt
     prompt = f"""
-    You are an advanced document classifier. 
-    Carefully analyze the document and classify it into the most appropriate category.
+    You are an advanced document classification system.
 
-    Available Categories:
-    {categories_str}
+    REFERENCE DOCUMENT OVERVIEW:
+    {categories_description}
 
-    Provide your classification in the following JSON format:
+    CLASSIFICATION GUIDELINES:
+    1. Carefully analyze the document's first page
+    2. Match to the most appropriate main category and subcategory
+    3. Provide a confidence score reflecting your certainty
+
+    REQUIRED RESPONSE FORMAT:
     {{
-        "main_category": "<main_category>",
-        "subcategory": "<subcategory>",
-        "confidence_score": <confidence_score_between_0_and_1>,
-        "reasoning": "<brief explanation of classification>"
+        "main_category": "Exact main category",
+        "subcategory": "Exact subcategory",
+        "confidence_score": 0.0-1.0,
+        "reasoning": "Brief classification explanation"
     }}
 
-    If you are unsure or cannot confidently classify the document, 
-    return "unknown" for both category and subcategory with a low confidence score.
+    Analyze the document and classify precisely based on the available reference documents.
     """
 
     try:
+        # Make API call
         response = client.chat.completions.create(
             model=deployment_name,
-            response_format={"type": "json_object"},
             messages=[
                 {"role": "system", "content": prompt},
                 {"role": "user", "content": [
                     {
-                        "type": "image",
+                        "type": "image", 
                         "image_base64": base64_image
                     }
                 ]}
-            ]
+            ],
+            response_format={"type": "json_object"}
         )
-        
-        # Parse the response
+
+        # Parse response
         result = json.loads(response.choices[0].message.content)
-        
+
         # Extract classification details
         main_category = result.get('main_category', 'unknown')
         subcategory = result.get('subcategory', 'unknown')
-        confidence_score = result.get('confidence_score', 0)
-        reasoning = result.get('reasoning', '')
-        
+        confidence_score = float(result.get('confidence_score', 0.0))
+        reasoning = result.get('reasoning', 'No reasoning provided')
+
         # Validate categories
         if main_category not in cfg['categories']:
-            main_category = 'unknown'
-        elif subcategory not in cfg['categories'].get(main_category, []):
-            subcategory = 'unknown'
+            main_category = list(cfg['categories'].keys())[0]
         
-        # Log detailed classification
-        logging.info(f"Classification Result: {json.dumps({
+        if main_category != 'unknown' and subcategory not in cfg['categories'][main_category]:
+            subcategory = cfg['categories'][main_category][0]
+
+        # Log classification details
+        logging.info(f"Classification Result:\n" + json.dumps({
             'main_category': main_category,
             'subcategory': subcategory,
             'confidence_score': confidence_score,
             'reasoning': reasoning
-        }, indent=2)}")
-        
+        }, indent=2))
+
         return main_category, subcategory, confidence_score, reasoning
-    
+
     except Exception as e:
-        logging.error(f"Classification error: {e}")
-        return "unknown", "unknown", 0, "Error in classification"
+        logging.error(f"Classification Error: {e}")
+        logging.error(traceback.format_exc())
+        
+        # Fallback classification
+        default_main = list(cfg['categories'].keys())[0]
+        default_sub = cfg['categories'][default_main][0]
+        
+        return default_main, default_sub, 0.1, f"Fallback due to error: {str(e)}"
 
 def process_documents():
     """
@@ -286,7 +163,7 @@ def process_documents():
     # Prepare directories
     prepare_directories(cfg)
     
-    # Fine-tuning trigger
+    # Check for reference changes
     fine_tune_if_new_reference(cfg)
     
     # Initialize Azure client
@@ -296,53 +173,262 @@ def process_documents():
     input_dir = cfg['paths']['input_dir']
     output_dir = cfg['paths']['output_dir']
     
+    # Processing statistics
+    stats = {
+        'total_documents': 0,
+        'classified_documents': 0,
+        'unclassified_documents': 0,
+        'category_breakdown': {}
+    }
+
     # Process each document
     for fname in os.listdir(input_dir):
         fpath = os.path.join(input_dir, fname)
         
-        # Skip directories
-        if not os.path.isfile(fpath):
+        # Skip directories and hidden files
+        if not os.path.isfile(fpath) or fname.startswith('.'):
             continue
-        
-        # Extract first page image
-        document_image = extract_first_page_image(fpath)
-        
-        # Classify document
-        main_cat, sub_cat, confidence_score, reasoning = classify_document(
-            document_image, 
-            client, 
-            deployment,
-            cfg
-        )
-        
-        # Determine destination
-        if main_cat == "unknown":
-            dest_dir = os.path.join(output_dir, "unclassified")
-        else:
-            dest_dir = os.path.join(output_dir, "classified", main_cat, sub_cat)
-        
-        # Create destination directory
-        os.makedirs(dest_dir, exist_ok=True)
-        
-        # Copy document
-        dest_path = os.path.join(dest_dir, fname)
-        shutil.copy(fpath, dest_path)
-        
-        # Create metadata file
-        metadata_path = os.path.join(dest_dir, f"{os.path.splitext(fname)[0]}_metadata.json")
-        with open(metadata_path, 'w') as metadata_file:
-            json.dump({
-                "filename": fname,
-                "main_category": main_cat,
-                "subcategory": sub_cat,
-                "confidence_score": confidence_score,
-                "reasoning": reasoning
-            }, metadata_file, indent=2)
-        
-        # Log classification
-        logging.info(f"Classified {fname}: {main_cat} / {sub_cat}")
+
+        # Increment total documents
+        stats['total_documents'] += 1
+
+        try:
+            # Extract first page image
+            document_image = extract_first_page_image(fpath)
+            
+            # Classify document
+            main_cat, sub_cat, confidence_score, reasoning = classify_document(
+                document_image, 
+                client, 
+                deployment,
+                cfg
+            )
+
+            # Determine destination based on confidence
+            confidence_threshold = cfg['classification'].get('confidence_threshold', 0.5)
+            if confidence_score >= confidence_threshold:
+                dest_dir = os.path.join(output_dir, "classified", main_cat, sub_cat)
+                stats['classified_documents'] += 1
+                
+                # Update category breakdown
+                if main_cat not in stats['category_breakdown']:
+                    stats['category_breakdown'][main_cat] = {}
+                stats['category_breakdown'][main_cat][sub_cat] = \
+                    stats['category_breakdown'][main_cat].get(sub_cat, 0) + 1
+            else:
+                dest_dir = os.path.join(output_dir, "unclassified")
+                stats['unclassified_documents'] += 1
+
+            # Create destination directory
+            os.makedirs(dest_dir, exist_ok=True)
+            
+            # Copy document
+            dest_path = os.path.join(dest_dir, fname)
+            shutil.copy(fpath, dest_path)
+            
+            # Create metadata
+            metadata_path = os.path.join(dest_dir, f"{os.path.splitext(fname)[0]}_metadata.json")
+            with open(metadata_path, 'w') as metadata_file:
+                json.dump({
+                    "filename": fname,
+                    "main_category": main_cat,
+                    "subcategory": sub_cat,
+                    "confidence_score": confidence_score,
+                    "reasoning": reasoning
+                }, metadata_file, indent=2)
+
+        except Exception as e:
+            logging.error(f"Error processing {fname}: {e}")
+            logging.error(traceback.format_exc())
+            stats['unclassified_documents'] += 1
+
+    # Log processing summary
+    logging.info("\n--- Processing Summary ---")
+    logging.info(f"Total Documents: {stats['total_documents']}")
+    logging.info(f"Classified Documents: {stats['classified_documents']}")
+    logging.info(f"Unclassified Documents: {stats['unclassified_documents']}")
+    logging.info("Category Breakdown:")
+    logging.info(json.dumps(stats['category_breakdown'], indent=2))
 
     print("\n✅ Document Processing Complete")
 
 if __name__ == "__main__":
     process_documents()
+
+
+-----
+import os
+import json
+import hashlib
+import logging
+import shutil
+from openai import AzureOpenAI
+
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO, 
+    format='%(asctime)s - %(levelname)s: %(message)s',
+    filename='document_processing.log',
+    filemode='w'
+)
+
+def load_config(config_path="config.json"):
+    """
+    Load configuration from JSON file
+    """
+    try:
+        with open(config_path, "r") as f:
+            return json.load(f)
+    except FileNotFoundError:
+        logging.error(f"Config file not found: {config_path}")
+        raise
+    except json.JSONDecodeError:
+        logging.error(f"Invalid JSON in config file: {config_path}")
+        raise
+
+def compute_reference_hash(ref_dir):
+    """
+    Compute a comprehensive hash of reference directory contents
+    """
+    hasher = hashlib.sha256()
+    
+    # Ensure consistent sorting and hashing
+    for root, _, files in sorted(os.walk(ref_dir)):
+        for f in sorted(files):
+            path = os.path.join(root, f)
+            
+            # Include file path, modification time, and content
+            hasher.update(path.encode())
+            hasher.update(str(os.path.getmtime(path)).encode())
+            
+            try:
+                with open(path, 'rb') as file:
+                    hasher.update(file.read())
+            except Exception as e:
+                logging.warning(f"Could not read file {path} for hashing: {e}")
+    
+    return hasher.hexdigest()
+
+def prepare_reference_metadata(ref_dir):
+    """
+    Generate a structured metadata of reference documents
+    """
+    reference_metadata = {}
+    
+    for main_category in os.listdir(ref_dir):
+        main_path = os.path.join(ref_dir, main_category)
+        if not os.path.isdir(main_path):
+            continue
+        
+        reference_metadata[main_category] = {}
+        
+        for subcategory in os.listdir(main_path):
+            subcat_path = os.path.join(main_path, subcategory)
+            if not os.path.isdir(subcat_path):
+                continue
+            
+            # Count documents in each subcategory
+            doc_count = len([f for f in os.listdir(subcat_path) 
+                             if os.path.isfile(os.path.join(subcat_path, f))])
+            
+            reference_metadata[main_category][subcategory] = {
+                'document_count': doc_count,
+                'documents': [f for f in os.listdir(subcat_path) 
+                              if os.path.isfile(os.path.join(subcat_path, f))]
+            }
+    
+    return reference_metadata
+
+def fine_tune_if_new_reference(cfg):
+    """
+    Check if reference data has changed and log details
+    """
+    ref_dir = cfg["paths"]["reference_dir"]
+    hash_file = os.path.join(ref_dir, ".reference_hash")
+    
+    try:
+        # Compute current reference hash
+        hash_now = compute_reference_hash(ref_dir)
+        
+        # Check if hash file exists
+        if os.path.exists(hash_file):
+            with open(hash_file, 'r') as f:
+                last_hash = f.read().strip()
+        else:
+            last_hash = ''
+        
+        # Compare hashes
+        if hash_now != last_hash:
+            # Log detailed changes
+            current_metadata = prepare_reference_metadata(ref_dir)
+            
+            logging.info("🚀 New Reference Data Detected")
+            logging.info("Reference Document Metadata:")
+            logging.info(json.dumps(current_metadata, indent=2))
+            
+            # Save new hash
+            with open(hash_file, 'w') as f:
+                f.write(hash_now)
+            
+            return True
+        
+        return False
+    
+    except Exception as e:
+        logging.error(f"Reference check error: {e}")
+        return False
+
+def get_azure_client(cfg):
+    """
+    Initialize Azure OpenAI client
+    """
+    try:
+        client = AzureOpenAI(
+            api_key=cfg["azure_openai"]["api_key"],
+            api_version=cfg["azure_openai"]["api_version"],
+            azure_endpoint=cfg["azure_openai"]["endpoint"]
+        )
+        return client, cfg["azure_openai"]["deployment_name"]
+    except Exception as e:
+        logging.error(f"Azure client initialization error: {e}")
+        raise
+
+def prepare_directories(cfg):
+    """
+    Prepare necessary directories for processing
+    """
+    # Ensure input, output, and reference directories exist
+    directories = [
+        cfg['paths']['input_dir'],
+        cfg['paths']['output_dir'],
+        cfg['paths']['reference_dir'],
+        os.path.join(cfg['paths']['output_dir'], 'source'),
+        os.path.join(cfg['paths']['output_dir'], 'classified'),
+        os.path.join(cfg['paths']['output_dir'], 'unclassified')
+    ]
+    
+    for dir_path in directories:
+        os.makedirs(dir_path, exist_ok=True)
+
+----
+{
+  "azure_openai": {
+    "api_key": "YOUR_AZURE_OPENAI_KEY",
+    "endpoint": "https://YOUR-RESOURCE-NAME.openai.azure.com/",
+    "deployment_name": "gpt-4o",
+    "api_version": "2024-05-01-preview"
+  },
+  "categories": {
+    "cms1500": ["cadwell", "rhymlink"],
+    "invoice": ["tesla", "amazon"],
+    "scheduling": ["email", "iomrequest"]
+  },
+  "paths": {
+    "reference_dir": "reference",
+    "input_dir": "input_docs",
+    "output_dir": "output"
+  },
+  "classification": {
+    "confidence_threshold": 0.5
+  }
+}
