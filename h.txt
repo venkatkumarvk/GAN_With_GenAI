@@ -1,6 +1,6 @@
-config.json
+config
 
-  {
+{
   "azure_openai": {
     "api_key": "YOUR_AZURE_OPENAI_KEY",
     "endpoint": "https://YOUR-RESOURCE-NAME.openai.azure.com/",
@@ -8,25 +8,21 @@ config.json
     "api_version": "2024-05-01-preview"
   },
   "categories": {
-    "cms1500": ["cadwell", "rhymlink", "medical"],
-    "invoice": ["tesla", "amazon", "utility"],
-    "scheduling": ["email", "iomrequest", "appointment"],
-    "contract": ["employment", "service", "nda"],
-    "financial": ["bank_statement", "tax_document", "invoice"]
+    "cms1500": ["cadwell", "rhymlink"],
+    "invoice": ["tesla", "amazon"],
+    "scheduling": ["email", "iomrequest"]
   },
   "paths": {
     "reference_dir": "reference",
     "input_dir": "input_docs",
     "output_dir": "output"
-  },
-  "last_reference_snapshot": ""
+  }
 }
 
------------------------
+----
+help
 
-  helper.py
-
-  import os
+import os
 import json
 import hashlib
 import logging
@@ -42,7 +38,7 @@ logging.basicConfig(
 
 def load_config(config_path="config.json"):
     """
-    Load configuration from JSON file
+    Load configuration from JSON file with error handling
     """
     try:
         with open(config_path, "r") as f:
@@ -77,71 +73,87 @@ def compute_reference_hash(ref_dir):
     
     return hasher.hexdigest()
 
-def fine_tune_if_new_reference():
+def fine_tune_if_new_reference(cfg):
     """
     Check if reference data has changed
     """
-    cfg = load_config()
     ref_dir = cfg["paths"]["reference_dir"]
-    
-    # Ensure reference directory exists
-    os.makedirs(ref_dir, exist_ok=True)
-    
-    hash_now = compute_reference_hash(ref_dir)
-
-    # Compare current hash with last snapshot
-    if hash_now == cfg.get("last_reference_snapshot", ""):
-        logging.info("✅ No new references. Skipping fine-tuning.")
-        return False
-
-    logging.info("🚀 New reference data detected — preparing fine-tune dataset...")
+    hash_file = os.path.join(ref_dir, ".reference_hash")
     
     try:
-        # Simulate fine-tuning (replace with actual fine-tuning logic if needed)
-        fine_tuned_model = f"ft:gpt-4o:doc_classifier"
+        # Compute current reference hash
+        hash_now = compute_reference_hash(ref_dir)
         
-        # Update config
-        cfg["azure_openai"]["deployment_name"] = fine_tuned_model
-        cfg["last_reference_snapshot"] = hash_now
+        # Check if hash file exists
+        if os.path.exists(hash_file):
+            with open(hash_file, 'r') as f:
+                last_hash = f.read().strip()
+        else:
+            last_hash = ''
         
-        with open("config.json", "w") as f:
-            json.dump(cfg, f, indent=2)
+        # Compare hashes
+        if hash_now != last_hash:
+            logging.info("🚀 New reference data detected")
+            
+            # Save new hash
+            with open(hash_file, 'w') as f:
+                f.write(hash_now)
+            
+            return True
         
-        logging.info(f"✅ Fine-tune complete. Using model: {fine_tuned_model}")
-        return True
+        return False
     
     except Exception as e:
-        logging.error(f"Fine-tuning failed: {e}")
+        logging.error(f"Reference check error: {e}")
         return False
 
-def get_azure_client():
+def get_azure_client(cfg):
     """
     Initialize Azure OpenAI client
     """
-    cfg = load_config()
     try:
         client = AzureOpenAI(
             api_key=cfg["azure_openai"]["api_key"],
             api_version=cfg["azure_openai"]["api_version"],
-            azure_endpoint=cfg["azure_openai"]["endpoint"],
+            azure_endpoint=cfg["azure_openai"]["endpoint"]
         )
         return client, cfg["azure_openai"]["deployment_name"]
     except Exception as e:
-        logging.error(f"Failed to initialize Azure client: {e}")
+        logging.error(f"Azure client initialization error: {e}")
         raise
 
+def prepare_directories(cfg):
+    """
+    Prepare necessary directories for processing
+    """
+    # Ensure input and output directories exist
+    directories = [
+        cfg['paths']['input_dir'],
+        cfg['paths']['output_dir'],
+        os.path.join(cfg['paths']['output_dir'], 'source'),
+        os.path.join(cfg['paths']['output_dir'], 'classified'),
+        os.path.join(cfg['paths']['output_dir'], 'unclassified')
+    ]
+    
+    for dir_path in directories:
+        os.makedirs(dir_path, exist_ok=True)
 
-----------------------
-
-main.py
-
+---¨
 import os
+import io
+import json
+import base64
 import shutil
-import fitz  # PyMuPDF
 import logging
+import fitz  # PyMuPDF
 from PIL import Image
-from io import BytesIO
-from helper import load_config, fine_tune_if_new_reference, get_azure_client
+
+from helper import (
+    load_config, 
+    fine_tune_if_new_reference, 
+    get_azure_client, 
+    prepare_directories
+)
 
 # Configure logging
 logging.basicConfig(
@@ -151,204 +163,186 @@ logging.basicConfig(
     filemode='w'
 )
 
-def extract_page_for_classification(file_path):
+def extract_first_page_image(file_path):
     """
-    Automatically extract the most suitable page for classification
+    Extract first page image from various document types
     """
-    ext = os.path.splitext(file_path)[1].lower()
-    
     try:
-        if ext == '.pdf':
-            # Open PDF and determine best page for classification
+        # PDF handling
+        if file_path.lower().endswith('.pdf'):
             doc = fitz.open(file_path)
-            
-            # If document has fewer pages, use first page
-            # If 3+ pages, use middle page
-            if len(doc) <= 2:
-                page_num = 0
-            else:
-                page_num = len(doc) // 2  # Middle page
-            
-            page = doc.load_page(page_num)
+            page = doc.load_page(0)
             pix = page.get_pixmap()
             img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
-            
-            # Extract the specific page as a new PDF
-            pdf_writer = fitz.open()
-            pdf_writer.insert_pdf(doc, from_page=page_num, to_page=page_num)
-            
             doc.close()
-            return img.tobytes(), pdf_writer, page_num
+        
+        # Image handling
+        elif file_path.lower().endswith(('.jpg', '.jpeg', '.png')):
+            img = Image.open(file_path)
         
         else:
-            raise ValueError(f"Unsupported file type: {ext}")
+            raise ValueError(f"Unsupported file type: {file_path}")
+        
+        # Resize image to standard size
+        img = img.resize((800, 600), Image.LANCZOS)
+        
+        # Convert to bytes
+        buf = io.BytesIO()
+        img.save(buf, format="PNG")
+        return buf.getvalue()
     
     except Exception as e:
-        logging.error(f"Error extracting page for {file_path}: {e}")
-        # Fallback to a blank image
-        img = Image.new('RGB', (800, 200), color='white')
-        return img.tobytes(), None, 0
+        logging.error(f"Error extracting image from {file_path}: {e}")
+        # Fallback blank image
+        img = Image.new('RGB', (800, 600), color='white')
+        buf = io.BytesIO()
+        img.save(buf, format="PNG")
+        return buf.getvalue()
 
-def classify_page(image_bytes, client, deployment_name, cfg):
+def classify_document(document_image, client, deployment_name, cfg):
     """
-    Automatically classify page with predefined categories
+    GPT-4o based document classification
     """
+    # Convert image to base64
+    base64_image = base64.b64encode(document_image).decode('utf-8')
+    
+    # Prepare reference categories for prompt
+    categories_str = ", ".join([
+        f"{main_cat}: {', '.join(subcats)}" 
+        for main_cat, subcats in cfg['categories'].items()
+    ])
+
+    # Detailed classification prompt
     prompt = f"""
     You are an advanced document classifier. 
-    Classify this document page into one main category and one subcategory.
-    Possible categories: {list(cfg['categories'].keys())}.
-    Subcategories: {cfg['categories']}.
-    If unsure, choose the most likely category.
-    Respond strictly in format: <main_category>|<sub_category>
+    Carefully analyze the document and classify it into the most appropriate category.
+
+    Available Categories:
+    {categories_str}
+
+    Provide your classification in the following JSON format:
+    {{
+        "main_category": "<main_category>",
+        "subcategory": "<subcategory>",
+        "confidence_score": <confidence_score_between_0_and_1>,
+        "reasoning": "<brief explanation of classification>"
+    }}
+
+    If you are unsure or cannot confidently classify the document, 
+    return "unknown" for both category and subcategory with a low confidence score.
     """
+
     try:
         response = client.chat.completions.create(
             model=deployment_name,
+            response_format={"type": "json_object"},
             messages=[
                 {"role": "system", "content": prompt},
-                {"role": "user", "content": [{"type": "image", "image_data": image_bytes}]}
+                {"role": "user", "content": [
+                    {
+                        "type": "image",
+                        "image_base64": base64_image
+                    }
+                ]}
             ]
         )
-        result = response.choices[0].message.content.strip()
-        main_cat, sub_cat = result.split("|")
-        return main_cat.strip(), sub_cat.strip()
+        
+        # Parse the response
+        result = json.loads(response.choices[0].message.content)
+        
+        # Extract classification details
+        main_category = result.get('main_category', 'unknown')
+        subcategory = result.get('subcategory', 'unknown')
+        confidence_score = result.get('confidence_score', 0)
+        reasoning = result.get('reasoning', '')
+        
+        # Validate categories
+        if main_category not in cfg['categories']:
+            main_category = 'unknown'
+        elif subcategory not in cfg['categories'].get(main_category, []):
+            subcategory = 'unknown'
+        
+        # Log detailed classification
+        logging.info(f"Classification Result: {json.dumps({
+            'main_category': main_category,
+            'subcategory': subcategory,
+            'confidence_score': confidence_score,
+            'reasoning': reasoning
+        }, indent=2)}")
+        
+        return main_category, subcategory, confidence_score, reasoning
+    
     except Exception as e:
         logging.error(f"Classification error: {e}")
-        return "unknown", "unknown"
+        return "unknown", "unknown", 0, "Error in classification"
 
 def process_documents():
     """
-    Fully automated document processing and classification
+    Automated document classification
     """
-    # Automatic fine-tuning trigger
-    fine_tune_if_new_reference()
-    
-    # Load configuration and initialize Azure client
+    # Load configuration
     cfg = load_config()
-    client, deployment = get_azure_client()
-
-    # Automatic directory setup
-    input_dir = cfg["paths"]["input_dir"]
-    output_dir = cfg["paths"]["output_dir"]
-
-    # Create necessary directories
-    src_dir = os.path.join(output_dir, "source")
-    classified_dir = os.path.join(output_dir, "classified")
-    unclassified_dir = os.path.join(output_dir, "unclassified")
     
-    os.makedirs(src_dir, exist_ok=True)
-    os.makedirs(classified_dir, exist_ok=True)
-    os.makedirs(unclassified_dir, exist_ok=True)
-
-    # Tracking statistics
-    processing_stats = {
-        'total_files': 0,
-        'processed_files': 0,
-        'unclassified_files': 0,
-        'classification_breakdown': {}
-    }
-
-    # Automated processing of all files
+    # Prepare directories
+    prepare_directories(cfg)
+    
+    # Fine-tuning trigger
+    fine_tune_if_new_reference(cfg)
+    
+    # Initialize Azure client
+    client, deployment = get_azure_client(cfg)
+    
+    # Set up directories
+    input_dir = cfg['paths']['input_dir']
+    output_dir = cfg['paths']['output_dir']
+    
+    # Process each document
     for fname in os.listdir(input_dir):
         fpath = os.path.join(input_dir, fname)
         
-        # Skip directories and hidden files
-        if not os.path.isfile(fpath) or fname.startswith('.'):
+        # Skip directories
+        if not os.path.isfile(fpath):
             continue
-
-        # Increment total files processed
-        processing_stats['total_files'] += 1
-        logging.info(f"Processing: {fname}")
-
-        # Supported file extensions
-        ext = fname.lower().split(".")[-1]
-        supported_exts = ['pdf']
         
-        if ext not in supported_exts:
-            logging.warning(f"Unsupported file type: {fname}")
-            continue
+        # Extract first page image
+        document_image = extract_first_page_image(fpath)
+        
+        # Classify document
+        main_cat, sub_cat, confidence_score, reasoning = classify_document(
+            document_image, 
+            client, 
+            deployment,
+            cfg
+        )
+        
+        # Determine destination
+        if main_cat == "unknown":
+            dest_dir = os.path.join(output_dir, "unclassified")
+        else:
+            dest_dir = os.path.join(output_dir, "classified", main_cat, sub_cat)
+        
+        # Create destination directory
+        os.makedirs(dest_dir, exist_ok=True)
+        
+        # Copy document
+        dest_path = os.path.join(dest_dir, fname)
+        shutil.copy(fpath, dest_path)
+        
+        # Create metadata file
+        metadata_path = os.path.join(dest_dir, f"{os.path.splitext(fname)[0]}_metadata.json")
+        with open(metadata_path, 'w') as metadata_file:
+            json.dump({
+                "filename": fname,
+                "main_category": main_cat,
+                "subcategory": sub_cat,
+                "confidence_score": confidence_score,
+                "reasoning": reasoning
+            }, metadata_file, indent=2)
+        
+        # Log classification
+        logging.info(f"Classified {fname}: {main_cat} / {sub_cat}")
 
-        try:
-            # Preserve original file in source directory
-            shutil.copy(fpath, os.path.join(src_dir, fname))
-
-            # Automatically extract page for classification
-            image_bytes, extracted_pdf, page_num = extract_page_for_classification(fpath)
-
-            # Automatic classification
-            main_cat, sub_cat = classify_page(image_bytes, client, deployment, cfg)
-            
-            # Track classification
-            if main_cat not in processing_stats['classification_breakdown']:
-                processing_stats['classification_breakdown'][main_cat] = {}
-            processing_stats['classification_breakdown'][main_cat][sub_cat] = \
-                processing_stats['classification_breakdown'][main_cat].get(sub_cat, 0) + 1
-
-            # Determine destination based on classification
-            if main_cat == 'unknown':
-                # Unclassified handling
-                dest_dir = unclassified_dir
-                processing_stats['unclassified_files'] += 1
-            else:
-                # Classified document handling
-                dest_dir = os.path.join(classified_dir, main_cat, sub_cat)
-                processing_stats['processed_files'] += 1
-
-            # Create destination directory
-            os.makedirs(dest_dir, exist_ok=True)
-
-            # Save classified document
-            if ext == 'pdf' and extracted_pdf:
-                # For PDF, save extracted page
-                page_fname = f"{os.path.splitext(fname)[0]}_page{page_num+1}.pdf"
-                dest_path = os.path.join(dest_dir, page_fname)
-                extracted_pdf.save(dest_path)
-                extracted_pdf.close()
-
-        except Exception as e:
-            logging.error(f"Error processing {fname}: {e}")
-            continue
-
-    # Log processing summary
-    logging.info("\n--- Processing Summary ---")
-    logging.info(f"Total Files: {processing_stats['total_files']}")
-    logging.info(f"Processed Files: {processing_stats['processed_files']}")
-    logging.info(f"Unclassified Files: {processing_stats['unclassified_files']}")
-    logging.info("Classification Breakdown:")
-    for main_cat, subcats in processing_stats['classification_breakdown'].items():
-        logging.info(f"  {main_cat}:")
-        for subcat, count in subcats.items():
-            logging.info(f"    {subcat}: {count}")
-
-    print("\n✅ Automated Document Processing Complete")
+    print("\n✅ Document Processing Complete")
 
 if __name__ == "__main__":
     process_documents()
-```
-
-### 4. Reference Folder Structure
-```
-reference/
-├── cms1500/
-│   ├── cadwell/
-│   │   ├── medical_form1.pdf
-│   │   └── medical_form2.pdf
-│   └── rhymlink/
-│       ├── insurance_doc1.pdf
-│       └── insurance_doc2.pdf
-│
-├── invoice/
-│   ├── tesla/
-│   │   ├── invoice1.pdf
-│   │   └── invoice2.pdf
-│   └── amazon/
-│       ├── order_invoice1.pdf
-│       └── order_invoice2.pdf
-│
-└── scheduling/
-    ├── email/
-    │   ├── appointment_request1.pdf
-    │   └── appointment_request2.pdf
-    └── iomrequest/
-        ├── scheduling_request1.pdf
-        └── scheduling_request2.pdf
