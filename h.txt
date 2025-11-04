@@ -508,4 +508,360 @@ config.json
   }
 }
 
+--------------
+updated main.py
+
+import os
+import io
+import json
+import base64
+import shutil
+import logging
+import traceback
+import fitz  # PyMuPDF
+from PIL import Image
+from datetime import datetime
+
+from helper import (
+    load_config, 
+    fine_tune_if_new_reference, 
+    get_azure_client, 
+    prepare_directories,
+    prepare_reference_metadata
+)
+
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO, 
+    format='%(asctime)s - %(levelname)s: %(message)s',
+    filename='document_processing.log',
+    filemode='a'  # Append mode to keep historical logs
+)
+
+def extract_page_image(file_path, page_number):
+    """
+    Extract image for a specific page from various document types
+    """
+    try:
+        # PDF handling
+        if file_path.lower().endswith('.pdf'):
+            doc = fitz.open(file_path)
+            
+            # Validate page number
+            if page_number < 0 or page_number >= len(doc):
+                logging.error(f"Invalid page number {page_number} for {file_path}")
+                return _create_blank_image()
+            
+            page = doc.load_page(page_number)
+            pix = page.get_pixmap()
+            
+            # Validate pixmap
+            if not pix or pix.width <= 0 or pix.height <= 0:
+                logging.error(f"Invalid page {page_number} in {file_path}")
+                return _create_blank_image()
+            
+            img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
+            doc.close()
+        
+        # Image handling
+        elif file_path.lower().endswith(('.jpg', '.jpeg', '.png')):
+            img = Image.open(file_path)
+        
+        else:
+            logging.error(f"Unsupported file type: {file_path}")
+            return _create_blank_image()
+        
+        # Resize and convert to bytes
+        img = img.resize((800, 600), Image.LANCZOS)
+        buf = io.BytesIO()
+        img.save(buf, format="PNG")
+        return buf.getvalue()
+    
+    except Exception as e:
+        logging.error(f"Error extracting page {page_number} from {file_path}: {e}")
+        logging.error(traceback.format_exc())
+        return _create_blank_image()
+
+def _create_blank_image():
+    """
+    Create a blank white image for error cases
+    """
+    img = Image.new('RGB', (800, 600), color='white')
+    buf = io.BytesIO()
+    img.save(buf, format="PNG")
+    return buf.getvalue()
+
+def classify_page(document_image, client, deployment_name, cfg):
+    """
+    Page-level classification method
+    """
+    try:
+        # Validate image input
+        if not isinstance(document_image, bytes):
+            raise ValueError("Invalid image input type")
+
+        # Convert image to base64
+        base64_image = base64.b64encode(document_image).decode('utf-8')
+
+        # Prepare reference categories for prompt
+        categories_str = json.dumps(cfg['categories'], indent=2)
+
+        # Detailed page classification prompt
+        prompt = f"""
+        Carefully analyze this single page image and classify it into the most precise category.
+
+        Available Categories:
+        {categories_str}
+
+        Provide your classification in this JSON format:
+        {{
+            "main_category": "exact main category",
+            "subcategory": "exact subcategory",
+            "confidence_score": 0.0-1.0,
+            "reasoning": "brief explanation of page classification"
+        }}
+
+        Focus on the content of this specific page. If the page doesn't clearly belong to a category, 
+        choose the most probable category or return 'unknown'.
+        """
+
+        # Make API call
+        response = client.chat.completions.create(
+            model=deployment_name,
+            messages=[
+                {"role": "system", "content": prompt},
+                {"role": "user", "content": [
+                    {
+                        "type": "text",
+                        "text": "Please classify this page."
+                    },
+                    {
+                        "type": "image_url",
+                        "image_url": {
+                            "url": f"data:image/png;base64,{base64_image}"
+                        }
+                    }
+                ]}
+            ],
+            response_format={"type": "json_object"}
+        )
+
+        # Parse response
+        result = json.loads(response.choices[0].message.content)
+
+        # Extract and validate classification
+        main_category = result.get('main_category', 'unknown')
+        subcategory = result.get('subcategory', 'unknown')
+        confidence_score = float(result.get('confidence_score', 0.0))
+        reasoning = result.get('reasoning', 'No reasoning provided')
+
+        # Validate categories
+        if main_category not in cfg['categories']:
+            main_category = list(cfg['categories'].keys())[0]
+
+        if subcategory not in cfg['categories'].get(main_category, []):
+            subcategory = cfg['categories'][main_category][0]
+
+        return main_category, subcategory, confidence_score, reasoning
+
+    except Exception as e:
+        logging.error(f"Page classification error: {e}")
+        logging.error(traceback.format_exc())
+        
+        default_main = list(cfg['categories'].keys())[0]
+        default_sub = cfg['categories'][default_main][0]
+        
+        return default_main, default_sub, 0.1, f"Error in page classification: {str(e)}"
+
+def extract_specific_pages(input_path, pages):
+    """
+    Extract specific pages from a document with precise naming
+    """
+    try:
+        # Open the source document
+        doc = fitz.open(input_path)
+        output = fitz.open()
+        
+        # Extract specified pages (adjust page numbers to 0-indexed)
+        for page_num in pages:
+            output.insert_pdf(doc, from_page=page_num, to_page=page_num)
+        
+        # Get original filename (without extension)
+        original_filename = os.path.splitext(os.path.basename(input_path))[0]
+        
+        # Create page range string (e.g., "pages_5_7")
+        # Add 1 to page numbers for human-readable format
+        page_range_str = "_".join(map(str, [p+1 for p in pages]))
+        
+        # Generate output filename maintaining original filename
+        output_filename = f"{original_filename}_pages_{page_range_str}.pdf"
+        
+        # Get the output directory (same as input directory)
+        output_dir = os.path.dirname(input_path)
+        output_path = os.path.join(output_dir, output_filename)
+        
+        # Save the extracted pages
+        output.save(output_path)
+        output.close()
+        doc.close()
+        
+        return output_path
+    
+    except Exception as e:
+        logging.error(f"Error extracting specific pages: {e}")
+        logging.error(traceback.format_exc())
+        return None
+
+def process_documents():
+    """
+    Page-level document classification
+    """
+    try:
+        # Load configuration
+        cfg = load_config()
+        
+        # Prepare directories
+        prepare_directories(cfg)
+        
+        # Check for reference changes
+        fine_tune_if_new_reference(cfg)
+        
+        # Initialize Azure client
+        client, deployment = get_azure_client(cfg)
+        
+        # Set up directories
+        input_dir = cfg['paths']['input_dir']
+        output_dir = cfg['paths']['output_dir']
+        
+        # Logging for processing session
+        processing_timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        logging.info(f"\n\n--- Processing Session Started: {processing_timestamp} ---")
+        
+        # Processing statistics
+        stats = {
+            'total_documents': 0,
+            'total_pages': 0,
+            'classified_pages': 0,
+            'unclassified_pages': 0,
+            'page_classification_details': {}
+        }
+
+        # Process each document
+        for fname in os.listdir(input_dir):
+            fpath = os.path.join(input_dir, fname)
+            
+            # Skip directories and hidden files
+            if not os.path.isfile(fpath) or fname.startswith('.'):
+                continue
+
+            # Count total documents
+            stats['total_documents'] += 1
+
+            try:
+                # Open PDF to get page count
+                doc = fitz.open(fpath)
+                total_pages = len(doc)
+                stats['total_pages'] += total_pages
+                doc.close()
+
+                # Page-level classification
+                classified_pages_by_category = {}
+
+                for page_num in range(total_pages):
+                    # Extract page image
+                    page_image = extract_page_image(fpath, page_num)
+                    
+                    # Classify page
+                    main_cat, sub_cat, confidence, reasoning = classify_page(
+                        page_image, 
+                        client, 
+                        deployment,
+                        cfg
+                    )
+
+                    # Track page classification
+                    page_info = {
+                        'page_number': page_num,
+                        'main_category': main_cat,
+                        'subcategory': sub_cat,
+                        'confidence': confidence,
+                        'reasoning': reasoning
+                    }
+
+                    # Determine page destination
+                    confidence_threshold = cfg['classification'].get('confidence_threshold', 0.5)
+                    if confidence >= confidence_threshold:
+                        # Organize classified pages by category
+                        category_key = f"{main_cat}|{sub_cat}"
+                        if category_key not in classified_pages_by_category:
+                            classified_pages_by_category[category_key] = []
+                        classified_pages_by_category[category_key].append(page_num)
+                        
+                        stats['classified_pages'] += 1
+                    else:
+                        stats['unclassified_pages'] += 1
+
+                    # Update page classification details
+                    if main_cat not in stats['page_classification_details']:
+                        stats['page_classification_details'][main_cat] = {}
+                    stats['page_classification_details'][main_cat][sub_cat] = \
+                        stats['page_classification_details'][main_cat].get(sub_cat, 0) + 1
+
+                # Process classified pages by category
+                for category, pages in classified_pages_by_category.items():
+                    main_cat, sub_cat = category.split('|')
+                    
+                    # Extract pages
+                    extracted_doc_path = extract_specific_pages(fpath, pages)
+                    
+                    if extracted_doc_path:
+                        # Move to classified directory
+                        dest_dir = os.path.join(output_dir, "classified", main_cat, sub_cat)
+                        os.makedirs(dest_dir, exist_ok=True)
+                        
+                        # Determine destination filename
+                        dest_filename = os.path.basename(extracted_doc_path)
+                        dest_path = os.path.join(dest_dir, dest_filename)
+                        
+                        # Move extracted document
+                        shutil.move(extracted_doc_path, dest_path)
+
+                # Handle unclassified pages if any
+                unclassified_pages = [
+                    page_num for page_num in range(total_pages) 
+                    if all(page_num not in pages for pages in classified_pages_by_category.values())
+                ]
+                
+                if unclassified_pages:
+                    unclassified_doc_path = extract_specific_pages(fpath, unclassified_pages)
+                    
+                    if unclassified_doc_path:
+                        # Move to unclassified directory
+                        dest_dir = os.path.join(output_dir, "unclassified")
+                        os.makedirs(dest_dir, exist_ok=True)
+                        
+                        # Determine destination filename
+                        dest_filename = os.path.basename(unclassified_doc_path)
+                        dest_path = os.path.join(dest_dir, dest_filename)
+                        
+                        # Move unclassified document
+                        shutil.move(unclassified_doc_path, dest_path)
+
+            except Exception as e:
+                logging.error(f"Processing error for {fname}: {e}")
+                logging.error(traceback.format_exc())
+
+        # Log comprehensive processing summary
+        logging.info("\n--- Processing Session Summary ---")
+        logging.info(json.dumps(stats, indent=2))
+
+        print("\n✅ Page-Level Document Processing Complete")
+
+    except Exception as overall_error:
+        logging.critical(f"Critical processing error: {overall_error}")
+        logging.critical(traceback.format_exc())
+        print("❌ Document Processing Failed. Check logs for details.")
+
+if __name__ == "__main__":
+    process_documents()
 
