@@ -1,0 +1,373 @@
+#config.json
+
+{
+  "azure_openai": {
+    "api_key": "YOUR_AZURE_OPENAI_KEY",
+    "endpoint": "https://YOUR-RESOURCE-NAME.openai.azure.com/",
+    "deployment_name": "gpt-4o",
+    "api_version": "2024-05-01-preview"
+  },
+  "categories": {
+    "cms1500": ["cadwell", "rhymlink"],
+    "invoice": ["tesla", "amazon"],
+    "scheduling": ["email", "iomrequest"]
+  },
+  "paths": {
+    "reference_dir": "reference",
+    "input_dir": "input_docs",
+    "output_dir": "output"
+  },
+  "classification": {
+    "confidence_threshold": 0.5
+  }
+}
+
+---------
+
+  #helper.py
+
+  import os
+import json
+import hashlib
+import logging
+from openai import AzureOpenAI
+
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO, 
+    format='%(asctime)s - %(levelname)s: %(message)s',
+    filename='document_processing.log',
+    filemode='a'
+)
+
+def load_config(config_path="config.json"):
+    """
+    Load configuration from JSON file with error handling
+    """
+    try:
+        with open(config_path, "r") as f:
+            return json.load(f)
+    except FileNotFoundError:
+        logging.error(f"Config file not found: {config_path}")
+        raise
+    except json.JSONDecodeError:
+        logging.error(f"Invalid JSON in config file: {config_path}")
+        raise
+
+def compute_reference_hash(ref_dir):
+    """
+    Compute a comprehensive hash of reference directory contents
+    """
+    hasher = hashlib.sha256()
+    
+    # Ensure consistent sorting and hashing
+    for root, _, files in sorted(os.walk(ref_dir)):
+        for f in sorted(files):
+            path = os.path.join(root, f)
+            
+            # Include file path, modification time, and content
+            hasher.update(path.encode())
+            hasher.update(str(os.path.getmtime(path)).encode())
+            
+            try:
+                with open(path, 'rb') as file:
+                    hasher.update(file.read())
+            except Exception as e:
+                logging.warning(f"Could not read file {path} for hashing: {e}")
+    
+    return hasher.hexdigest()
+
+def prepare_reference_metadata(ref_dir):
+    """
+    Generate a structured metadata of reference documents
+    """
+    reference_metadata = {}
+    
+    for main_category in os.listdir(ref_dir):
+        main_path = os.path.join(ref_dir, main_category)
+        if not os.path.isdir(main_path):
+            continue
+        
+        reference_metadata[main_category] = {}
+        
+        for subcategory in os.listdir(main_path):
+            subcat_path = os.path.join(main_path, subcategory)
+            if not os.path.isdir(subcat_path):
+                continue
+            
+            # Count documents in each subcategory
+            doc_count = len([f for f in os.listdir(subcat_path) 
+                             if os.path.isfile(os.path.join(subcat_path, f))])
+            
+            reference_metadata[main_category][subcategory] = {
+                'document_count': doc_count,
+                'documents': [f for f in os.listdir(subcat_path) 
+                              if os.path.isfile(os.path.join(subcat_path, f))]
+            }
+    
+    return reference_metadata
+
+def fine_tune_if_new_reference(cfg):
+    """
+    Check if reference data has changed and log details
+    """
+    ref_dir = cfg["paths"]["reference_dir"]
+    hash_file = os.path.join(ref_dir, ".reference_hash")
+    
+    try:
+        # Compute current reference hash
+        hash_now = compute_reference_hash(ref_dir)
+        
+        # Check if hash file exists
+        if os.path.exists(hash_file):
+            with open(hash_file, 'r') as f:
+                last_hash = f.read().strip()
+        else:
+            last_hash = ''
+        
+        # Compare hashes
+        if hash_now != last_hash:
+            # Log detailed changes
+            current_metadata = prepare_reference_metadata(ref_dir)
+            
+            logging.info("🚀 New Reference Data Detected")
+            logging.info("Reference Document Metadata:")
+            logging.info(json.dumps(current_metadata, indent=2))
+            
+            # Save new hash
+            with open(hash_file, 'w') as f:
+                f.write(hash_now)
+            
+            return True
+        
+        return False
+    
+    except Exception as e:
+        logging.error(f"Reference check error: {e}")
+        return False
+
+def get_azure_client(cfg):
+    """
+    Initialize Azure OpenAI client with error handling
+    """
+    try:
+        client = AzureOpenAI(
+            api_key=cfg["azure_openai"]["api_key"],
+            api_version=cfg["azure_openai"]["api_version"],
+            azure_endpoint=cfg["azure_openai"]["endpoint"]
+        )
+        return client, cfg["azure_openai"]["deployment_name"]
+    except Exception as e:
+        logging.critical(f"Azure client initialization error: {e}")
+        raise
+
+def prepare_directories(cfg):
+    """
+    Prepare necessary directories for processing
+    """
+    # Ensure input, output, and reference directories exist
+    directories = [
+        cfg['paths']['input_dir'],
+        cfg['paths']['output_dir'],
+        cfg['paths']['reference_dir'],
+        os.path.join(cfg['paths']['output_dir'], 'source'),
+        os.path.join(cfg['paths']['output_dir'], 'classified'),
+        os.path.join(cfg['paths']['output_dir'], 'unclassified')
+    ]
+    
+    for dir_path in directories:
+        os.makedirs(dir_path, exist_ok=True)
+------------------
+  #main.py
+
+  import os
+import io
+import json
+import base64
+import shutil
+import logging
+import traceback
+import fitz  # PyMuPDF
+from PIL import Image
+from datetime import datetime
+
+from helper import (
+    load_config, 
+    fine_tune_if_new_reference, 
+    get_azure_client, 
+    prepare_directories,
+    prepare_reference_metadata
+)
+
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO, 
+    format='%(asctime)s - %(levelname)s: %(message)s',
+    filename='document_processing.log',
+    filemode='a'
+)
+
+def preprocess_image_for_classification(image_bytes):
+    """
+    Preprocess image to ensure compatibility with GPT-4o
+    """
+    try:
+        # Open image from bytes
+        img = Image.open(io.BytesIO(image_bytes))
+        
+        # Convert to RGB if needed
+        if img.mode != 'RGB':
+            img = img.convert('RGB')
+        
+        # Resize image
+        img = img.resize((800, 600), Image.LANCZOS)
+        
+        # Compress image
+        buffer = io.BytesIO()
+        img.save(buffer, format="PNG", optimize=True, quality=85)
+        
+        # Convert to base64
+        base64_image = base64.b64encode(buffer.getvalue()).decode('utf-8')
+        
+        return base64_image
+    
+    except Exception as e:
+        logging.error(f"Image preprocessing error: {e}")
+        return None
+
+def extract_page_image(file_path, page_number):
+    """
+    Extract image for a specific page from various document types
+    """
+    try:
+        # PDF handling
+        if file_path.lower().endswith('.pdf'):
+            doc = fitz.open(file_path)
+            
+            # Validate page number
+            if page_number < 0 or page_number >= len(doc):
+                logging.error(f"Invalid page number {page_number} for {file_path}")
+                return _create_blank_image()
+            
+            page = doc.load_page(page_number)
+            pix = page.get_pixmap()
+            
+            # Validate pixmap
+            if not pix or pix.width <= 0 or pix.height <= 0:
+                logging.error(f"Invalid page {page_number} in {file_path}")
+                return _create_blank_image()
+            
+            img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
+            doc.close()
+        
+        # Image handling
+        elif file_path.lower().endswith(('.jpg', '.jpeg', '.png')):
+            img = Image.open(file_path)
+        
+        else:
+            logging.error(f"Unsupported file type: {file_path}")
+            return _create_blank_image()
+        
+        # Resize and convert to bytes
+        img = img.resize((800, 600), Image.LANCZOS)
+        buf = io.BytesIO()
+        img.save(buf, format="PNG")
+        return buf.getvalue()
+    
+    except Exception as e:
+        logging.error(f"Error extracting page {page_number} from {file_path}: {e}")
+        logging.error(traceback.format_exc())
+        return _create_blank_image()
+
+def _create_blank_image():
+    """
+    Create a blank white image for error cases
+    """
+    img = Image.new('RGB', (800, 600), color='white')
+    buf = io.BytesIO()
+    img.save(buf, format="PNG")
+    return buf.getvalue()
+
+def classify_page(document_image, client, deployment_name, cfg):
+    """
+    Enhanced page-level classification with GPT-4o vision
+    """
+    try:
+        # Preprocess image for classification
+        base64_image = preprocess_image_for_classification(document_image)
+        
+        if not base64_image:
+            logging.error("Failed to preprocess image")
+            raise ValueError("Image preprocessing failed")
+
+        # Prepare reference details
+        reference_dir = cfg['paths']['reference_dir']
+        reference_details = prepare_reference_metadata(reference_dir)
+
+        # Detailed classification prompt
+        prompt = f"""
+        Advanced Document Page Classifier:
+
+        REFERENCE DOCUMENT CONTEXT:
+        {json.dumps(reference_details, indent=2)}
+
+        CLASSIFICATION GUIDELINES:
+        1. Analyze document page meticulously
+        2. Compare against reference document characteristics
+        3. Classify based on visual and structural similarities
+        4. Be precise and strict in categorization
+
+        CLASSIFICATION CRITERIA:
+        - Match document layout precisely
+        - Require substantial structural similarity
+        - If no clear match, classify as 'unknown'
+
+        RESPONSE FORMAT:
+        {{
+            "main_category": "exact main category",
+            "subcategory": "exact subcategory",
+            "confidence_score": 0.0-1.0,
+            "reasoning": "Detailed classification explanation"
+        }}
+        """
+
+        # GPT-4o Vision Classification
+        response = client.chat.completions.create(
+            model=deployment_name,
+            messages=[
+                {"role": "system", "content": prompt},
+                {"role": "user", "content": [
+                    {"type": "text", "text": "Analyze and classify this document page."},
+                    {"type": "image", "image_base64": base64_image}
+                ]}
+            ],
+            response_format={"type": "json_object"},
+            max_tokens=300
+        )
+
+        # Parse classification result
+        result = json.loads(response.choices[0].message.content)
+
+        # Extract and validate classification
+        main_category = result.get('main_category', 'unknown')
+        subcategory = result.get('subcategory', 'unknown')
+        confidence_score = float(result.get('confidence_score', 0.0))
+        reasoning = result.get('reasoning', 'No reasoning provided')
+
+        # Strict category validation
+        if (main_category not in cfg['categories'] or 
+            subcategory not in cfg['categories'].get(main_category, [])):
+            main_category = 'unknown'
+            subcategory = 'unknown'
+            confidence_score = 0.0
+
+        return main_category, subcategory, confidence_score, reasoning
+
+    except Exception as e:
+        logging.error(f"Classification error: {e}")
+        logging.error(traceback.format_exc())
+        
+        return 'unknown', 'unknown', 0.0, f"Classification error: {str(e)}"
+
+# Rest of the code remains the same as in the previous implementation
+# (process_documents function and main block)
