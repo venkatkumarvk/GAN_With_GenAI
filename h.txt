@@ -7,8 +7,7 @@
   },
   "storage": {
     "connection_string": "<your-azure-storage-connection-string>",
-    "container_name": "document-training-data",
-    "sas_url": "https://<your-storage-account>.blob.core.windows.net/<container>?<sas-token>"
+    "container_name": "document-training-data"
   },
   "paths": {
     "reference_dir": "reference/",
@@ -25,15 +24,17 @@
 }
 
 
-
-----
-helper.py
+-----
 
 import os
-import fitz  # PyMuPDF
 import json
+import fitz  # PyMuPDF
+from azure.storage.blob import BlobServiceClient
 from azure.core.credentials import AzureKeyCredential
-from azure.ai.documentintelligence import DocumentIntelligenceAdministrationClient, DocumentIntelligenceClient
+from azure.ai.documentintelligence import (
+    DocumentIntelligenceAdministrationClient,
+    DocumentIntelligenceClient
+)
 
 def load_config(config_path="config.json"):
     with open(config_path, "r") as f:
@@ -43,6 +44,24 @@ def ensure_directories(paths):
     for key, path in paths.items():
         if not os.path.exists(path):
             os.makedirs(path, exist_ok=True)
+
+def upload_reference_docs_to_blob(config):
+    """Uploads all files in reference_dir to the specified container."""
+    conn_str = config["storage"]["connection_string"]
+    container_name = config["storage"]["container_name"]
+    reference_dir = config["paths"]["reference_dir"]
+
+    blob_service = BlobServiceClient.from_connection_string(conn_str)
+    container = blob_service.get_container_client(container_name)
+    container.create_container(exist_ok=True)
+
+    for root, _, files in os.walk(reference_dir):
+        for file in files:
+            file_path = os.path.join(root, file)
+            blob_path = os.path.relpath(file_path, reference_dir)
+            with open(file_path, "rb") as data:
+                container.upload_blob(name=blob_path, data=data, overwrite=True)
+    print(f"✅ Uploaded all reference documents to Azure Blob: {container_name}")
 
 def split_pdf_into_pages(pdf_path, output_folder):
     doc = fitz.open(pdf_path)
@@ -66,15 +85,34 @@ def initialize_clients(config):
     )
 
 def check_and_retrain_model(admin_client, config):
+    """Triggers retraining if auto_retrain is True."""
     if not config["runtime"]["auto_retrain"]:
         return config["document_intelligence"]["model_id"]
-    
-    print("Checking reference folder for updates... (simulated retraining trigger)")
-    # ⚙️ In production: You'd call begin_build_document_classifier() here using the SAS URL.
-    # For now, we assume retraining is done manually or triggered externally.
-    return config["document_intelligence"]["model_id"]
+
+    print("🔄 Starting (re)training process using reference container...")
+
+    conn_str = config["storage"]["connection_string"]
+    container_name = config["storage"]["container_name"]
+    model_id = config["document_intelligence"]["model_id"]
+
+    # Training using Azure Blob Container reference
+    poller = admin_client.begin_build_document_classifier(
+        build_request={
+            "classifier_id": model_id,
+            "source": {
+                "azure_blob_source": {
+                    "container_url": f"https://{BlobServiceClient.from_connection_string(conn_str).account_name}.blob.core.windows.net/{container_name}"
+                }
+            }
+        }
+    )
+
+    result = poller.result()
+    print(f"✅ Model retrained successfully: {result.model_id}")
+    return result.model_id
 
 def classify_page(doc_client, config, pdf_path):
+    """Classify a single PDF page."""
     with open(pdf_path, "rb") as f:
         poller = doc_client.begin_classify_document(
             model_id=config["document_intelligence"]["model_id"],
@@ -91,15 +129,15 @@ def classify_page(doc_client, config, pdf_path):
     return classifications
 
 
----
-main.py
+
+----
 
 import os
 import shutil
 from helper import (
     load_config, ensure_directories,
-    split_pdf_into_pages, initialize_clients,
-    check_and_retrain_model, classify_page
+    upload_reference_docs_to_blob, initialize_clients,
+    check_and_retrain_model, split_pdf_into_pages, classify_page
 )
 
 def process_documents():
@@ -107,7 +145,13 @@ def process_documents():
     paths = config["paths"]
     ensure_directories(paths)
 
+    # Upload reference docs to Azure Blob
+    upload_reference_docs_to_blob(config)
+
+    # Initialize clients
     admin_client, doc_client = initialize_clients(config)
+
+    # Check and retrain model if needed
     model_id = check_and_retrain_model(admin_client, config)
 
     input_dir = paths["input_dir"]
@@ -116,12 +160,12 @@ def process_documents():
     for file in os.listdir(input_dir):
         if file.lower().endswith(".pdf"):
             pdf_path = os.path.join(input_dir, file)
-            print(f"\nProcessing {file}...")
+            print(f"\n📄 Processing {file}...")
 
-            # Copy original
+            # Copy original to output/source
             shutil.copy(pdf_path, paths["source_dir"])
 
-            # Split into pages
+            # Split PDF into individual pages
             page_files = split_pdf_into_pages(pdf_path, paths["output_dir"])
 
             # Classify each page
@@ -140,11 +184,11 @@ def process_documents():
                     dest_folder = os.path.join(paths["classified_dir"], category)
                     os.makedirs(dest_folder, exist_ok=True)
                     shutil.move(page_pdf, os.path.join(dest_folder, os.path.basename(page_pdf)))
-                    print(f" → Classified as {category} ({confidence:.2f})")
+                    print(f"✅ Classified as {category} ({confidence:.2f})")
                 else:
                     dest = os.path.join(paths["unclassified_dir"], os.path.basename(page_pdf))
                     shutil.move(page_pdf, dest)
-                    print(f" → Low confidence ({confidence:.2f}), moved to unclassified")
+                    print(f"⚠️ Low confidence ({confidence:.2f}), moved to unclassified")
 
 if __name__ == "__main__":
     process_documents()
