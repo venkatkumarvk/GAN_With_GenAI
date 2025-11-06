@@ -1,3 +1,34 @@
+{
+  "document_intelligence": {
+    "endpoint": "https://<your-doc-intelligence-resource>.cognitiveservices.azure.com/",
+    "api_key": "<your-doc-intelligence-key>",
+    "project_name": "custom-doc-classifier",
+    "model_id": "custom-classifier-v1"
+  },
+  "storage": {
+    "connection_string": "<your-azure-storage-connection-string>",
+    "container_name": "document-training-data"
+  },
+  "paths": {
+    "reference_dir": "reference/",
+    "input_dir": "input/",
+    "output_dir": "output/",
+    "classified_dir": "output/classified/",
+    "unclassified_dir": "output/unclassified/",
+    "source_dir": "output/source/"
+  },
+  "runtime": {
+    "confidence_threshold": 0.9,
+    "auto_retrain": true
+  },
+  "categories": {
+    "cms1500": ["cadwell", "rhymlink"],
+    "invoice": ["vendorA", "vendorB"]
+  }
+}
+
+---
+
 import os
 import hashlib
 from azure.storage.blob import BlobServiceClient
@@ -83,6 +114,8 @@ def split_pdf_to_pages(input_pdf, output_dir):
 
 ---
 
+main.py
+
 import os
 import json
 import shutil
@@ -92,7 +125,7 @@ from azure.ai.documentintelligence import (
     DocumentIntelligenceAdministrationClient,
 )
 from azure.ai.documentintelligence.models import (
-    BuildDocumentClassifierRequest
+    BuildDocumentClassifierRequest,
 )
 from azure.storage.blob import BlobServiceClient
 from helper import upload_reference_to_blob, split_pdf_to_pages
@@ -111,9 +144,17 @@ def train_model(config):
     connection_string = config["storage"]["connection_string"]
     container_name = config["storage"]["container_name"]
     
-    # Create Blob Service Client to verify container
+    # Extract storage account name programmatically
     try:
         blob_service_client = BlobServiceClient.from_connection_string(connection_string)
+        storage_account = blob_service_client.account_name
+        print(f"📦 Storage Account: {storage_account}")
+    except Exception as account_error:
+        print(f"❌ Could not extract storage account name: {account_error}")
+        return None
+
+    # Create Blob Service Client to verify container
+    try:
         container_client = blob_service_client.get_container_client(container_name)
         
         # Verify container exists
@@ -140,7 +181,7 @@ def train_model(config):
 
         # Prepare build request
         build_request = BuildDocumentClassifierRequest(
-            container_url=container_client.url,
+            container_url=f"https://{storage_account}.blob.core.windows.net/{container_name}",
             description=f"Custom document classifier for {project_name}"
         )
 
@@ -169,6 +210,8 @@ def train_model(config):
 
     except Exception as train_error:
         print(f"❌ Model training failed: {train_error}")
+        import traceback
+        traceback.print_exc()  # Print full traceback for detailed error info
         return None
 
 def classify_documents(config):
@@ -290,121 +333,3 @@ if __name__ == "__main__":
 
     # Classify documents
     classify_documents(config)
-
----update
-import os
-import json
-from azure.core.credentials import AzureKeyCredential
-from azure.ai.documentintelligence import (
-    DocumentIntelligenceAdministrationClient,
-)
-from azure.ai.documentintelligence.models import (
-    BuildDocumentClassifierRequest,
-    AzureBlobSource,
-)
-from azure.storage.blob import BlobServiceClient
-from helper import upload_reference_to_blob
-
-def train_model(config):
-    """
-    Trains a custom classifier using Azure Document Intelligence
-    with reference data uploaded to Blob Storage.
-    """
-    # Extract configuration details
-    endpoint = config["document_intelligence"]["endpoint"]
-    key = config["document_intelligence"]["api_key"]
-    project_name = config["document_intelligence"]["project_name"]
-    
-    # Storage configuration
-    connection_string = config["storage"]["connection_string"]
-    container_name = config["storage"]["container_name"]
-    
-    # Extract storage account name programmatically
-    try:
-        blob_service_client = BlobServiceClient.from_connection_string(connection_string)
-        storage_account = blob_service_client.account_name
-        print(f"📦 Storage Account: {storage_account}")
-    except Exception as account_error:
-        print(f"❌ Could not extract storage account name: {account_error}")
-        return None
-
-    # Create Blob Service Client to verify container
-    try:
-        container_client = blob_service_client.get_container_client(container_name)
-        
-        # Verify container exists
-        if not container_client.exists():
-            print(f"❌ Container {container_name} does not exist.")
-            return None
-
-        # List blobs to ensure training data is present
-        blobs = list(container_client.list_blobs())
-        if not blobs:
-            print("❌ No training data found in the container.")
-            return None
-
-        print(f"✅ Found {len(blobs)} blobs in container {container_name}")
-    except Exception as storage_error:
-        print(f"❌ Storage connection error: {storage_error}")
-        return None
-
-    # Create Document Intelligence Administration Client
-    try:
-        admin_client = DocumentIntelligenceAdministrationClient(
-            endpoint, AzureKeyCredential(key)
-        )
-
-        # Create AzureBlobSource
-        blob_source = AzureBlobSource(
-            container_url=f"https://{storage_account}.blob.core.windows.net/{container_name}"
-        )
-
-        # Prepare build request
-        build_request = BuildDocumentClassifierRequest(
-            azure_blob_source=blob_source,
-            description=f"Custom document classifier for {project_name}"
-        )
-
-        # Start model training
-        print("🚀 Starting model training ...")
-        poller = admin_client.begin_build_document_classifier(build_request)
-        model = poller.result()
-
-        print(f"✅ Model training completed successfully.")
-        print(f"🆔 New model ID: {model.model_id}")
-
-        # Update config with new model ID
-        config["document_intelligence"]["model_id"] = model.model_id
-        
-        # Optional: Save categories as metadata or model description
-        categories = config.get("categories", {})
-        print("📋 Document Categories:")
-        for category, subcategories in categories.items():
-            print(f"  - {category}: {subcategories}")
-
-        # Save updated configuration
-        with open("config.json", "w") as f:
-            json.dump(config, f, indent=4)
-
-        return model.model_id
-
-    except Exception as train_error:
-        print(f"❌ Model training failed: {train_error}")
-        import traceback
-        traceback.print_exc()  # Print full traceback for detailed error info
-        return None
-```
-
-Key Improvements:
-1. Automatically extracts storage account name
-2. Adds more detailed logging
-3. Handles potential errors in account name extraction
-
-Troubleshooting Tips:
-- Ensure your connection string is correct
-- Verify network connectivity
-- Check Azure AD permissions
-
-Common Connection String Format:
-```
-DefaultEndpointsProtocol=https;AccountName=mystorageaccount;AccountKey=YOUR_ACCOUNT_KEY;EndpointSuffix=core.windows.net
