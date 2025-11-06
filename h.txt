@@ -258,53 +258,80 @@ if __name__ == "__main__":
 
 
 ----update
-
 import os
 import json
-import shutil
+from azure.ai.documentintelligence import DocumentIntelligenceAdministrationClient, DocumentIntelligenceClient
+from azure.ai.documentintelligence.models import BuildDocumentClassifierRequest, AzureBlobContentSource, AnalyzeDocumentRequest
 from azure.core.credentials import AzureKeyCredential
-from azure.ai.documentintelligence import (
-    DocumentIntelligenceClient,
-    DocumentIntelligenceAdministrationClient,
+from azure.storage.blob import BlobServiceClient
+
+# Load config.json
+with open("config.json", "r") as f:
+    config = json.load(f)
+
+endpoint = config["document_intelligence"]["endpoint"]
+api_key = config["document_intelligence"]["api_key"]
+project_name = config["document_intelligence"]["project_name"]
+model_id = config["document_intelligence"]["model_id"]
+
+connection_string = config["storage"]["connection_string"]
+container_name = config["storage"]["container_name"]
+
+reference_dir = config["paths"]["reference_dir"]
+input_dir = config["paths"]["input_dir"]
+output_dir = config["paths"]["output_dir"]
+classified_dir = config["paths"]["classified_dir"]
+unclassified_dir = config["paths"]["unclassified_dir"]
+source_dir = config["paths"]["source_dir"]
+
+os.makedirs(output_dir, exist_ok=True)
+os.makedirs(classified_dir, exist_ok=True)
+os.makedirs(unclassified_dir, exist_ok=True)
+os.makedirs(source_dir, exist_ok=True)
+
+# Initialize clients
+admin_client = DocumentIntelligenceAdministrationClient(endpoint, AzureKeyCredential(api_key))
+analyze_client = DocumentIntelligenceClient(endpoint, AzureKeyCredential(api_key))
+blob_service_client = BlobServiceClient.from_connection_string(connection_string)
+container_client = blob_service_client.get_container_client(container_name)
+
+# ✅ Upload all reference files to Blob Storage
+for root, _, files in os.walk(reference_dir):
+    for file in files:
+        local_path = os.path.join(root, file)
+        blob_path = os.path.relpath(local_path, reference_dir)
+        with open(local_path, "rb") as data:
+            container_client.upload_blob(name=blob_path, data=data, overwrite=True)
+print("✅ Uploaded reference data to Blob storage")
+
+# ✅ Train a custom classifier
+source = AzureBlobContentSource(container_url=f"https://{container_client.account_name}.blob.core.windows.net/{container_name}")
+build_request = BuildDocumentClassifierRequest(
+    classifier_id=model_id,
+    description="Custom document classifier",
+    source=source
 )
-from azure.ai.documentintelligence.models import (
-    BuildDocumentClassifierRequest,
-)
-from helper import upload_reference_to_blob, split_pdf_to_pages
+poller = admin_client.begin_build_document_classifier(build_request)
+classifier = poller.result()
+print(f"✅ Classifier trained successfully: {classifier.classifier_id}")
 
-def train_model(config):
-    """
-    Trains a custom classifier using Azure Document Intelligence
-    with reference data uploaded to Blob Storage.
-    """
-    endpoint = config["document_intelligence"]["endpoint"]
-    key = config["document_intelligence"]["api_key"]
-    container_name = config["storage"]["container_name"]
+# ✅ Analyze input PDFs and classify pages
+for file in os.listdir(input_dir):
+    if file.lower().endswith((".pdf", ".png", ".jpg", ".jpeg")):
+        file_path = os.path.join(input_dir, file)
+        with open(file_path, "rb") as doc:
+            poller = analyze_client.begin_classify_document(
+                model_id=classifier.classifier_id,
+                body=AnalyzeDocumentRequest(bytes_source=doc.read())
+            )
+        result = poller.result()
+        
+        for doc_result in result.documents:
+            class_name = doc_result.doc_type
+            print(f"📄 {file} classified as: {class_name}")
+            class_dir = os.path.join(classified_dir, class_name)
+            os.makedirs(class_dir, exist_ok=True)
+            dest_path = os.path.join(class_dir, file)
+            os.rename(file_path, dest_path)
 
-    print("🚀 Starting model training ...")
-    admin_client = DocumentIntelligenceAdministrationClient(
-        endpoint, AzureKeyCredential(key)
-    )
-
-    build_request = BuildDocumentClassifierRequest(
-        # Remove AzureBlobSource
-        container_url=f"https://<your-storage-account>.blob.core.windows.net/{container_name}",
-        description="Custom document classification model (auto-generated)",
-    )
-
-    poller = admin_client.begin_build_document_classifier(build_request)
-    model = poller.result()
-
-    print(f"✅ Model training completed successfully.")
-    print(f"🆔 New model ID: {model.model_id}")
-
-    # Save model_id back into config.json
-    config["document_intelligence"]["model_id"] = model.model_id
-    with open("config.json", "w") as f:
-        json.dump(config, f, indent=4)
-
-    return model.model_id
-
-# Rest of the code remains the same
-
-    classify_documents(config)
+print("✅ Classification complete and files stored in output/classified/")
