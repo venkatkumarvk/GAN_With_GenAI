@@ -1,320 +1,6 @@
-import logging
-import json
-from typing import Dict, Any
+main.py
 
-class AzureOpenAICostTracker:
-    def __init__(self, pricing_config: Dict[str, float]):
-        """
-        Initialize cost tracker with pricing configuration
-        
-        :param pricing_config: Dictionary with pricing details
-        Example:
-        {
-            'gpt4o': {
-                'input_price_per_1m_tokens': 2.50,
-                'output_price_per_1m_tokens': 10.00,
-                'cached_input_price_per_1m_tokens': 1.25
-            }
-        }
-        """
-        self.pricing_config = pricing_config
-        self.total_cost = 0.0
-        self.model_usage = {}
-        self.log_file = 'azure_openai_cost_log.json'
-
-    def calculate_cost(self, 
-                       model_name: str, 
-                       input_tokens: int, 
-                       output_tokens: int, 
-                       is_cached_input: bool = False) -> float:
-        """
-        Calculate cost for a specific API call
-        
-        :param model_name: Name of the Azure OpenAI model
-        :param input_tokens: Number of input tokens
-        :param output_tokens: Number of output tokens
-        :param is_cached_input: Whether input tokens are from cached context
-        :return: Total cost for the API call
-        """
-        try:
-            model_pricing = self.pricing_config.get(model_name, {})
-            
-            # Determine input token price based on caching
-            input_price_per_1m = (model_pricing.get('cached_input_price_per_1m_tokens', 0) 
-                                  if is_cached_input 
-                                  else model_pricing.get('input_price_per_1m_tokens', 0))
-            
-            output_price_per_1m = model_pricing.get('output_price_per_1m_tokens', 0)
-            
-            # Calculate costs
-            input_cost = (input_tokens / 1_000_000) * input_price_per_1m
-            output_cost = (output_tokens / 1_000_000) * output_price_per_1m
-            
-            total_call_cost = input_cost + output_cost
-            
-            # Update tracking
-            self.total_cost += total_call_cost
-            
-            if model_name not in self.model_usage:
-                self.model_usage[model_name] = {
-                    'total_cost': 0.0,
-                    'input_tokens': 0,
-                    'output_tokens': 0,
-                    'calls': 0
-                }
-            
-            self.model_usage[model_name]['total_cost'] += total_call_cost
-            self.model_usage[model_name]['input_tokens'] += input_tokens
-            self.model_usage[model_name]['output_tokens'] += output_tokens
-            self.model_usage[model_name]['calls'] += 1
-            
-            # Log the usage
-            self._log_usage(model_name, input_tokens, output_tokens, total_call_cost, is_cached_input)
-            
-            return total_call_cost
-        
-        except Exception as e:
-            logging.error(f"Cost calculation error: {e}")
-            return 0.0
-
-    def _log_usage(self, model_name, input_tokens, output_tokens, call_cost, is_cached_input):
-        """
-        Log detailed usage information
-        """
-        try:
-            with open(self.log_file, 'a') as f:
-                log_entry = {
-                    'timestamp': datetime.now().isoformat(),
-                    'model': model_name,
-                    'input_tokens': input_tokens,
-                    'output_tokens': output_tokens,
-                    'is_cached_input': is_cached_input,
-                    'call_cost': call_cost
-                }
-                f.write(json.dumps(log_entry) + '\n')
-        except Exception as e:
-            logging.error(f"Usage logging error: {e}")
-
-    def get_total_cost(self) -> float:
-        """
-        Get total accumulated cost
-        """
-        return self.total_cost
-
-    def get_model_usage(self) -> Dict[str, Any]:
-        """
-        Get detailed usage for all models
-        """
-        return self.model_usage
-
-    def reset(self):
-        """
-        Reset all tracking metrics
-        """
-        self.total_cost = 0.0
-        self.model_usage = {}
-
-
-          -------------
-
-          import os
-import json
-import hashlib
-import logging
-import shutil
-from openai import AzureOpenAI
-from azure_cost_tracker import AzureOpenAICostTracker
-from datetime import datetime
-
-# Configure logging
-logging.basicConfig(
-    level=logging.INFO, 
-    format='%(asctime)s - %(levelname)s: %(message)s',
-    filename='document_processing.log',
-    filemode='w'
-)
-
-def verify_azure_configuration(cfg):
-    """
-    Comprehensive Azure OpenAI configuration validation
-    """
-    # Check API Key
-    if not cfg['azure_openai']['api_key'] or cfg['azure_openai']['api_key'] == 'YOUR_AZURE_OPENAI_KEY':
-        raise ValueError("❌ Invalid Azure OpenAI API Key. Replace with your actual key.")
-    
-    # Check Endpoint
-    if not cfg['azure_openai']['endpoint'] or 'openai.azure.com' not in cfg['azure_openai']['endpoint']:
-        raise ValueError("❌ Invalid Azure OpenAI Endpoint")
-    
-    # Check Deployment Name
-    if not cfg['azure_openai']['deployment_name']:
-        raise ValueError("❌ Missing Deployment Name")
-    
-    # Check API Version
-    supported_versions = ['2024-05-01-preview', '2024-02-15-preview']
-    if cfg['azure_openai']['api_version'] not in supported_versions:
-        raise ValueError(f"❌ Unsupported API Version. Use one of {supported_versions}")
-
-def load_config(config_path="config.json"):
-    """
-    Load configuration from JSON file
-    """
-    try:
-        with open(config_path, "r") as f:
-            cfg = json.load(f)
-        
-        # Verify configuration
-        verify_azure_configuration(cfg)
-        
-        # Default pricing configuration if not provided
-        if 'pricing' not in cfg:
-            cfg['pricing'] = {
-                'gpt4o': {
-                    'input_price_per_1m_tokens': 2.50,
-                    'output_price_per_1m_tokens': 10.00,
-                    'cached_input_price_per_1m_tokens': 1.25
-                }
-            }
-        
-        return cfg
-    except FileNotFoundError:
-        logging.error(f"Config file not found: {config_path}")
-        raise
-    except json.JSONDecodeError:
-        logging.error(f"Invalid JSON in config file: {config_path}")
-        raise
-
-def compute_reference_hash(ref_dir):
-    """
-    Compute a comprehensive hash of reference directory contents
-    """
-    hasher = hashlib.sha256()
-    
-    # Ensure consistent sorting and hashing
-    for root, _, files in sorted(os.walk(ref_dir)):
-        for f in sorted(files):
-            path = os.path.join(root, f)
-            
-            # Include file path, modification time, and content
-            hasher.update(path.encode())
-            hasher.update(str(os.path.getmtime(path)).encode())
-            
-            try:
-                with open(path, 'rb') as file:
-                    hasher.update(file.read())
-            except Exception as e:
-                logging.warning(f"Could not read file {path} for hashing: {e}")
-    
-    return hasher.hexdigest()
-
-def prepare_reference_metadata(ref_dir):
-    """
-    Generate a structured metadata of reference documents
-    """
-    reference_metadata = {}
-    
-    for main_category in os.listdir(ref_dir):
-        main_path = os.path.join(ref_dir, main_category)
-        if not os.path.isdir(main_path):
-            continue
-        
-        reference_metadata[main_category] = {}
-        
-        for subcategory in os.listdir(main_path):
-            subcat_path = os.path.join(main_path, subcategory)
-            if not os.path.isdir(subcat_path):
-                continue
-            
-            # Count documents in each subcategory
-            doc_count = len([f for f in os.listdir(subcat_path) 
-                             if os.path.isfile(os.path.join(subcat_path, f))])
-            
-            reference_metadata[main_category][subcategory] = {
-                'document_count': doc_count,
-                'documents': [f for f in os.listdir(subcat_path) 
-                              if os.path.isfile(os.path.join(subcat_path, f))]
-            }
-    
-    return reference_metadata
-
-def fine_tune_if_new_reference(cfg):
-    """
-    Check if reference data has changed and log details
-    """
-    ref_dir = cfg["paths"]["reference_dir"]
-    hash_file = os.path.join(ref_dir, ".reference_hash")
-    
-    try:
-        # Compute current reference hash
-        hash_now = compute_reference_hash(ref_dir)
-        
-        # Check if hash file exists
-        if os.path.exists(hash_file):
-            with open(hash_file, 'r') as f:
-                last_hash = f.read().strip()
-        else:
-            last_hash = ''
-        
-        # Compare hashes
-        if hash_now != last_hash:
-            # Log detailed changes
-            current_metadata = prepare_reference_metadata(ref_dir)
-            
-            logging.info("🚀 New Reference Data Detected")
-            logging.info("Reference Document Metadata:")
-            logging.info(json.dumps(current_metadata, indent=2))
-            
-            # Save new hash
-            with open(hash_file, 'w') as f:
-                f.write(hash_now)
-            
-            return True
-        
-        return False
-    
-    except Exception as e:
-        logging.error(f"Reference check error: {e}")
-        return False
-
-def get_azure_client(cfg):
-    """
-    Initialize Azure OpenAI client with error handling
-    """
-    try:
-        # Initialize cost tracker
-        cost_tracker = AzureOpenAICostTracker(cfg.get('pricing', {}))
-        
-        client = AzureOpenAI(
-            api_key=cfg["azure_openai"]["api_key"],
-            api_version=cfg["azure_openai"]["api_version"],
-            azure_endpoint=cfg["azure_openai"]["endpoint"]
-        )
-        return client, cfg["azure_openai"]["deployment_name"], cost_tracker
-    except Exception as e:
-        logging.critical(f"Azure client initialization error: {e}")
-        raise
-
-def prepare_directories(cfg):
-    """
-    Prepare necessary directories for processing
-    """
-    # Ensure input, output, and reference directories exist
-    directories = [
-        cfg['paths']['input_dir'],
-        cfg['paths']['output_dir'],
-        cfg['paths']['reference_dir'],
-        os.path.join(cfg['paths']['output_dir'], 'source'),
-        os.path.join(cfg['paths']['output_dir'], 'classified'),
-        os.path.join(cfg['paths']['output_dir'], 'unclassified')
-    ]
-    
-    for dir_path in directories:
-        os.makedirs(dir_path, exist_ok=True)
-
-
-          ------
-          '
-          import os
+import os
 import io
 import json
 import base64
@@ -341,16 +27,229 @@ logging.basicConfig(
     filemode='a'  # Append mode to keep historical logs
 )
 
-# [All previous functions remain the same]
+# Token pricing configuration
+TOKEN_PRICING = {
+    'gpt-4o': {
+        'input': 2.50,   # $2.50 per 1M input tokens
+        'output': 10.00, # $10.00 per 1M output tokens
+        'cached_input': 1.25  # $1.25 per 1M cached input tokens
+    }
+}
 
-def classify_page(document_image, client, deployment_name, cfg, cost_tracker):
+def calculate_azure_openai_cost(input_tokens, output_tokens, model='gpt-4o', use_cached=False):
     """
-    Enhanced page-level classification with reference-based validation and token tracking
+    Calculate the cost of Azure OpenAI API usage
+    
+    Args:
+        input_tokens (int): Number of input tokens
+        output_tokens (int): Number of output tokens
+        model (str): Model name for pricing
+        use_cached (bool): Whether cached input tokens are used
+    
+    Returns:
+        dict: Detailed cost breakdown
     """
     try:
-        # [Previous preprocessing steps remain the same]
+        pricing = TOKEN_PRICING.get(model, TOKEN_PRICING['gpt-4o'])
+        
+        # Calculate input token cost
+        input_cost = (input_tokens / 1_000_000) * (pricing['cached_input'] if use_cached else pricing['input'])
+        
+        # Calculate output token cost
+        output_cost = (output_tokens / 1_000_000) * pricing['output']
+        
+        # Total cost
+        total_cost = input_cost + output_cost
+        
+        return {
+            'model': model,
+            'input_tokens': input_tokens,
+            'output_tokens': output_tokens,
+            'input_cost': round(input_cost, 4),
+            'output_cost': round(output_cost, 4),
+            'total_cost': round(total_cost, 4),
+            'use_cached': use_cached
+        }
+    except Exception as e:
+        logging.error(f"Token cost calculation error: {e}")
+        return {
+            'model': model,
+            'input_tokens': input_tokens,
+            'output_tokens': output_tokens,
+            'input_cost': 0,
+            'output_cost': 0,
+            'total_cost': 0,
+            'error': str(e)
+        }
 
-        # Make API call with token tracking
+def preprocess_image_for_classification(image_bytes):
+    """
+    Preprocess image to ensure compatibility with GPT-4o
+    """
+    try:
+        # Open image from bytes
+        img = Image.open(io.BytesIO(image_bytes))
+        
+        # Convert to RGB if needed
+        if img.mode != 'RGB':
+            img = img.convert('RGB')
+        
+        # Resize image
+        img = img.resize((800, 600), Image.LANCZOS)
+        
+        # Compress image
+        buffer = io.BytesIO()
+        img.save(buffer, format="PNG", optimize=True, quality=85)
+        
+        # Convert to base64
+        base64_image = base64.b64encode(buffer.getvalue()).decode('utf-8')
+        
+        return base64_image
+    
+    except Exception as e:
+        logging.error(f"Image preprocessing error: {e}")
+        return None
+
+def prepare_reference_prompt(cfg, reference_dir):
+    """
+    Generate a detailed prompt using reference document metadata
+    """
+    # Collect reference document details
+    reference_details = {}
+    
+    for main_category in os.listdir(reference_dir):
+        main_path = os.path.join(reference_dir, main_category)
+        if not os.path.isdir(main_path):
+            continue
+        
+        reference_details[main_category] = {}
+        
+        for subcategory in os.listdir(main_path):
+            subcat_path = os.path.join(main_path, subcategory)
+            if not os.path.isdir(subcat_path):
+                continue
+            
+            # Count and list reference documents
+            reference_docs = [f for f in os.listdir(subcat_path) 
+                              if os.path.isfile(os.path.join(subcat_path, f))]
+            
+            reference_details[main_category][subcategory] = {
+                'document_count': len(reference_docs),
+                'document_types': list(set(os.path.splitext(doc)[1] for doc in reference_docs))
+            }
+    
+    return reference_details
+
+def extract_page_image(file_path, page_number):
+    """
+    Extract image for a specific page from various document types
+    """
+    try:
+        # PDF handling
+        if file_path.lower().endswith('.pdf'):
+            doc = fitz.open(file_path)
+            
+            # Validate page number
+            if page_number < 0 or page_number >= len(doc):
+                logging.error(f"Invalid page number {page_number} for {file_path}")
+                return _create_blank_image()
+            
+            page = doc.load_page(page_number)
+            pix = page.get_pixmap()
+            
+            # Validate pixmap
+            if not pix or pix.width <= 0 or pix.height <= 0:
+                logging.error(f"Invalid page {page_number} in {file_path}")
+                return _create_blank_image()
+            
+            img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
+            doc.close()
+        
+        # Image handling
+        elif file_path.lower().endswith(('.jpg', '.jpeg', '.png')):
+            img = Image.open(file_path)
+        
+        else:
+            logging.error(f"Unsupported file type: {file_path}")
+            return _create_blank_image()
+        
+        # Resize and convert to bytes
+        img = img.resize((800, 600), Image.LANCZOS)
+        buf = io.BytesIO()
+        img.save(buf, format="PNG")
+        return buf.getvalue()
+    
+    except Exception as e:
+        logging.error(f"Error extracting page {page_number} from {file_path}: {e}")
+        logging.error(traceback.format_exc())
+        return _create_blank_image()
+
+def _create_blank_image():
+    """
+    Create a blank white image for error cases
+    """
+    img = Image.new('RGB', (800, 600), color='white')
+    buf = io.BytesIO()
+    img.save(buf, format="PNG")
+    return buf.getvalue()
+
+def classify_page(document_image, client, deployment_name, cfg):
+    """
+    Enhanced page-level classification with reference-based validation
+    """
+    try:
+        # Validate and preprocess image
+        base64_image = preprocess_image_for_classification(document_image)
+        
+        if not base64_image:
+            logging.error("Failed to preprocess image")
+            raise ValueError("Image preprocessing failed")
+
+        # Prepare reference details
+        reference_dir = cfg['paths']['reference_dir']
+        reference_details = prepare_reference_prompt(cfg, reference_dir)
+
+        # Prepare reference categories for prompt
+        categories_str = json.dumps(cfg['categories'], indent=2)
+        reference_str = json.dumps(reference_details, indent=2)
+
+        # Detailed page classification prompt
+        prompt = f"""
+        You are an advanced document classifier specializing in precise categorization 
+        based on reference document characteristics.
+
+        REFERENCE DOCUMENT OVERVIEW:
+        {reference_str}
+
+        CLASSIFICATION GUIDELINES:
+        1. Analyze the document page carefully
+        2. Compare with available reference documents
+        3. Classify ONLY if there is a strong similarity to reference documents
+        4. Be extremely strict in classification
+
+        CLASSIFICATION CRITERIA:
+        - Require high visual and structural similarity to reference documents
+        - Match document layout, content type, and key characteristics
+        - If no clear match exists, classify as 'unknown'
+
+        Available Categories:
+        {categories_str}
+
+        Provide your classification in this JSON format:
+        {{
+            "main_category": "exact main category or 'unknown'",
+            "subcategory": "exact subcategory or 'unknown'",
+            "confidence_score": 0.0-1.0,
+            "reasoning": "Detailed explanation of classification decision, emphasizing reference document similarities"
+        }}
+
+        CRITICAL INSTRUCTIONS:
+        - Only classify if there is SUBSTANTIAL similarity to reference documents
+        - Confidence score should reflect the strength of similarity
+        - Provide explicit reasoning linking the page to reference documents
+        """
+
+        # Make API call with explicit error handling
         try:
             response = client.chat.completions.create(
                 model=deployment_name,
@@ -377,40 +276,60 @@ def classify_page(document_image, client, deployment_name, cfg, cost_tracker):
                 max_tokens=300  # Limit response length
             )
 
-            # Track token usage and calculate cost
+            # Token usage tracking
             input_tokens = response.usage.prompt_tokens
             output_tokens = response.usage.completion_tokens
-            
-            # Assuming GPT-4o model and no caching for first request
-            call_cost = cost_tracker.calculate_cost(
-                model_name='gpt4o', 
-                input_tokens=input_tokens, 
-                output_tokens=output_tokens,
-                is_cached_input=False
-            )
+            total_tokens = response.usage.total_tokens
 
-            logging.info(f"API Call Cost Breakdown:\n"
-                         f"Input Tokens: {input_tokens}\n"
-                         f"Output Tokens: {output_tokens}\n"
-                         f"Total Call Cost: ${call_cost:.4f}")
+            # Calculate cost (cached input assumed to be false)
+            token_cost = calculate_azure_openai_cost(input_tokens, output_tokens)
 
-            # [Rest of the classification logic remains the same]
+            # Log token usage and cost
+            logging.info(f"Token Usage Details:\n{json.dumps(token_cost, indent=2)}")
+
+            # Extract and parse response
+            result = json.loads(response.choices[0].message.content)
+
+            # Extract and validate classification
+            main_category = result.get('main_category', 'unknown')
+            subcategory = result.get('subcategory', 'unknown')
+            confidence_score = float(result.get('confidence_score', 0.0))
+            reasoning = result.get('reasoning', 'No reasoning provided')
+
+            # Strict validation against reference documents
+            if (main_category == 'unknown' or 
+                main_category not in cfg['categories'] or 
+                subcategory not in cfg['categories'].get(main_category, [])):
+                # Fallback to unknown if no clear match
+                main_category = 'unknown'
+                subcategory = 'unknown'
+                confidence_score = 0.0
+
+            # Log detailed classification
+            logging.info(f"Classification Details:\n" + json.dumps({
+                'main_category': main_category,
+                'subcategory': subcategory,
+                'confidence_score': confidence_score,
+                'reasoning': reasoning
+            }, indent=2))
+
+            return main_category, subcategory, confidence_score, reasoning, token_cost
 
         except Exception as api_error:
             logging.error(f"API Classification Error: {api_error}")
             logging.error(traceback.format_exc())
             
-            return 'unknown', 'unknown', 0.0, f"Classification error: {str(api_error)}"
+            return 'unknown', 'unknown', 0.0, f"Classification error: {str(api_error)}", None
 
     except Exception as e:
         logging.error(f"Page classification error: {e}")
         logging.error(traceback.format_exc())
         
-        return 'unknown', 'unknown', 0.0, f"Error in page classification: {str(e)}"
+        return 'unknown', 'unknown', 0.0, f"Error in page classification: {str(e)}", None
 
 def process_documents():
     """
-    Page-level document classification with token and cost tracking
+    Page-level document classification
     """
     try:
         # Load configuration
@@ -429,20 +348,173 @@ def process_documents():
         # Check for reference changes
         fine_tune_if_new_reference(cfg)
         
-        # Initialize Azure client with cost tracking
-        client, deployment, cost_tracker = get_azure_client(cfg)
+        # Initialize Azure client
+        client, deployment = get_azure_client(cfg)
         
-        # [Rest of the processing logic remains largely the same]
+        # Set up directories
+        input_dir = cfg['paths']['input_dir']
+        output_dir = cfg['paths']['output_dir']
+        source_dir = os.path.join(output_dir, 'source')
+        classified_dir = os.path.join(output_dir, 'classified')
+        unclassified_dir = os.path.join(output_dir, 'unclassified')
+        
+        # Ensure directories exist
+        os.makedirs(source_dir, exist_ok=True)
+        os.makedirs(classified_dir, exist_ok=True)
+        os.makedirs(unclassified_dir, exist_ok=True)
+        
+        # Logging for processing session
+        processing_timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        logging.info(f"\n\n--- Processing Session Started: {processing_timestamp} ---")
+        
+        # Processing statistics
+        stats = {
+            'total_documents': 0,
+            'total_pages': 0,
+            'classified_pages': 0,
+            'unclassified_pages': 0,
+            'page_classification_details': {},
+            'total_token_cost': 0.0,
+            'total_input_tokens': 0,
+            'total_output_tokens': 0
+        }
 
-        # Add total processing cost logging at the end
-        logging.info("\n--- Processing Session Cost Summary ---")
-        logging.info(json.dumps({
-            'total_processing_cost': cost_tracker.get_total_cost(),
-            'model_usage_details': cost_tracker.get_model_usage()
-        }, indent=2))
+        # Process each document
+        for fname in os.listdir(input_dir):
+            fpath = os.path.join(input_dir, fname)
+            
+            # Skip directories and hidden files
+            if not os.path.isfile(fpath) or fname.startswith('.'):
+                continue
 
-        print(f"\n✅ Page-Level Document Processing Complete")
-        print(f"   Total Processing Cost: ${cost_tracker.get_total_cost():.4f}")
+            # Determine file type
+            file_type = os.path.splitext(fname)[1].lower()
+            
+            # Skip non-processable file types
+            if file_type not in ['.pdf', '.jpg', '.jpeg', '.png', '.docx']:
+                logging.warning(f"Unsupported file type: {fname}")
+                continue
+
+            # Count total documents
+            stats['total_documents'] += 1
+
+            try:
+                # Open PDF to get page count (for PDFs)
+                if file_type == '.pdf':
+                    doc = fitz.open(fpath)
+                    total_pages = len(doc)
+                    doc.close()
+                else:
+                    total_pages = 1  # For non-PDF files
+
+                stats['total_pages'] += total_pages
+
+                # Copy original document to source directory
+                shutil.copy(fpath, os.path.join(source_dir, fname))
+
+                # Page-level classification
+                classified_pages_by_category = {}
+                unclassified_pages = list(range(total_pages))  # Initially all pages are unclassified
+
+                for page_num in range(total_pages):
+                    # Extract page image
+                    page_image = extract_page_image(fpath, page_num)
+                    
+                    # Classify page
+                    main_cat, sub_cat, confidence, reasoning, token_cost = classify_page(
+                        page_image, 
+                        client, 
+                        deployment,
+                        cfg
+                    )
+
+                    # Update token cost and usage statistics
+                    if token_cost:
+                        stats['total_token_cost'] += token_cost['total_cost']
+                        stats['total_input_tokens'] += token_cost['input_tokens']
+                        stats['total_output_tokens'] += token_cost['output_tokens']
+
+                    # Determine page destination
+                    confidence_threshold = cfg['classification'].get('confidence_threshold', 0.5)
+                    if confidence >= confidence_threshold:
+                        # Organize classified pages by category
+                        category_key = f"{main_cat}|{sub_cat}"
+                        if category_key not in classified_pages_by_category:
+                            classified_pages_by_category[category_key] = []
+                        classified_pages_by_category[category_key].append(page_num)
+                        
+                        # Remove from unclassified pages
+                        unclassified_pages.remove(page_num)
+                        
+                        stats['classified_pages'] += 1
+                    
+                    # Update page classification details
+                    if main_cat not in stats['page_classification_details']:
+                        stats['page_classification_details'][main_cat] = {}
+                    stats['page_classification_details'][main_cat][sub_cat] = \
+                        stats['page_classification_details'][main_cat].get(sub_cat, 0) + 1
+
+                # Process classified pages by category
+                for category, pages in classified_pages_by_category.items():
+                    main_cat, sub_cat = category.split('|')
+                    
+                    # Create classified directory
+                    cat_dest_dir = os.path.join(classified_dir, main_cat, sub_cat)
+                    os.makedirs(cat_dest_dir, exist_ok=True)
+
+                    # Create new PDF with classified pages
+                    doc = fitz.open(fpath)
+                    output = fitz.open()
+                    
+                    # Extract specified pages
+                    for page_num in pages:
+                        output.insert_pdf(doc, from_page=page_num, to_page=page_num)
+                    
+                    # Generate output filename
+                    page_range_str = "_".join(map(str, [p+1 for p in pages]))
+                    output_filename = f"{os.path.splitext(fname)[0]}_pages_{page_range_str}.pdf"
+                    
+                    # Save classified pages PDF
+                    output_path = os.path.join(cat_dest_dir, output_filename)
+                    output.save(output_path)
+                    
+                    output.close()
+                    doc.close()
+
+                # Handle unclassified pages
+                stats['unclassified_pages'] = len(unclassified_pages)
+                if unclassified_pages:
+                    # Create new PDF with unclassified pages
+                    doc = fitz.open(fpath)
+                    output = fitz.open()
+                    
+                    # Extract unclassified pages
+                    for page_num in unclassified_pages:
+                        output.insert_pdf(doc, from_page=page_num, to_page=page_num)
+                    
+                    # Generate unclassified filename
+                    page_range_str = "_".join(map(str, [p+1 for p in unclassified_pages]))
+                    unclassified_filename = f"{os.path.splitext(fname)[0]}_unclassified_pages_{page_range_str}.pdf"
+                    
+                    # Save unclassified pages PDF
+                    unclassified_path = os.path.join(unclassified_dir, unclassified_filename)
+                    output.save(unclassified_path)
+                    
+                    output.close()
+                    doc.close()
+
+            except Exception as e:
+                logging.error(f"Processing error for {fname}: {e}")
+                logging.error(traceback.format_exc())
+
+        # Log comprehensive processing summary
+        logging.info("\n--- Processing Session Summary ---")
+        logging.info(json.dumps(stats, indent=2))
+
+        print("\n✅ Page-Level Document Processing Complete")
+        print(f"🔢 Total Token Cost: ${stats['total_token_cost']:.4f}")
+        print(f"📊 Total Input Tokens: {stats['total_input_tokens']}")
+        print(f"📊 Total Output Tokens: {stats['total_output_tokens']}")
 
     except Exception as overall_error:
         logging.critical(f"Critical processing error: {overall_error}")
@@ -451,12 +523,3 @@ def process_documents():
 
 if __name__ == "__main__":
     process_documents()
-
------------
-
-"pricing": {
-    "gpt4o": {
-      "input_price_per_1m_tokens": 2.5,
-      "output_price_per_1m_tokens": 10,
-      "cached_input_price_per_1m_tokens": 1.25
-    }
