@@ -292,16 +292,15 @@ if __name__ == "__main__":
     classify_documents(config)
 
 ---update
-
 import os
 import json
 from azure.core.credentials import AzureKeyCredential
 from azure.ai.documentintelligence import (
-    DocumentIntelligenceClient,
     DocumentIntelligenceAdministrationClient,
 )
 from azure.ai.documentintelligence.models import (
-    BuildDocumentClassifierRequest
+    BuildDocumentClassifierRequest,
+    AzureBlobSource,
 )
 from azure.storage.blob import BlobServiceClient
 from helper import upload_reference_to_blob
@@ -320,9 +319,17 @@ def train_model(config):
     connection_string = config["storage"]["connection_string"]
     container_name = config["storage"]["container_name"]
     
-    # Create Blob Service Client to verify container
+    # Extract storage account name programmatically
     try:
         blob_service_client = BlobServiceClient.from_connection_string(connection_string)
+        storage_account = blob_service_client.account_name
+        print(f"📦 Storage Account: {storage_account}")
+    except Exception as account_error:
+        print(f"❌ Could not extract storage account name: {account_error}")
+        return None
+
+    # Create Blob Service Client to verify container
+    try:
         container_client = blob_service_client.get_container_client(container_name)
         
         # Verify container exists
@@ -347,11 +354,14 @@ def train_model(config):
             endpoint, AzureKeyCredential(key)
         )
 
+        # Create AzureBlobSource
+        blob_source = AzureBlobSource(
+            container_url=f"https://{storage_account}.blob.core.windows.net/{container_name}"
+        )
+
         # Prepare build request
         build_request = BuildDocumentClassifierRequest(
-            azure_blob_source={
-                "container_url": f"https://<your-storage-account>.blob.core.windows.net/{container_name}"
-            },
+            azure_blob_source=blob_source,
             description=f"Custom document classifier for {project_name}"
         )
 
@@ -380,6 +390,21 @@ def train_model(config):
 
     except Exception as train_error:
         print(f"❌ Model training failed: {train_error}")
-        raise  # Re-raise to get full error details
+        import traceback
+        traceback.print_exc()  # Print full traceback for detailed error info
+        return None
+```
 
-# Rest of the code remains the same
+Key Improvements:
+1. Automatically extracts storage account name
+2. Adds more detailed logging
+3. Handles potential errors in account name extraction
+
+Troubleshooting Tips:
+- Ensure your connection string is correct
+- Verify network connectivity
+- Check Azure AD permissions
+
+Common Connection String Format:
+```
+DefaultEndpointsProtocol=https;AccountName=mystorageaccount;AccountKey=YOUR_ACCOUNT_KEY;EndpointSuffix=core.windows.net
