@@ -119,6 +119,7 @@ main.py
 import os
 import json
 import shutil
+import traceback
 from azure.core.credentials import AzureKeyCredential
 from azure.ai.documentintelligence import (
     DocumentIntelligenceClient,
@@ -191,9 +192,9 @@ def train_model(config):
         model = poller.result()
 
         print(f"✅ Model training completed successfully.")
-        print(f"🆔 New model ID: {model.model_id}")
+        print(f"🆔 New Classifier ID: {model.model_id}")
 
-        # Update config with new model ID
+        # Update config with new classifier ID
         config["document_intelligence"]["model_id"] = model.model_id
         
         # Optional: Save categories as metadata or model description
@@ -210,7 +211,6 @@ def train_model(config):
 
     except Exception as train_error:
         print(f"❌ Model training failed: {train_error}")
-        import traceback
         traceback.print_exc()  # Print full traceback for detailed error info
         return None
 
@@ -221,7 +221,7 @@ def classify_documents(config):
     # Extract configuration
     endpoint = config["document_intelligence"]["endpoint"]
     key = config["document_intelligence"]["api_key"]
-    model_id = config["document_intelligence"]["model_id"]
+    classifier_id = config["document_intelligence"]["model_id"]
 
     # Path configurations
     input_dir = config["paths"]["input_dir"]
@@ -236,84 +236,105 @@ def classify_documents(config):
         os.makedirs(path, exist_ok=True)
 
     # Create Document Intelligence Client
-    client = DocumentIntelligenceClient(endpoint, AzureKeyCredential(key))
+    try:
+        client = DocumentIntelligenceClient(endpoint, AzureKeyCredential(key))
 
-    # Process each file in input directory
-    for file in os.listdir(input_dir):
-        file_path = os.path.join(input_dir, file)
-        
-        # Skip non-files and unsupported file types
-        if not os.path.isfile(file_path):
-            continue
-        if not file.lower().endswith((".pdf", ".png", ".jpg", ".jpeg")):
-            continue
+        # Process each file in input directory
+        for file in os.listdir(input_dir):
+            file_path = os.path.join(input_dir, file)
+            
+            # Skip non-files and unsupported file types
+            if not os.path.isfile(file_path):
+                continue
+            if not file.lower().endswith((".pdf", ".png", ".jpg", ".jpeg")):
+                continue
 
-        print(f"📄 Processing {file} ...")
+            print(f"📄 Processing {file} ...")
 
-        # Copy original file to source directory
-        shutil.copy(file_path, os.path.join(source_dir, file))
+            # Copy original file to source directory
+            shutil.copy(file_path, os.path.join(source_dir, file))
 
-        # Temporary directory for PDF page processing
-        temp_dir = "temp_pages"
-        os.makedirs(temp_dir, exist_ok=True)
+            # Temporary directory for PDF page processing
+            temp_dir = "temp_pages"
+            os.makedirs(temp_dir, exist_ok=True)
 
-        # Handle PDF files differently (page-by-page)
-        if file.lower().endswith(".pdf"):
-            total_pages = split_pdf_to_pages(file_path, temp_dir)
+            # Handle PDF files differently (page-by-page)
+            if file.lower().endswith(".pdf"):
+                total_pages = split_pdf_to_pages(file_path, temp_dir)
 
-            for page_file in os.listdir(temp_dir):
-                page_path = os.path.join(temp_dir, page_file)
-                
-                # Classify document
-                with open(page_path, "rb") as f:
-                    poller = client.begin_classify_document(
-                        model_id=model_id, document=f
-                    )
-                result = poller.result()
+                for page_file in os.listdir(temp_dir):
+                    page_path = os.path.join(temp_dir, page_file)
+                    
+                    # Classify document
+                    with open(page_path, "rb") as f:
+                        document_bytes = f.read()
+                        try:
+                            poller = client.begin_classify_document(
+                                classifier_id=classifier_id,
+                                body=document_bytes
+                            )
+                            result = poller.result()
 
-                # Determine category
-                if result.documents and result.documents[0].confidence >= confidence_threshold:
-                    category = result.documents[0].doc_type
-                else:
-                    category = "unclassified"
+                            # Determine category
+                            if result.documents and result.documents[0].confidence >= confidence_threshold:
+                                category = result.documents[0].doc_type
+                            else:
+                                category = "unclassified"
 
-                # Move to appropriate directory
-                dest_folder = (
-                    unclassified_dir
-                    if category == "unclassified"
-                    else os.path.join(classified_dir, category)
-                )
-                os.makedirs(dest_folder, exist_ok=True)
-                shutil.move(page_path, os.path.join(dest_folder, page_file))
+                            # Move to appropriate directory
+                            dest_folder = (
+                                unclassified_dir
+                                if category == "unclassified"
+                                else os.path.join(classified_dir, category)
+                            )
+                            os.makedirs(dest_folder, exist_ok=True)
+                            shutil.move(page_path, os.path.join(dest_folder, page_file))
 
-                print(f"   → {page_file} → {category}")
+                            print(f"   → {page_file} → {category}")
+                        
+                        except Exception as classify_error:
+                            print(f"❌ Classification error for {page_file}: {classify_error}")
+                            traceback.print_exc()
 
-            print(f"✅ {file}: {total_pages} pages classified.")
+                print(f"✅ {file}: {total_pages} pages processed.")
 
-        # Handle non-PDF files
-        else:
-            with open(file_path, "rb") as f:
-                poller = client.begin_classify_document(model_id=model_id, document=f)
-            result = poller.result()
-
-            # Determine category
-            if result.documents and result.documents[0].confidence >= confidence_threshold:
-                category = result.documents[0].doc_type
+            # Handle non-PDF files
             else:
-                category = "unclassified"
+                with open(file_path, "rb") as f:
+                    document_bytes = f.read()
+                    try:
+                        poller = client.begin_classify_document(
+                            classifier_id=classifier_id,
+                            body=document_bytes
+                        )
+                        result = poller.result()
 
-            # Move to appropriate directory
-            dest_folder = (
-                unclassified_dir
-                if category == "unclassified"
-                else os.path.join(classified_dir, category)
-            )
-            os.makedirs(dest_folder, exist_ok=True)
-            shutil.move(file_path, os.path.join(dest_folder, file))
+                        # Determine category
+                        if result.documents and result.documents[0].confidence >= confidence_threshold:
+                            category = result.documents[0].doc_type
+                        else:
+                            category = "unclassified"
 
-            print(f"✅ {file} classified as {category}")
+                        # Move to appropriate directory
+                        dest_folder = (
+                            unclassified_dir
+                            if category == "unclassified"
+                            else os.path.join(classified_dir, category)
+                        )
+                        os.makedirs(dest_folder, exist_ok=True)
+                        shutil.move(file_path, os.path.join(dest_folder, file))
 
-    print("🎯 Classification complete.")
+                        print(f"✅ {file} classified as {category}")
+                    
+                    except Exception as classify_error:
+                        print(f"❌ Classification error for {file}: {classify_error}")
+                        traceback.print_exc()
+
+        print("🎯 Classification complete.")
+
+    except Exception as client_error:
+        print(f"❌ Document Intelligence Client error: {client_error}")
+        traceback.print_exc()
 
 # Main execution
 if __name__ == "__main__":
