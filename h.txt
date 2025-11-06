@@ -92,8 +92,7 @@ def split_pdf_to_pages(input_pdf, output_dir):
 
 
 ----
-
-main.upy
+main.py
 
 import os
 import json
@@ -101,35 +100,43 @@ import shutil
 from azure.core.credentials import AzureKeyCredential
 from azure.ai.documentintelligence import (
     DocumentIntelligenceClient,
-    DocumentIntelligenceAdministrationClient
+    DocumentIntelligenceAdministrationClient,
 )
 from azure.ai.documentintelligence.models import (
     BuildDocumentClassifierRequest,
-    AzureBlobContentSource
+    AzureBlobSource,
 )
 from helper import upload_reference_to_blob, split_pdf_to_pages
 
 
 def train_model(config):
-    """Train a custom classifier with reference data in blob."""
+    """
+    Trains a custom classifier using Azure Document Intelligence
+    with reference data uploaded to Blob Storage.
+    """
     endpoint = config["document_intelligence"]["endpoint"]
     key = config["document_intelligence"]["api_key"]
     container_name = config["storage"]["container_name"]
 
-    admin_client = DocumentIntelligenceAdministrationClient(endpoint, AzureKeyCredential(key))
-    print("🚀 Starting model training...")
+    print("🚀 Starting model training ...")
+    admin_client = DocumentIntelligenceAdministrationClient(
+        endpoint, AzureKeyCredential(key)
+    )
 
     build_request = BuildDocumentClassifierRequest(
-        source=AzureBlobContentSource(
+        azure_blob_source=AzureBlobSource(
             container_url=f"https://<your-storage-account>.blob.core.windows.net/{container_name}"
         ),
-        description="Custom document classification model"
+        description="Custom document classification model (auto-generated)",
     )
 
     poller = admin_client.begin_build_document_classifier(build_request)
     model = poller.result()
-    print(f"✅ Model training completed. Model ID: {model.model_id}")
 
+    print(f"✅ Model training completed successfully.")
+    print(f"🆔 New model ID: {model.model_id}")
+
+    # Save model_id back into config.json
     config["document_intelligence"]["model_id"] = model.model_id
     with open("config.json", "w") as f:
         json.dump(config, f, indent=4)
@@ -138,7 +145,9 @@ def train_model(config):
 
 
 def classify_documents(config):
-    """Classify PDFs and images into folders based on model predictions."""
+    """
+    Classifies PDFs and images into folders based on model predictions.
+    """
     endpoint = config["document_intelligence"]["endpoint"]
     key = config["document_intelligence"]["api_key"]
     model_id = config["document_intelligence"]["model_id"]
@@ -147,10 +156,12 @@ def classify_documents(config):
     output_dir = config["paths"]["output_dir"]
     classified_dir = config["paths"]["classified_dir"]
     unclassified_dir = config["paths"]["unclassified_dir"]
+    source_dir = config["paths"]["source_dir"]
+    confidence_threshold = config["runtime"]["confidence_threshold"]
 
-    os.makedirs(output_dir, exist_ok=True)
-    os.makedirs(classified_dir, exist_ok=True)
-    os.makedirs(unclassified_dir, exist_ok=True)
+    # Ensure all directories exist
+    for path in [output_dir, classified_dir, unclassified_dir, source_dir]:
+        os.makedirs(path, exist_ok=True)
 
     client = DocumentIntelligenceClient(endpoint, AzureKeyCredential(key))
 
@@ -161,134 +172,86 @@ def classify_documents(config):
         if not file.lower().endswith((".pdf", ".png", ".jpg", ".jpeg")):
             continue
 
-        print(f"📄 Processing {file}...")
-        temp_dir = os.path.join("temp_pages")
+        print(f"📄 Processing {file} ...")
+
+        # Copy original file to source_dir
+        shutil.copy(file_path, os.path.join(source_dir, file))
+
+        temp_dir = "temp_pages"
         if os.path.exists(temp_dir):
             shutil.rmtree(temp_dir)
         os.makedirs(temp_dir, exist_ok=True)
 
         if file.lower().endswith(".pdf"):
             total_pages = split_pdf_to_pages(file_path, temp_dir)
+
             for page_file in os.listdir(temp_dir):
                 page_path = os.path.join(temp_dir, page_file)
                 with open(page_path, "rb") as f:
-                    poller = client.begin_classify_document(model_id=model_id, document=f)
+                    poller = client.begin_classify_document(
+                        model_id=model_id, document=f
+                    )
                 result = poller.result()
 
-                if result.documents and result.documents[0].confidence >= config["runtime"]["confidence_threshold"]:
+                if (
+                    result.documents
+                    and result.documents[0].confidence >= confidence_threshold
+                ):
                     category = result.documents[0].doc_type
                 else:
                     category = "unclassified"
 
-                dest_folder = os.path.join(classified_dir, category)
+                dest_folder = (
+                    unclassified_dir
+                    if category == "unclassified"
+                    else os.path.join(classified_dir, category)
+                )
                 os.makedirs(dest_folder, exist_ok=True)
-                shutil.move(page_path, os.path.join(dest_folder, page_file))
-            print(f"✅ {file}: {total_pages} pages processed.")
+
+                dest_path = os.path.join(dest_folder, page_file)
+                shutil.move(page_path, dest_path)
+
+                print(f"   → {page_file} → {category}")
+
+            print(f"✅ {file}: {total_pages} pages classified.")
         else:
             with open(file_path, "rb") as f:
                 poller = client.begin_classify_document(model_id=model_id, document=f)
             result = poller.result()
 
-            if result.documents and result.documents[0].confidence >= config["runtime"]["confidence_threshold"]:
+            if (
+                result.documents
+                and result.documents[0].confidence >= confidence_threshold
+            ):
                 category = result.documents[0].doc_type
             else:
                 category = "unclassified"
 
-            dest_folder = os.path.join(classified_dir, category)
+            dest_folder = (
+                unclassified_dir
+                if category == "unclassified"
+                else os.path.join(classified_dir, category)
+            )
             os.makedirs(dest_folder, exist_ok=True)
             shutil.move(file_path, os.path.join(dest_folder, file))
-            print(f"✅ Image classified as {category}")
 
-    print("🎯 Classification completed!")
+            print(f"✅ {file} classified as {category}")
+
+    print("🎯 Classification complete.")
 
 
 if __name__ == "__main__":
-    with open("config.json") as f:
+    with open("config.json", "r") as f:
         config = json.load(f)
 
-    # Upload reference data
+    print("🔧 Checking reference data ...")
     new_data_uploaded = upload_reference_to_blob(config)
 
-    # Auto retrain if needed
+    # Retrain only if new data found
     if config["runtime"]["auto_retrain"] and new_data_uploaded:
         model_id = train_model(config)
     else:
         model_id = config["document_intelligence"]["model_id"]
+        print(f"ℹ️ Using existing model ID: {model_id}")
 
-    # Classify new incoming documents
     classify_documents(config)
-
-
-
----update
-from azure.ai.documentintelligence.models import (
-    BuildDocumentClassifierRequest, AzureBlobContentSource
-)
-from azure.ai.documentintelligence import DocumentIntelligenceAdministrationClient
-from azure.core.credentials import AzureKeyCredential
-import json
-
-
-def train_model(config):
-    endpoint = config["document_intelligence"]["endpoint"]
-    key = config["document_intelligence"]["api_key"]
-    container_name = config["storage"]["container_name"]
-
-    admin_client = DocumentIntelligenceAdministrationClient(endpoint, AzureKeyCredential(key))
-    print("🚀 Starting model training...")
-
-    build_request = BuildDocumentClassifierRequest(
-        source=AzureBlobContentSource(
-            container_url=f"https://<your-storage-account>.blob.core.windows.net/{container_name}"
-        ),
-        description="Custom document classification model"
-    )
-
-    poller = admin_client.begin_build_document_classifier(build_request)
-    model = poller.result()
-    print(f"✅ Model training completed. Model ID: {model.model_id}")
-
-    config["document_intelligence"]["model_id"] = model.model_id
-    with open("config.json", "w") as f:
-        json.dump(config, f, indent=4)
-
-    return model.model_id
-
----
-from azure.ai.documentintelligence import (
-    DocumentIntelligenceAdministrationClient
-)
-from azure.ai.documentintelligence.models import (
-    AzureBlobSource, BuildDocumentClassifierRequest
-)
-from azure.core.credentials import AzureKeyCredential
-import json
-
-
-def train_model(config):
-    """Train a custom classifier with reference data in blob (new SDK)."""
-    endpoint = config["document_intelligence"]["endpoint"]
-    key = config["document_intelligence"]["api_key"]
-    container_name = config["storage"]["container_name"]
-
-    admin_client = DocumentIntelligenceAdministrationClient(endpoint, AzureKeyCredential(key))
-    print("🚀 Starting model training...")
-
-    build_request = BuildDocumentClassifierRequest(
-        azure_blob_source=AzureBlobSource(
-            container_url=f"https://<your-storage-account>.blob.core.windows.net/{container_name}"
-        ),
-        description="Custom document classification model"
-    )
-
-    poller = admin_client.begin_build_document_classifier(build_request)
-    model = poller.result()
-    print(f"✅ Model training completed. Model ID: {model.model_id}")
-
-    config["document_intelligence"]["model_id"] = model.model_id
-    with open("config.json", "w") as f:
-        json.dump(config, f, indent=4)
-
-    return model.model_id
-
-
