@@ -1,262 +1,150 @@
 {
-    "azure_document_intelligence": {
-        "endpoint": "YOUR_DOCUMENT_INTELLIGENCE_ENDPOINT",
-        "key": "YOUR_DOCUMENT_INTELLIGENCE_KEY",
-        "model_version": "2024-02-15-preview"
-    },
-    "categories": {
-        "cms1500": ["cadwell", "rhymlink"],
-        "invoice": ["tesla", "amazon"],
-        "scheduling": ["email", "iomrequest"]
-    },
-    "paths": {
-        "reference_dir": "reference",
-        "input_dir": "input_docs",
-        "output_dir": "output",
-        "source_dir": "output/source",
-        "classified_dir": "output/classified",
-        "unclassified_dir": "output/unclassified"
-    },
-    "model_training": {
-        "min_documents_per_category": 5,
-        "max_training_documents": 100,
-        "confidence_threshold": 0.7
-    },
-    "allowed_file_types": [".pdf", ".tiff", ".jpg", ".jpeg", ".png"]
+  "document_intelligence": {
+    "endpoint": "https://<your-doc-intelligence-resource>.cognitiveservices.azure.com/",
+    "api_key": "<your-doc-intelligence-key>",
+    "project_name": "custom-doc-classifier",
+    "model_id": "custom-classifier-v1"
+  },
+  "storage": {
+    "connection_string": "<your-azure-storage-connection-string>",
+    "container_name": "document-training-data",
+    "sas_url": "https://<your-storage-account>.blob.core.windows.net/<container>?<sas-token>"
+  },
+  "paths": {
+    "reference_dir": "reference/",
+    "input_dir": "input/",
+    "output_dir": "output/",
+    "classified_dir": "output/classified/",
+    "unclassified_dir": "output/unclassified/",
+    "source_dir": "output/source/"
+  },
+  "runtime": {
+    "confidence_threshold": 0.9,
+    "auto_retrain": true
+  }
 }
 
------
- import os
+
+
+----
+helper.py
+
+import os
+import fitz  # PyMuPDF
 import json
-import hashlib
-import logging
-import traceback
-from datetime import datetime
-from typing import Dict, Any, List, Optional
-
-from azure.ai.documentintelligence import DocumentIntelligenceClient
 from azure.core.credentials import AzureKeyCredential
-from azure.core.exceptions import HttpResponseError
+from azure.ai.documentintelligence import DocumentIntelligenceAdministrationClient, DocumentIntelligenceClient
 
-# Configure logging
-logging.basicConfig(
-    level=logging.INFO, 
-    format='%(asctime)s - %(levelname)s: %(message)s',
-    filename='document_processing.log',
-    filemode='a'
-)
+def load_config(config_path="config.json"):
+    with open(config_path, "r") as f:
+        return json.load(f)
 
-class DocumentIntelligenceModelTrainer:
-    def __init__(self, config_path: str = 'config.json'):
-        """
-        Initialize Document Intelligence Model Trainer
-        """
-        # Load configuration
-        with open(config_path, 'r') as f:
-            self.cfg = json.load(f)
-        
-        # Setup logging
-        self.logger = logging.getLogger(__name__)
-        
-        # Initialize Azure client
-        self.client = self._initialize_client()
-        
-        # Ensure directories exist
-        self._prepare_directories()
+def ensure_directories(paths):
+    for key, path in paths.items():
+        if not os.path.exists(path):
+            os.makedirs(path, exist_ok=True)
 
-    def _prepare_directories(self):
-        """
-        Ensure necessary directories exist
-        """
-        directories = [
-            self.cfg['paths']['input_dir'],
-            self.cfg['paths']['output_dir'],
-            self.cfg['paths']['source_dir'],
-            self.cfg['paths']['classified_dir'],
-            self.cfg['paths']['unclassified_dir']
-        ]
-        
-        for dir_path in directories:
-            os.makedirs(dir_path, exist_ok=True)
+def split_pdf_into_pages(pdf_path, output_folder):
+    doc = fitz.open(pdf_path)
+    page_files = []
+    for i, page in enumerate(doc):
+        output_path = os.path.join(output_folder, f"{os.path.splitext(os.path.basename(pdf_path))[0]}_page_{i+1}.pdf")
+        new_pdf = fitz.open()
+        new_pdf.insert_pdf(doc, from_page=i, to_page=i)
+        new_pdf.save(output_path)
+        new_pdf.close()
+        page_files.append(output_path)
+    doc.close()
+    return page_files
 
-    def _initialize_client(self) -> DocumentIntelligenceClient:
-        """
-        Initialize Azure Document Intelligence Client
-        """
-        try:
-            credential = AzureKeyCredential(self.cfg["azure_document_intelligence"]["key"])
-            return DocumentIntelligenceClient(
-                endpoint=self.cfg["azure_document_intelligence"]["endpoint"],
-                credential=credential
-            )
-        except Exception as e:
-            self.logger.critical(f"Client initialization error: {e}")
-            raise
+def initialize_clients(config):
+    endpoint = config["document_intelligence"]["endpoint"]
+    api_key = config["document_intelligence"]["api_key"]
+    return (
+        DocumentIntelligenceAdministrationClient(endpoint=endpoint, credential=AzureKeyCredential(api_key)),
+        DocumentIntelligenceClient(endpoint=endpoint, credential=AzureKeyCredential(api_key))
+    )
 
-    def classify_document(self, file_path: str) -> Dict[str, Any]:
-        """
-        Classify document using Document Intelligence
-        """
-        try:
-            # Open document
-            with open(file_path, "rb") as doc_file:
-                # Use pre-built document model
-                poller = self.client.begin_analyze_document(
-                    "prebuilt-document",
-                    doc_file
-                )
-                result = poller.result()
-            
-            # Default classification
-            classification = {
-                'main_category': 'unknown',
-                'subcategory': 'unknown',
-                'confidence_score': 0.0
-            }
-            
-            # Process results
-            if result.documents and result.documents[0].fields:
-                document = result.documents[0]
-                
-                # Implement classification logic
-                for cat, subcats in self.cfg['categories'].items():
-                    for subcat in subcats:
-                        # Example classification logic
-                        if any(subcat in str(field) for field in document.fields.values()):
-                            classification['main_category'] = cat
-                            classification['subcategory'] = subcat
-                            classification['confidence_score'] = document.confidence
-                            break
-            
-            return classification
+def check_and_retrain_model(admin_client, config):
+    if not config["runtime"]["auto_retrain"]:
+        return config["document_intelligence"]["model_id"]
+    
+    print("Checking reference folder for updates... (simulated retraining trigger)")
+    # ⚙️ In production: You'd call begin_build_document_classifier() here using the SAS URL.
+    # For now, we assume retraining is done manually or triggered externally.
+    return config["document_intelligence"]["model_id"]
 
-        except HttpResponseError as http_err:
-            self.logger.error(f"HTTP error during classification: {http_err}")
-            return {
-                'main_category': 'unknown',
-                'subcategory': 'unknown',
-                'confidence_score': 0.0
-            }
-        except Exception as e:
-            self.logger.error(f"Document classification error: {e}")
-            return {
-                'main_category': 'unknown',
-                'subcategory': 'unknown',
-                'confidence_score': 0.0
-            }
+def classify_page(doc_client, config, pdf_path):
+    with open(pdf_path, "rb") as f:
+        poller = doc_client.begin_classify_document(
+            model_id=config["document_intelligence"]["model_id"],
+            document=f
+        )
+    result = poller.result()
+    
+    classifications = []
+    for doc in result.documents:
+        classifications.append({
+            "category": doc.doc_type,
+            "confidence": doc.confidence
+        })
+    return classifications
 
-    def validate_reference_documents(self) -> bool:
-        """
-        Validate reference document structure and count
-        """
-        ref_dir = self.cfg['paths']['reference_dir']
-        min_docs = self.cfg['model_training']['min_documents_per_category']
-        
-        try:
-            for main_category in os.listdir(ref_dir):
-                main_path = os.path.join(ref_dir, main_category)
-                if not os.path.isdir(main_path):
-                    continue
-                
-                for subcategory in os.listdir(main_path):
-                    subcat_path = os.path.join(main_path, subcategory)
-                    if not os.path.isdir(subcat_path):
-                        continue
-                    
-                    # Count documents
-                    documents = [
-                        f for f in os.listdir(subcat_path)
-                        if os.path.isfile(os.path.join(subcat_path, f))
-                    ]
-                    
-                    # Check document count
-                    if len(documents) < min_docs:
-                        self.logger.warning(
-                            f"Insufficient documents in {main_category}/{subcategory}. "
-                            f"Found {len(documents)}, minimum required is {min_docs}"
-                        )
-                        return False
-            
-            return True
-        
-        except Exception as e:
-            self.logger.error(f"Reference document validation error: {e}")
-            return False
 
 ---
+main.py
+
 import os
 import shutil
-import logging
-import fitz
-from helper import DocumentIntelligenceModelTrainer
-
-# Configure logging
-logging.basicConfig(
-    level=logging.INFO, 
-    format='%(asctime)s - %(levelname)s: %(message)s',
-    filename='document_processing.log',
-    filemode='a'
+from helper import (
+    load_config, ensure_directories,
+    split_pdf_into_pages, initialize_clients,
+    check_and_retrain_model, classify_page
 )
 
-def process_documents(trainer):
-    """
-    Document processing workflow
-    """
-    # Validate reference documents
-    if not trainer.validate_reference_documents():
-        logging.warning("Reference documents do not meet minimum requirements")
-        return
-    
-    # Configuration
-    cfg = trainer.cfg
-    input_dir = cfg['paths']['input_dir']
-    source_dir = cfg['paths']['source_dir']
-    classified_dir = cfg['paths']['classified_dir']
-    unclassified_dir = cfg['paths']['unclassified_dir']
-    
-    # Process each document
-    for filename in os.listdir(input_dir):
-        filepath = os.path.join(input_dir, filename)
-        
-        # Skip unsupported file types
-        if not any(filename.lower().endswith(ext) for ext in cfg['allowed_file_types']):
-            logging.warning(f"Unsupported file type: {filename}")
-            continue
-        
-        # Copy to source directory
-        source_filepath = os.path.join(source_dir, filename)
-        shutil.copy(filepath, source_filepath)
-        
-        # Classify document
-        classification = trainer.classify_document(filepath)
-        
-        # Determine confidence threshold
-        confidence_threshold = cfg['model_training']['confidence_threshold']
-        
-        # Prepare output
-        if classification['confidence_score'] >= confidence_threshold:
-            # Classified document
-            output_category_dir = os.path.join(
-                classified_dir, 
-                classification['main_category'], 
-                classification['subcategory']
-            )
-            os.makedirs(output_category_dir, exist_ok=True)
-            
-            # Save classified document
-            output_filepath = os.path.join(output_category_dir, filename)
-            shutil.copy(filepath, output_filepath)
-        else:
-            # Unclassified document
-            output_filepath = os.path.join(unclassified_dir, filename)
-            shutil.copy(filepath, output_filepath)
+def process_documents():
+    config = load_config()
+    paths = config["paths"]
+    ensure_directories(paths)
 
-def main():
-    # Initialize model trainer
-    trainer = DocumentIntelligenceModelTrainer()
-    
-    # Process documents
-    process_documents(trainer)
+    admin_client, doc_client = initialize_clients(config)
+    model_id = check_and_retrain_model(admin_client, config)
+
+    input_dir = paths["input_dir"]
+    confidence_threshold = config["runtime"]["confidence_threshold"]
+
+    for file in os.listdir(input_dir):
+        if file.lower().endswith(".pdf"):
+            pdf_path = os.path.join(input_dir, file)
+            print(f"\nProcessing {file}...")
+
+            # Copy original
+            shutil.copy(pdf_path, paths["source_dir"])
+
+            # Split into pages
+            page_files = split_pdf_into_pages(pdf_path, paths["output_dir"])
+
+            # Classify each page
+            for page_pdf in page_files:
+                classifications = classify_page(doc_client, config, page_pdf)
+                if not classifications:
+                    dest = os.path.join(paths["unclassified_dir"], os.path.basename(page_pdf))
+                    shutil.move(page_pdf, dest)
+                    continue
+
+                best_class = max(classifications, key=lambda x: x["confidence"])
+                category = best_class["category"]
+                confidence = best_class["confidence"]
+
+                if confidence >= confidence_threshold:
+                    dest_folder = os.path.join(paths["classified_dir"], category)
+                    os.makedirs(dest_folder, exist_ok=True)
+                    shutil.move(page_pdf, os.path.join(dest_folder, os.path.basename(page_pdf)))
+                    print(f" → Classified as {category} ({confidence:.2f})")
+                else:
+                    dest = os.path.join(paths["unclassified_dir"], os.path.basename(page_pdf))
+                    shutil.move(page_pdf, dest)
+                    print(f" → Low confidence ({confidence:.2f}), moved to unclassified")
 
 if __name__ == "__main__":
-    main()
+    process_documents()
