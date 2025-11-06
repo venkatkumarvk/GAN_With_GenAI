@@ -221,13 +221,15 @@ if __name__ == "__main__":
 
 
 ---update
+from azure.ai.documentintelligence.models import (
+    BuildDocumentClassifierRequest, AzureBlobContentSource
+)
+from azure.ai.documentintelligence import DocumentIntelligenceAdministrationClient
+from azure.core.credentials import AzureKeyCredential
+import json
+
 
 def train_model(config):
-    """Train a custom classifier with reference data in blob."""
-    from azure.ai.documentintelligence.models import (
-        AzureBlobSource, BuildDocumentClassifierRequest
-    )
-
     endpoint = config["document_intelligence"]["endpoint"]
     key = config["document_intelligence"]["api_key"]
     container_name = config["storage"]["container_name"]
@@ -235,7 +237,43 @@ def train_model(config):
     admin_client = DocumentIntelligenceAdministrationClient(endpoint, AzureKeyCredential(key))
     print("🚀 Starting model training...")
 
-    # Updated parameter name (azure_blob_source)
+    build_request = BuildDocumentClassifierRequest(
+        source=AzureBlobContentSource(
+            container_url=f"https://<your-storage-account>.blob.core.windows.net/{container_name}"
+        ),
+        description="Custom document classification model"
+    )
+
+    poller = admin_client.begin_build_document_classifier(build_request)
+    model = poller.result()
+    print(f"✅ Model training completed. Model ID: {model.model_id}")
+
+    config["document_intelligence"]["model_id"] = model.model_id
+    with open("config.json", "w") as f:
+        json.dump(config, f, indent=4)
+
+    return model.model_id
+
+---
+from azure.ai.documentintelligence import (
+    DocumentIntelligenceAdministrationClient
+)
+from azure.ai.documentintelligence.models import (
+    AzureBlobSource, BuildDocumentClassifierRequest
+)
+from azure.core.credentials import AzureKeyCredential
+import json
+
+
+def train_model(config):
+    """Train a custom classifier with reference data in blob (new SDK)."""
+    endpoint = config["document_intelligence"]["endpoint"]
+    key = config["document_intelligence"]["api_key"]
+    container_name = config["storage"]["container_name"]
+
+    admin_client = DocumentIntelligenceAdministrationClient(endpoint, AzureKeyCredential(key))
+    print("🚀 Starting model training...")
+
     build_request = BuildDocumentClassifierRequest(
         azure_blob_source=AzureBlobSource(
             container_url=f"https://<your-storage-account>.blob.core.windows.net/{container_name}"
@@ -252,4 +290,5 @@ def train_model(config):
         json.dump(config, f, indent=4)
 
     return model.model_id
+
 
