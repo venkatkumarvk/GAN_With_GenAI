@@ -26,10 +26,7 @@
 }
 
 -----
-
-help.py
-
-import os
+ import os
 import json
 import hashlib
 import logging
@@ -39,6 +36,7 @@ from typing import Dict, Any, List, Optional
 
 from azure.ai.documentintelligence import DocumentIntelligenceClient
 from azure.core.credentials import AzureKeyCredential
+from azure.core.exceptions import HttpResponseError
 
 # Configure logging
 logging.basicConfig(
@@ -95,91 +93,6 @@ class DocumentIntelligenceModelTrainer:
             self.logger.critical(f"Client initialization error: {e}")
             raise
 
-    def _compute_reference_hash(self, ref_dir: str) -> str:
-        """
-        Compute hash of reference documents
-        """
-        hasher = hashlib.sha256()
-        
-        for root, _, files in sorted(os.walk(ref_dir)):
-            for file in sorted(files):
-                path = os.path.join(root, file)
-                with open(path, 'rb') as f:
-                    hasher.update(f.read())
-        
-        return hasher.hexdigest()
-
-    def train_custom_model(self) -> Optional[str]:
-        """
-        Train custom Document Intelligence model
-        """
-        try:
-            # Prepare reference documents
-            ref_dir = self.cfg['paths']['reference_dir']
-            training_files = []
-            
-            # Collect training documents
-            for main_category in os.listdir(ref_dir):
-                main_path = os.path.join(ref_dir, main_category)
-                if not os.path.isdir(main_path):
-                    continue
-                
-                for subcategory in os.listdir(main_path):
-                    subcat_path = os.path.join(main_path, subcategory)
-                    if not os.path.isdir(subcat_path):
-                        continue
-                    
-                    # Collect documents
-                    documents = [
-                        os.path.join(subcat_path, doc) 
-                        for doc in os.listdir(subcat_path)
-                        if os.path.isfile(os.path.join(subcat_path, doc))
-                    ]
-                    
-                    # Limit documents
-                    documents = documents[:self.cfg['model_training']['max_training_documents']]
-                    training_files.extend(documents)
-            
-            # Validate training files
-            if not training_files:
-                self.logger.error("No training documents found")
-                return None
-            
-            # Generate unique model identifier
-            model_id = f"custom-model-{datetime.now().strftime('%Y%m%d%H%M%S')}"
-            
-            # Prepare training files
-            training_file_handles = [open(file, 'rb') for file in training_files]
-            
-            try:
-                # Placeholder for model training
-                # Note: This might need adjustment based on current SDK
-                result = self.client.build_model(
-                    model_id=model_id,
-                    training_files=training_file_handles
-                )
-                
-                self.logger.info(f"Custom model trained: {model_id}")
-                return model_id
-            
-            finally:
-                # Close file handles
-                for file in training_file_handles:
-                    file.close()
-        
-        except Exception as e:
-            self.logger.error(f"Model training error: {e}")
-            self.logger.error(traceback.format_exc())
-            return None
-
-    def get_latest_model_id(self) -> str:
-        """
-        Retrieve latest trained model ID
-        """
-        # For now, return pre-built document model
-        # In a full implementation, you'd track and retrieve custom models
-        return "prebuilt-document"
-
     def classify_document(self, file_path: str) -> Dict[str, Any]:
         """
         Classify document using Document Intelligence
@@ -217,6 +130,13 @@ class DocumentIntelligenceModelTrainer:
             
             return classification
 
+        except HttpResponseError as http_err:
+            self.logger.error(f"HTTP error during classification: {http_err}")
+            return {
+                'main_category': 'unknown',
+                'subcategory': 'unknown',
+                'confidence_score': 0.0
+            }
         except Exception as e:
             self.logger.error(f"Document classification error: {e}")
             return {
@@ -225,9 +145,45 @@ class DocumentIntelligenceModelTrainer:
                 'confidence_score': 0.0
             }
 
+    def validate_reference_documents(self) -> bool:
+        """
+        Validate reference document structure and count
+        """
+        ref_dir = self.cfg['paths']['reference_dir']
+        min_docs = self.cfg['model_training']['min_documents_per_category']
+        
+        try:
+            for main_category in os.listdir(ref_dir):
+                main_path = os.path.join(ref_dir, main_category)
+                if not os.path.isdir(main_path):
+                    continue
+                
+                for subcategory in os.listdir(main_path):
+                    subcat_path = os.path.join(main_path, subcategory)
+                    if not os.path.isdir(subcat_path):
+                        continue
+                    
+                    # Count documents
+                    documents = [
+                        f for f in os.listdir(subcat_path)
+                        if os.path.isfile(os.path.join(subcat_path, f))
+                    ]
+                    
+                    # Check document count
+                    if len(documents) < min_docs:
+                        self.logger.warning(
+                            f"Insufficient documents in {main_category}/{subcategory}. "
+                            f"Found {len(documents)}, minimum required is {min_docs}"
+                        )
+                        return False
+            
+            return True
+        
+        except Exception as e:
+            self.logger.error(f"Reference document validation error: {e}")
+            return False
 
-----
-
+---
 import os
 import shutil
 import logging
@@ -246,15 +202,17 @@ def process_documents(trainer):
     """
     Document processing workflow
     """
+    # Validate reference documents
+    if not trainer.validate_reference_documents():
+        logging.warning("Reference documents do not meet minimum requirements")
+        return
+    
     # Configuration
     cfg = trainer.cfg
     input_dir = cfg['paths']['input_dir']
     source_dir = cfg['paths']['source_dir']
     classified_dir = cfg['paths']['classified_dir']
     unclassified_dir = cfg['paths']['unclassified_dir']
-    
-    # Train custom model (if possible)
-    trainer.train_custom_model()
     
     # Process each document
     for filename in os.listdir(input_dir):
@@ -268,9 +226,6 @@ def process_documents(trainer):
         # Copy to source directory
         source_filepath = os.path.join(source_dir, filename)
         shutil.copy(filepath, source_filepath)
-        
-        # Open PDF
-        doc = fitz.open(filepath)
         
         # Classify document
         classification = trainer.classify_document(filepath)
@@ -295,9 +250,6 @@ def process_documents(trainer):
             # Unclassified document
             output_filepath = os.path.join(unclassified_dir, filename)
             shutil.copy(filepath, output_filepath)
-        
-        # Close document
-        doc.close()
 
 def main():
     # Initialize model trainer
@@ -308,19 +260,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-```
-
-### Output Structure
-```
-output/
-├── source/
-│   └── original_documents
-├── classified/
-│   ├── cms1500/
-│   │   └── cadwell/
-│   │       └── classified_documents
-│   └── invoice/
-│       └── tesla/
-│           └── classified_documents
-└── unclassified/
-    └── unclassified_documents
