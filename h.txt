@@ -255,3 +255,5 @@ if __name__ == "__main__":
         print(f"ℹ️ Using existing model ID: {model_id}")
 
     classify_documents(config)
+
+    classify_documents(config)
