@@ -1,7 +1,4 @@
-#documentintelligence
-
 config.json
-
 {
   "azure_document_intelligence": {
     "endpoint": "YOUR_DOCUMENT_INTELLIGENCE_ENDPOINT",
@@ -17,22 +14,24 @@ config.json
   "paths": {
     "reference_dir": "reference",
     "input_dir": "input_docs",
-    "output_dir": "output",
-    "trained_models_dir": "trained_models"
+    "output_dir": "output"
   },
   "classification": {
     "confidence_threshold": 0.5,
+    "min_training_documents": 5,
     "max_training_documents": 100
   }
 }
 
-------------------
+----
+helper.py
 
-  helper.py
 import os
+import re
 import json
 import hashlib
 import logging
+import traceback
 from datetime import datetime
 from azure.ai.documentintelligence import DocumentIntelligenceClient
 from azure.core.credentials import AzureKeyCredential
@@ -47,16 +46,13 @@ logging.basicConfig(
 
 def load_config(config_path="config.json"):
     """
-    Load configuration from JSON file with error handling
+    Load configuration from JSON file
     """
     try:
         with open(config_path, "r") as f:
             return json.load(f)
-    except FileNotFoundError:
-        logging.error(f"Config file not found: {config_path}")
-        raise
-    except json.JSONDecodeError:
-        logging.error(f"Invalid JSON in config file: {config_path}")
+    except Exception as e:
+        logging.error(f"Config loading error: {e}")
         raise
 
 def compute_reference_hash(ref_dir):
@@ -65,22 +61,32 @@ def compute_reference_hash(ref_dir):
     """
     hasher = hashlib.sha256()
     
-    # Ensure consistent sorting and hashing
     for root, _, files in sorted(os.walk(ref_dir)):
         for f in sorted(files):
             path = os.path.join(root, f)
-            
-            # Include file path, modification time, and content
-            hasher.update(path.encode())
-            hasher.update(str(os.path.getmtime(path)).encode())
             
             try:
                 with open(path, 'rb') as file:
                     hasher.update(file.read())
             except Exception as e:
-                logging.warning(f"Could not read file {path} for hashing: {e}")
+                logging.warning(f"Could not read file {path}: {e}")
     
     return hasher.hexdigest()
+
+def get_document_intelligence_client(cfg):
+    """
+    Initialize Azure Document Intelligence client
+    """
+    try:
+        credential = AzureKeyCredential(cfg["azure_document_intelligence"]["key"])
+        client = DocumentIntelligenceClient(
+            endpoint=cfg["azure_document_intelligence"]["endpoint"],
+            credential=credential
+        )
+        return client
+    except Exception as e:
+        logging.critical(f"Client initialization error: {e}")
+        raise
 
 def prepare_reference_metadata(ref_dir):
     """
@@ -112,82 +118,72 @@ def prepare_reference_metadata(ref_dir):
     
     return reference_metadata
 
-def get_document_intelligence_client(cfg):
+def train_custom_model(ref_dir, client, cfg):
     """
-    Initialize Azure Document Intelligence client
-    """
-    try:
-        credential = AzureKeyCredential(cfg["azure_document_intelligence"]["key"])
-        client = DocumentIntelligenceClient(
-            endpoint=cfg["azure_document_intelligence"]["endpoint"],
-            credential=credential
-        )
-        return client
-    except Exception as e:
-        logging.critical(f"Document Intelligence client initialization error: {e}")
-        raise
-
-def train_custom_model(cfg, reference_dir):
-    """
-    Prepare training data for custom model
+    Train a custom model based on reference documents
     """
     try:
-        logging.info("🚀 Preparing custom model training data")
+        logging.info("🚀 Preparing custom model training")
         
-        # Collect training data
-        training_data = []
-        for main_category in os.listdir(reference_dir):
-            main_path = os.path.join(reference_dir, main_category)
-            if not os.path.isdir(main_path):
-                continue
+        # Collect training documents
+        training_documents = []
+        for main_category in os.listdir(ref_dir):
+            main_path = os.path.join(ref_dir, main_category)
             
             for subcategory in os.listdir(main_path):
                 subcat_path = os.path.join(main_path, subcategory)
-                if not os.path.isdir(subcat_path):
-                    continue
                 
-                # Collect documents for training
                 for doc_file in os.listdir(subcat_path):
                     doc_path = os.path.join(subcat_path, doc_file)
-                    training_data.append({
-                        'path': doc_path,
-                        'category': {
-                            'main_category': main_category,
-                            'subcategory': subcategory
-                        }
-                    })
+                    training_documents.append(doc_path)
         
         # Limit training documents
+        min_docs = cfg['classification'].get('min_training_documents', 5)
         max_docs = cfg['classification'].get('max_training_documents', 100)
-        training_data = training_data[:max_docs]
+        
+        if len(training_documents) < min_docs:
+            logging.warning(f"Insufficient documents for training. Minimum required: {min_docs}")
+            return None
+        
+        training_documents = training_documents[:max_docs]
+        
+        # Prepare training files
+        training_files = [open(doc, 'rb') for doc in training_documents]
         
         # Generate unique model identifier
-        trained_model_id = f"custom-model-{datetime.now().strftime('%Y%m%d%H%M%S')}"
+        model_id = f"custom-doc-classifier-{datetime.now().strftime('%Y%m%d%H%M%S')}"
         
-        # Save model information
-        trained_models_dir = cfg['paths']['trained_models_dir']
-        os.makedirs(trained_models_dir, exist_ok=True)
+        try:
+            # Start model training
+            poller = client.begin_build_model(
+                model_id=model_id,
+                training_files=training_files
+            )
+            
+            # Wait for training to complete
+            result = poller.result()
+            
+            # Log training details
+            logging.info(f"Custom Model Trained: {result.model_id}")
+            logging.info(f"Training Status: {result.status}")
+            
+            return result.model_id
         
-        model_info_path = os.path.join(trained_models_dir, f"{trained_model_id}.json")
-        with open(model_info_path, 'w') as f:
-            json.dump({
-                'model_id': trained_model_id,
-                'training_data': [d['path'] for d in training_data],
-                'categories': {d['category']['main_category'] for d in training_data}
-            }, f, indent=2)
-        
-        logging.info(f"✅ Training data prepared: {trained_model_id}")
-        return trained_model_id
+        finally:
+            # Ensure files are closed
+            for file in training_files:
+                file.close()
     
     except Exception as e:
-        logging.error(f"Training data preparation failed: {e}")
+        logging.error(f"Custom model training error: {e}")
+        logging.error(traceback.format_exc())
         return None
 
-def fine_tune_if_new_reference(cfg):
+def check_reference_changes(cfg, client):
     """
-    Check if reference data has changed and prepare training data
+    Check if reference documents have changed
     """
-    ref_dir = cfg["paths"]["reference_dir"]
+    ref_dir = cfg['paths']['reference_dir']
     hash_file = os.path.join(ref_dir, ".reference_hash")
     
     try:
@@ -210,12 +206,12 @@ def fine_tune_if_new_reference(cfg):
             logging.info("Reference Document Metadata:")
             logging.info(json.dumps(current_metadata, indent=2))
             
-            # Prepare training data
-            trained_model_id = train_custom_model(cfg, ref_dir)
+            # Train custom model
+            custom_model_id = train_custom_model(ref_dir, client, cfg)
             
-            # Update configuration if training data prepared
-            if trained_model_id:
-                cfg['azure_document_intelligence']['custom_model_id'] = trained_model_id
+            # Update configuration if model trained
+            if custom_model_id:
+                cfg['azure_document_intelligence']['custom_model_id'] = custom_model_id
             
             # Save new hash
             with open(hash_file, 'w') as f:
@@ -236,8 +232,6 @@ def prepare_directories(cfg):
     directories = [
         cfg['paths']['input_dir'],
         cfg['paths']['output_dir'],
-        cfg['paths']['reference_dir'],
-        cfg['paths']['trained_models_dir'],
         os.path.join(cfg['paths']['output_dir'], 'source'),
         os.path.join(cfg['paths']['output_dir'], 'classified'),
         os.path.join(cfg['paths']['output_dir'], 'unclassified')
@@ -246,22 +240,21 @@ def prepare_directories(cfg):
     for dir_path in directories:
         os.makedirs(dir_path, exist_ok=True)
 
+-----
+main.py
 
-----
 import os
 import io
 import json
 import shutil
 import logging
 import traceback
-import fitz  # PyMuPDF
-from datetime import datetime
 
 from helper import (
     load_config, 
-    fine_tune_if_new_reference, 
-    get_document_intelligence_client, 
-    prepare_directories
+    get_document_intelligence_client,
+    prepare_directories,
+    check_reference_changes
 )
 
 # Configure logging
@@ -272,87 +265,47 @@ logging.basicConfig(
     filemode='a'
 )
 
-def extract_page_for_analysis(file_path, page_number=0):
-    """
-    Extract a specific page from a document
-    """
-    try:
-        # PDF handling
-        if file_path.lower().endswith('.pdf'):
-            doc = fitz.open(file_path)
-            
-            # Validate page number
-            if page_number < 0 or page_number >= len(doc):
-                logging.error(f"Invalid page number {page_number} for {file_path}")
-                return None
-            
-            page = doc.load_page(page_number)
-            
-            # Save page as temporary PDF
-            temp_pdf_path = f"temp_page_{page_number}.pdf"
-            doc_page = fitz.open()
-            doc_page.insert_pdf(doc, from_page=page_number, to_page=page_number)
-            doc_page.save(temp_pdf_path)
-            doc_page.close()
-            doc.close()
-            
-            return temp_pdf_path
-        
-        # Other file types
-        return file_path
-    
-    except Exception as e:
-        logging.error(f"Page extraction error: {e}")
-        return None
-
 def classify_document(client, file_path, cfg):
     """
-    Classify document using Azure Document Intelligence
+    Classify document using Document Intelligence
     """
     try:
-        # Use the first page for analysis
-        analysis_file = extract_page_for_analysis(file_path)
-        
-        if not analysis_file:
-            logging.error(f"Failed to extract page for analysis: {file_path}")
-            return 'unknown', 'unknown', 0.0, "Page extraction failed"
-
         # Determine model to use
         model_id = cfg['azure_document_intelligence'].get('custom_model_id', 'prebuilt-document')
-
-        # Perform document analysis
-        with open(analysis_file, "rb") as f:
+        
+        # Analyze document
+        with open(file_path, 'rb') as doc_file:
             poller = client.begin_analyze_document(
                 model_id=model_id,
-                analyze_request=f
+                analyze_request=doc_file
             )
             result = poller.result()
-
-        # Extract classification details
+        
+        # Default classification
         main_category = 'unknown'
         subcategory = 'unknown'
         confidence_score = 0.0
         reasoning = "No specific reasoning"
-
-        # Parsing result
+        
+        # Process analysis results
         if result.documents and len(result.documents) > 0:
             document = result.documents[0]
             
-            # Example of extracting information
+            # Extract document features
             if hasattr(document, 'fields'):
                 for field_name, field in document.fields.items():
-                    if field and hasattr(field, 'value'):
-                        # Add your custom mapping logic
-                        mapped_category = _map_field_to_category(field_name, field.value, cfg)
-                        if mapped_category != 'unknown':
-                            main_category = mapped_category
+                    # Attempt to map to categories based on field information
+                    for cat, subcats in cfg['categories'].items():
+                        if any(subcat.lower() in str(field_name).lower() for subcat in subcats):
+                            main_category = cat
+                            subcategory = [
+                                subcat for subcat in subcats 
+                                if subcat.lower() in str(field_name).lower()
+                            ][0]
                             confidence_score = getattr(field, 'confidence', 0.0)
+                            reasoning = f"Matched by field: {field_name}"
                             break
-
-        # Clean up temporary file
-        if analysis_file.startswith('temp_page_'):
-            os.remove(analysis_file)
-
+        
         return main_category, subcategory, confidence_score, reasoning
 
     except Exception as e:
@@ -360,26 +313,9 @@ def classify_document(client, file_path, cfg):
         logging.error(traceback.format_exc())
         return 'unknown', 'unknown', 0.0, f"Classification error: {str(e)}"
 
-def _map_field_to_category(field_name, field_value, cfg):
-    """
-    Map detected fields to categories
-    """
-    # Convert to string and lowercase for comparison
-    str_field_name = str(field_name).lower()
-    str_field_value = str(field_value).lower()
-
-    for main_cat, subcats in cfg['categories'].items():
-        # Check if field name or value matches any subcategory
-        if any(subcat.lower() in str_field_name or 
-               subcat.lower() in str_field_value 
-               for subcat in subcats):
-            return main_cat
-    
-    return 'unknown'
-
 def process_documents():
     """
-    Process documents using Azure Document Intelligence
+    Document processing and classification
     """
     try:
         # Load configuration
@@ -388,11 +324,11 @@ def process_documents():
         # Prepare directories
         prepare_directories(cfg)
         
-        # Check for reference changes and prepare training data
-        fine_tune_if_new_reference(cfg)
-        
         # Initialize Document Intelligence client
         client = get_document_intelligence_client(cfg)
+        
+        # Check for reference changes and potentially train model
+        check_reference_changes(cfg, client)
         
         # Set up directories
         input_dir = cfg['paths']['input_dir']
