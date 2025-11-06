@@ -1,33 +1,4 @@
-config.json
-{
-  "azure_document_intelligence": {
-    "endpoint": "YOUR_DOCUMENT_INTELLIGENCE_ENDPOINT",
-    "key": "YOUR_DOCUMENT_INTELLIGENCE_KEY",
-    "model_version": "2023-07-31",
-    "custom_model_id": null
-  },
-  "categories": {
-    "cms1500": ["cadwell", "rhymlink"],
-    "invoice": ["tesla", "amazon"],
-    "scheduling": ["email", "iomrequest"]
-  },
-  "paths": {
-    "reference_dir": "reference",
-    "input_dir": "input_docs",
-    "output_dir": "output"
-  },
-  "classification": {
-    "confidence_threshold": 0.5,
-    "min_training_documents": 5,
-    "max_training_documents": 100
-  }
-}
-
-----
-helper.py
-
 import os
-import re
 import json
 import hashlib
 import logging
@@ -46,14 +17,42 @@ logging.basicConfig(
 
 def load_config(config_path="config.json"):
     """
-    Load configuration from JSON file
+    Load configuration from JSON file with validation
     """
     try:
         with open(config_path, "r") as f:
-            return json.load(f)
-    except Exception as e:
-        logging.error(f"Config loading error: {e}")
+            cfg = json.load(f)
+        
+        # Validate essential configuration
+        validate_config(cfg)
+        return cfg
+    except FileNotFoundError:
+        logging.error(f"Config file not found: {config_path}")
         raise
+    except json.JSONDecodeError:
+        logging.error(f"Invalid JSON in config file: {config_path}")
+        raise
+
+def validate_config(cfg):
+    """
+    Validate configuration parameters
+    """
+    # Check Azure credentials
+    if not cfg.get('azure_document_intelligence', {}).get('endpoint'):
+        raise ValueError("Azure Document Intelligence endpoint is missing")
+    
+    if not cfg.get('azure_document_intelligence', {}).get('key'):
+        raise ValueError("Azure Document Intelligence key is missing")
+    
+    # Validate categories
+    if not cfg.get('categories'):
+        raise ValueError("No document categories defined")
+    
+    # Validate paths
+    required_paths = ['reference_dir', 'input_dir', 'output_dir']
+    for path_key in required_paths:
+        if not cfg.get('paths', {}).get(path_key):
+            raise ValueError(f"{path_key} is not defined in configuration")
 
 def compute_reference_hash(ref_dir):
     """
@@ -118,112 +117,46 @@ def prepare_reference_metadata(ref_dir):
     
     return reference_metadata
 
-def train_custom_model(ref_dir, client, cfg):
+def check_reference_structure(ref_dir, cfg):
     """
-    Train a custom model based on reference documents
+    Validate reference folder structure
     """
-    try:
-        logging.info("🚀 Preparing custom model training")
-        
-        # Collect training documents
-        training_documents = []
-        for main_category in os.listdir(ref_dir):
-            main_path = os.path.join(ref_dir, main_category)
-            
-            for subcategory in os.listdir(main_path):
-                subcat_path = os.path.join(main_path, subcategory)
-                
-                for doc_file in os.listdir(subcat_path):
-                    doc_path = os.path.join(subcat_path, doc_file)
-                    training_documents.append(doc_path)
-        
-        # Limit training documents
-        min_docs = cfg['classification'].get('min_training_documents', 5)
-        max_docs = cfg['classification'].get('max_training_documents', 100)
-        
-        if len(training_documents) < min_docs:
-            logging.warning(f"Insufficient documents for training. Minimum required: {min_docs}")
-            return None
-        
-        training_documents = training_documents[:max_docs]
-        
-        # Prepare training files
-        training_files = [open(doc, 'rb') for doc in training_documents]
-        
-        # Generate unique model identifier
-        model_id = f"custom-doc-classifier-{datetime.now().strftime('%Y%m%d%H%M%S')}"
-        
-        try:
-            # Start model training
-            poller = client.begin_build_model(
-                model_id=model_id,
-                training_files=training_files
-            )
-            
-            # Wait for training to complete
-            result = poller.result()
-            
-            # Log training details
-            logging.info(f"Custom Model Trained: {result.model_id}")
-            logging.info(f"Training Status: {result.status}")
-            
-            return result.model_id
-        
-        finally:
-            # Ensure files are closed
-            for file in training_files:
-                file.close()
+    # Check if reference directory exists
+    if not os.path.exists(ref_dir):
+        logging.error(f"Reference directory not found: {ref_dir}")
+        raise FileNotFoundError(f"Reference directory {ref_dir} does not exist")
     
-    except Exception as e:
-        logging.error(f"Custom model training error: {e}")
-        logging.error(traceback.format_exc())
-        return None
-
-def check_reference_changes(cfg, client):
-    """
-    Check if reference documents have changed
-    """
-    ref_dir = cfg['paths']['reference_dir']
-    hash_file = os.path.join(ref_dir, ".reference_hash")
-    
-    try:
-        # Compute current reference hash
-        hash_now = compute_reference_hash(ref_dir)
-        
-        # Check if hash file exists
-        if os.path.exists(hash_file):
-            with open(hash_file, 'r') as f:
-                last_hash = f.read().strip()
-        else:
-            last_hash = ''
-        
-        # Compare hashes
-        if hash_now != last_hash:
-            # Log detailed changes
-            current_metadata = prepare_reference_metadata(ref_dir)
-            
-            logging.info("🚀 New Reference Data Detected")
-            logging.info("Reference Document Metadata:")
-            logging.info(json.dumps(current_metadata, indent=2))
-            
-            # Train custom model
-            custom_model_id = train_custom_model(ref_dir, client, cfg)
-            
-            # Update configuration if model trained
-            if custom_model_id:
-                cfg['azure_document_intelligence']['custom_model_id'] = custom_model_id
-            
-            # Save new hash
-            with open(hash_file, 'w') as f:
-                f.write(hash_now)
-            
-            return True
-        
+    # Check if reference directory is empty
+    if not os.listdir(ref_dir):
+        logging.warning("Reference directory is empty")
         return False
     
-    except Exception as e:
-        logging.error(f"Reference check error: {e}")
-        return False
+    # Validate reference structure against configuration
+    for main_category in cfg['categories']:
+        main_path = os.path.join(ref_dir, main_category)
+        
+        # Check if main category directory exists
+        if not os.path.exists(main_path):
+            logging.warning(f"Main category directory missing: {main_path}")
+            continue
+        
+        # Check subcategories
+        for subcategory in cfg['categories'][main_category]:
+            subcat_path = os.path.join(main_path, subcategory)
+            
+            # Check if subcategory directory exists
+            if not os.path.exists(subcat_path):
+                logging.warning(f"Subcategory directory missing: {subcat_path}")
+                continue
+            
+            # Check if subcategory has documents
+            docs = [f for f in os.listdir(subcat_path) 
+                    if os.path.isfile(os.path.join(subcat_path, f))]
+            
+            if not docs:
+                logging.warning(f"No documents in subcategory: {subcat_path}")
+    
+    return True
 
 def prepare_directories(cfg):
     """
@@ -240,9 +173,8 @@ def prepare_directories(cfg):
     for dir_path in directories:
         os.makedirs(dir_path, exist_ok=True)
 
------
-main.py
 
+------
 import os
 import io
 import json
@@ -254,7 +186,8 @@ from helper import (
     load_config, 
     get_document_intelligence_client,
     prepare_directories,
-    check_reference_changes
+    check_reference_structure,
+    prepare_reference_metadata
 )
 
 # Configure logging
@@ -270,13 +203,10 @@ def classify_document(client, file_path, cfg):
     Classify document using Document Intelligence
     """
     try:
-        # Determine model to use
-        model_id = cfg['azure_document_intelligence'].get('custom_model_id', 'prebuilt-document')
-        
         # Analyze document
         with open(file_path, 'rb') as doc_file:
             poller = client.begin_analyze_document(
-                model_id=model_id,
+                model_id='prebuilt-document',
                 analyze_request=doc_file
             )
             result = poller.result()
@@ -324,11 +254,17 @@ def process_documents():
         # Prepare directories
         prepare_directories(cfg)
         
+        # Validate reference structure
+        ref_dir = cfg['paths']['reference_dir']
+        check_reference_structure(ref_dir, cfg)
+        
+        # Log reference document metadata
+        reference_metadata = prepare_reference_metadata(ref_dir)
+        logging.info("Reference Document Metadata:")
+        logging.info(json.dumps(reference_metadata, indent=2))
+        
         # Initialize Document Intelligence client
         client = get_document_intelligence_client(cfg)
-        
-        # Check for reference changes and potentially train model
-        check_reference_changes(cfg, client)
         
         # Set up directories
         input_dir = cfg['paths']['input_dir']
@@ -412,3 +348,37 @@ def process_documents():
 
 if __name__ == "__main__":
     process_documents()
+```
+
+### User Workflow
+
+1. **Configuration (`config.json`)**
+   - Update Azure credentials
+   - Define document categories
+   - Set input/output paths
+
+2. **Reference Folder Structure**
+```
+reference/
+├── cms1500/
+│   ├── cadwell/
+│   │   ├── medical_form1.pdf
+│   │   └── medical_form2.pdf
+│   └── rhymlink/
+│       ├── insurance_doc1.pdf
+│       └── insurance_doc2.pdf
+├── invoice/
+│   ├── tesla/
+│   │   ├── invoice1.pdf
+│   │   └── invoice2.pdf
+│   └── amazon/
+│       ├── order_invoice1.pdf
+│       └── order_invoice2.pdf
+└── scheduling/
+    ├── email/
+    │   ├── appointment1.pdf
+    │   └── appointment2.pdf
+    └── iomrequest/
+        ├── request1.pdf
+        └── request2.pdf
+
