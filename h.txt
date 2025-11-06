@@ -1,10 +1,39 @@
+{
+    "azure_document_intelligence": {
+        "endpoint": "YOUR_DOCUMENT_INTELLIGENCE_ENDPOINT",
+        "key": "YOUR_DOCUMENT_INTELLIGENCE_KEY",
+        "model_version": "2024-02-15-preview"
+    },
+    "categories": {
+        "cms1500": ["cadwell", "rhymlink"],
+        "invoice": ["tesla", "amazon"],
+        "scheduling": ["email", "iomrequest"]
+    },
+    "paths": {
+        "reference_dir": "reference",
+        "input_dir": "input_docs",
+        "output_dir": "output",
+        "model_cache_dir": "model_cache"
+    },
+    "model_training": {
+        "min_documents_per_category": 5,
+        "max_training_documents": 100,
+        "confidence_threshold": 0.7
+    },
+    "allowed_file_types": [".pdf", ".tiff", ".jpg", ".jpeg", ".png"]
+}
+
+---
+
+help
+
 import os
 import json
 import hashlib
 import logging
 import traceback
 from datetime import datetime
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Optional
 
 from azure.ai.documentintelligence import DocumentIntelligenceClient
 from azure.core.credentials import AzureKeyCredential
@@ -33,8 +62,23 @@ class DocumentIntelligenceModelTrainer:
         # Initialize Azure client
         self.client = self._initialize_client()
         
-        # Ensure model cache directory
-        os.makedirs(self.cfg['paths']['model_cache_dir'], exist_ok=True)
+        # Ensure directories exist
+        self._prepare_directories()
+
+    def _prepare_directories(self):
+        """
+        Ensure necessary directories exist
+        """
+        directories = [
+            self.cfg['paths']['model_cache_dir'],
+            self.cfg['paths']['input_dir'],
+            self.cfg['paths']['output_dir'],
+            os.path.join(self.cfg['paths']['output_dir'], 'classified'),
+            os.path.join(self.cfg['paths']['output_dir'], 'unclassified')
+        ]
+        
+        for dir_path in directories:
+            os.makedirs(dir_path, exist_ok=True)
 
     def _initialize_client(self) -> DocumentIntelligenceClient:
         """
@@ -64,129 +108,143 @@ class DocumentIntelligenceModelTrainer:
         
         return hasher.hexdigest()
 
-    def _prepare_training_data(self) -> Dict[str, List[str]]:
+    def _validate_reference_documents(self) -> Dict[str, Any]:
         """
-        Collect and validate training documents
+        Validate reference document structure and count
         """
         ref_dir = self.cfg['paths']['reference_dir']
-        training_data = {}
+        reference_validation = {}
         
         for main_category, subcategories in self.cfg['categories'].items():
-            training_data[main_category] = {}
+            main_path = os.path.join(ref_dir, main_category)
+            
+            if not os.path.exists(main_path):
+                self.logger.warning(f"Main category directory missing: {main_path}")
+                continue
+            
+            reference_validation[main_category] = {}
             
             for subcategory in subcategories:
-                subcat_path = os.path.join(ref_dir, main_category, subcategory)
+                subcat_path = os.path.join(main_path, subcategory)
                 
-                # Collect documents
-                documents = [
-                    os.path.join(subcat_path, doc) 
-                    for doc in os.listdir(subcat_path) 
-                    if os.path.isfile(os.path.join(subcat_path, doc))
-                ]
-                
-                # Validate document count
-                if len(documents) < self.cfg['model_training']['min_documents_per_category']:
-                    self.logger.warning(f"Insufficient documents in {main_category}/{subcategory}")
+                if not os.path.exists(subcat_path):
+                    self.logger.warning(f"Subcategory directory missing: {subcat_path}")
                     continue
                 
-                # Limit documents
-                documents = documents[:self.cfg['model_training']['max_training_documents']]
-                training_data[main_category][subcategory] = documents
+                # Collect valid documents
+                documents = [
+                    f for f in os.listdir(subcat_path)
+                    if os.path.isfile(os.path.join(subcat_path, f)) and
+                    os.path.splitext(f)[1].lower() in self.cfg['allowed_file_types']
+                ]
+                
+                reference_validation[main_category][subcategory] = {
+                    'document_count': len(documents),
+                    'documents': documents
+                }
         
-        return training_data
+        return reference_validation
 
-    def train_custom_model(self) -> str:
+    def train_custom_model(self) -> Optional[str]:
         """
         Train custom Document Intelligence model
         """
         try:
+            # Validate reference documents
+            reference_validation = self._validate_reference_documents()
+            
             # Prepare training data
-            training_data = self._prepare_training_data()
-            
-            # Validate training data
-            if not training_data:
-                self.logger.error("No valid training data found")
-                return None
-            
-            # Generate model ID
-            model_id = f"custom_doc_classifier_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
-            
-            # Prepare training files
             training_files = []
-            for main_cat, subcategories in training_data.items():
-                for subcat, docs in subcategories.items():
+            for main_cat, subcategories in reference_validation.items():
+                for subcat, details in subcategories.items():
+                    if details['document_count'] < self.cfg['model_training']['min_documents_per_category']:
+                        self.logger.warning(f"Insufficient documents in {main_cat}/{subcat}")
+                        continue
+                    
+                    # Collect training documents
+                    subcat_path = os.path.join(
+                        self.cfg['paths']['reference_dir'], 
+                        main_cat, 
+                        subcat
+                    )
+                    
+                    docs = [
+                        os.path.join(subcat_path, doc) 
+                        for doc in details['documents']
+                    ][:self.cfg['model_training']['max_training_documents']]
+                    
                     training_files.extend(docs)
             
+            # Validate training files
+            if not training_files:
+                self.logger.error("No valid training documents found")
+                return None
+            
+            # Generate unique model ID
+            model_id = f"custom_model_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+            
             # Open training files
-            training_file_handles = [open(file, 'rb') for file in training_files]
+            file_handles = [open(file, 'rb') for file in training_files]
             
             try:
                 # Start model training
                 poller: LROPoller = self.client.begin_build_model(
                     model_id=model_id,
-                    training_files=training_file_handles
+                    training_files=file_handles
                 )
                 
                 # Wait for training to complete
                 result = poller.result()
                 
-                # Prepare model metadata
-                model_metadata = {
+                # Save model metadata
+                metadata = {
                     'model_id': result.model_id,
                     'created_at': datetime.now().isoformat(),
-                    'categories': list(training_data.keys())
+                    'training_documents': training_files
                 }
                 
-                # Save model metadata
                 metadata_path = os.path.join(
                     self.cfg['paths']['model_cache_dir'], 
                     f"{model_id}_metadata.json"
                 )
                 
                 with open(metadata_path, 'w') as f:
-                    json.dump(model_metadata, f, indent=2)
+                    json.dump(metadata, f, indent=2)
                 
                 self.logger.info(f"Custom model trained: {result.model_id}")
                 return result.model_id
             
             finally:
-                # Close all file handles
-                for file in training_file_handles:
+                # Close file handles
+                for file in file_handles:
                     file.close()
         
         except Exception as e:
-            self.logger.error(f"Model training failed: {e}")
+            self.logger.error(f"Model training error: {e}")
+            self.logger.error(traceback.format_exc())
             return None
 
     def get_latest_model_id(self) -> str:
         """
-        Retrieve latest trained model ID with robust error handling
+        Retrieve latest trained model ID
         """
         model_cache_dir = self.cfg['paths']['model_cache_dir']
         
-        # Ensure model cache directory exists
-        if not os.path.exists(model_cache_dir):
-            os.makedirs(model_cache_dir)
-        
-        # Get all metadata files
+        # Find model metadata files
         model_files = [
             f for f in os.listdir(model_cache_dir) 
             if f.endswith('_metadata.json')
         ]
         
-        # If no models, train a new one
+        # No models found
         if not model_files:
-            self.logger.warning("No trained models found. Training a new model.")
+            self.logger.warning("No trained models. Training new model.")
             new_model_id = self.train_custom_model()
             
-            if not new_model_id:
-                # Fallback to pre-built document model
-                self.logger.warning("Using pre-built document model as fallback")
-                return "prebuilt-document"
-            
-            return new_model_id
+            # Fallback to pre-built model
+            return new_model_id or "prebuilt-document"
         
-        # Find the most recent model
+        # Get most recent model
         latest_model_file = max(
             model_files, 
             key=lambda f: os.path.getctime(os.path.join(model_cache_dir, f))
@@ -198,38 +256,192 @@ class DocumentIntelligenceModelTrainer:
         
         return model_metadata['model_id']
 
-    def check_and_train(self) -> bool:
-        """
-        Check if model needs retraining
-        """
-        ref_dir = self.cfg['paths']['reference_dir']
-        hash_file = os.path.join(ref_dir, ".reference_hash")
+----
+
+main
+
+import os
+import shutil
+import logging
+import fitz
+from helper import DocumentIntelligenceModelTrainer
+
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO, 
+    format='%(asctime)s - %(levelname)s: %(message)s',
+    filename='document_processing.log',
+    filemode='a'
+)
+
+def classify_document(client, file_path, model_id, cfg):
+    """
+    Classify document using Document Intelligence
+    """
+    try:
+        # Open document
+        with open(file_path, "rb") as doc_file:
+            # Use custom or pre-built model
+            poller = client.begin_analyze_document(
+                model_id,
+                doc_file
+            )
+            result = poller.result()
         
-        try:
-            # Compute current reference hash
-            current_hash = self._compute_reference_hash(ref_dir)
-            
-            # Check existing hash
-            if os.path.exists(hash_file):
-                with open(hash_file, 'r') as f:
-                    last_hash = f.read().strip()
-            else:
-                last_hash = ''
-            
-            # Compare hashes
-            if current_hash != last_hash:
-                # Train new model
-                new_model_id = self.train_custom_model()
-                
-                if new_model_id:
-                    # Update hash file
-                    with open(hash_file, 'w') as f:
-                        f.write(current_hash)
-                
-                return True
-            
-            return False
+        # Default classification
+        main_category = 'unknown'
+        subcategory = 'unknown'
+        confidence_score = 0.0
         
-        except Exception as e:
-            self.logger.error(f"Reference check error: {e}")
-            return False
+        # Process results
+        if result.documents and result.documents[0].fields:
+            document = result.documents[0]
+            
+            # Implement classification logic
+            for cat, subcats in cfg['categories'].items():
+                for subcat in subcats:
+                    # Example classification logic
+                    if any(subcat in str(field) for field in document.fields.values()):
+                        main_category = cat
+                        subcategory = subcat
+                        confidence_score = document.confidence
+                        break
+        
+        return main_category, subcategory, confidence_score
+
+    except Exception as e:
+        logging.error(f"Document classification error: {e}")
+        return 'unknown', 'unknown', 0.0
+
+def process_documents(trainer):
+    """
+    Document processing workflow
+    """
+    # Check and train model if needed
+    trainer.train_custom_model()
+    
+    # Get latest model ID
+    model_id = trainer.get_latest_model_id()
+    
+    # Initialize client
+    client = trainer._initialize_client()
+    
+    # Configuration
+    cfg = trainer.cfg
+    input_dir = cfg['paths']['input_dir']
+    output_dir = cfg['paths']['output_dir']
+    
+    # Process each document
+    for filename in os.listdir(input_dir):
+        filepath = os.path.join(input_dir, filename)
+        
+        # Skip unsupported file types
+        if not any(filename.lower().endswith(ext) for ext in cfg['allowed_file_types']):
+            logging.warning(f"Unsupported file type: {filename}")
+            continue
+        
+        # Open PDF
+        doc = fitz.open(filepath)
+        
+        # Page-level classification results
+        page_results = []
+        
+        for page_num in range(len(doc)):
+            # Extract page
+            page = doc.load_page(page_num)
+            
+            # Convert page to image
+            pix = page.get_pixmap()
+            img_path = f"temp_page_{page_num}.png"
+            pix.save(img_path)
+            
+            # Classify page
+            try:
+                main_cat, sub_cat, confidence = classify_document(
+                    client, 
+                    img_path, 
+                    model_id,
+                    cfg
+                )
+                
+                page_results.append({
+                    'page_number': page_num + 1,
+                    'main_category': main_cat,
+                    'subcategory': sub_cat,
+                    'confidence': confidence
+                })
+            
+            except Exception as e:
+                logging.error(f"Page classification error: {e}")
+            
+            # Clean up temporary image
+            os.remove(img_path)
+        
+        # Process classified pages
+        _save_classified_document(filepath, page_results, cfg)
+
+def _save_classified_document(filepath, page_results, cfg):
+    """
+    Save classified document pages
+    """
+    output_dir = cfg['paths']['output_dir']
+    confidence_threshold = cfg['model_training']['confidence_threshold']
+    
+    # Open original document
+    doc = fitz.open(filepath)
+    
+    # Group classified and unclassified pages
+    classified_pages = {}
+    unclassified_pages = []
+    
+    for result in page_results:
+        if result['confidence'] >= confidence_threshold:
+            key = (result['main_category'], result['subcategory'])
+            if key not in classified_pages:
+                classified_pages[key] = []
+            classified_pages[key].append(result['page_number'] - 1)
+        else:
+            unclassified_pages.append(result['page_number'] - 1)
+    
+    # Save classified pages
+    for (main_cat, sub_cat), pages in classified_pages.items():
+        classified_doc = fitz.open()
+        for page_num in pages:
+            classified_doc.insert_pdf(doc, from_page=page_num, to_page=page_num)
+        
+        # Create output directory
+        dest_dir = os.path.join(output_dir, 'classified', main_cat, sub_cat)
+        os.makedirs(dest_dir, exist_ok=True)
+        
+        # Save document
+        output_filename = f"{os.path.splitext(os.path.basename(filepath))[0]}_classified_pages.pdf"
+        classified_doc.save(os.path.join(dest_dir, output_filename))
+        classified_doc.close()
+    
+    # Save unclassified pages
+    if unclassified_pages:
+        unclassified_doc = fitz.open()
+        for page_num in unclassified_pages:
+            unclassified_doc.insert_pdf(doc, from_page=page_num, to_page=page_num)
+        
+        # Create output directory
+        dest_dir = os.path.join(output_dir, 'unclassified')
+        os.makedirs(dest_dir, exist_ok=True)
+        
+        # Save document
+        output_filename = f"{os.path.splitext(os.path.basename(filepath))[0]}_unclassified_pages.pdf"
+        unclassified_doc.save(os.path.join(dest_dir, output_filename))
+        unclassified_doc.close()
+    
+    # Close original document
+    doc.close()
+
+def main():
+    # Initialize model trainer
+    trainer = DocumentIntelligenceModelTrainer()
+    
+    # Process documents
+    process_documents(trainer)
+
+if __name__ == "__main__":
+    main()
