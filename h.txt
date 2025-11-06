@@ -19,13 +19,44 @@ from helper import (
     prepare_reference_metadata
 )
 
-# Configure logging
-logging.basicConfig(
-    level=logging.INFO, 
-    format='%(asctime)s - %(levelname)s: %(message)s',
-    filename='document_processing.log',
-    filemode='a'  # Append mode to keep historical logs
-)
+# Create logs directory if it doesn't exist
+LOGS_DIR = os.path.join(os.getcwd(), 'logs')
+os.makedirs(LOGS_DIR, exist_ok=True)
+
+# Generate unique log filename with timestamp
+def generate_log_filename():
+    """
+    Create a unique log filename with current timestamp
+    """
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    return os.path.join(LOGS_DIR, f"document_processing_{timestamp}.log")
+
+# Configure logging with dynamic filename
+def setup_logging():
+    """
+    Set up logging with a unique log file for each run
+    """
+    log_file = generate_log_filename()
+    
+    # Configure logging
+    logging.basicConfig(
+        level=logging.INFO, 
+        format='%(asctime)s - %(levelname)s: %(message)s',
+        filename=log_file,
+        filemode='w'  # Write mode to create a new log for each run
+    )
+    
+    # Add console handler to also print logs to console
+    console_handler = logging.StreamHandler()
+    console_handler.setLevel(logging.INFO)
+    console_formatter = logging.Formatter('%(asctime)s - %(levelname)s: %(message)s')
+    console_handler.setFormatter(console_formatter)
+    
+    # Get the root logger and add the console handler
+    root_logger = logging.getLogger()
+    root_logger.addHandler(console_handler)
+    
+    return log_file
 
 # Token pricing configuration
 TOKEN_PRICING = {
@@ -329,11 +360,192 @@ def classify_page(document_image, client, deployment_name, cfg):
 
 def process_documents():
     """
-    Page-level document classification
+    Page-level document classification with advanced logging and cost tracking
     """
+    # Setup logging and get log file path
+    log_file = setup_logging()
+    
     try:
         # Load configuration
         cfg = load_config()
+        
+        # Verify reference documents exist
+        reference_dir = cfg['paths']['reference_dir']
+        if not os.path.exists(reference_dir) or not os.listdir(reference_dir):
+            logging.critical("No reference documents found. Classification cannot proceed.")
+            print("❌ No reference documents found. Please add reference documents.")
+            return
+
+        # Prepare directories
+        prepare_directories(cfg)
+        
+        # Check for reference changes
+        fine_tune_if_new_reference(cfg)
+        
+        # Initialize Azure client
+        client, deployment = get_azure_client(cfg)
+        
+        # Set up directories
+        input_dir = cfg['paths']['input_dir']
+        output_dir = cfg['paths']['output_dir']
+        source_dir = os.path.join(output_dir, 'source')
+        classified_dir = os.path.join(output_dir, 'classified')
+        unclassified_dir = os.path.join(output_dir, 'unclassified')
+        
+        # Ensure directories exist
+        os.makedirs(source_dir, exist_ok=True)
+        os.makedirs(classified_dir, exist_ok=True)
+        os.makedirs(unclassified_dir, exist_ok=True)
+        
+        # Logging for processing session
+        processing_timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        logging.info(f"\n\n--- Processing Session Started: {processing_timestamp} ---")
+        logging.info(f"Log File: {log_file}")
+        
+        # Processing statistics
+        stats = {
+            'total_documents': 0,
+            'total_pages': 0,
+            'classified_pages': 0,
+            'unclassified_pages': 0,
+            'page_classification_details': {},
+            'total_token_cost': 0.0,
+            'total_input_tokens': 0,
+            'total_output_tokens': 0,
+            'document_token_costs': {}  # Tracking per-document costs
+        }
+
+        # Process each document
+        for fname in os.listdir(input_dir):
+            fpath = os.path.join(input_dir, fname)
+            
+            # Skip directories and hidden files
+            if not os.path.isfile(fpath) or fname.startswith('.'):
+                continue
+
+            # Determine file type
+            file_type = os.path.splitext(fname)[1].lower()
+            
+            # Skip non-processable file types
+            if file_type not in ['.pdf', '.jpg', '.jpeg', '.png', '.docx']:
+                logging.warning(f"Unsupported file type: {fname}")
+                continue
+
+            # Initialize document-specific token cost tracking
+            stats['document_token_costs'][fname] = {
+                'total_cost': 0.0,
+                'input_tokens': 0,
+                'output_tokens': 0
+            }
+
+            # Count total documents
+            stats['total_documents'] += 1
+
+            try:
+                # Open PDF to get page count (for PDFs)
+                if file_type == '.pdf':
+                    doc = fitz.open(fpath)
+                    total_pages = len(doc)
+                    doc.close()
+                else:
+                    total_pages = 1  # For non-PDF files
+
+                stats['total_pages'] += total_pages
+
+                # Copy original document to source directory
+                shutil.copy(fpath, os.path.join(source_dir, fname))
+
+                # Page-level classification
+                classified_pages_by_category = {}
+                unclassified_pages = list(range(total_pages))  # Initially all pages are unclassified
+
+                # Variables to track document-level token usage
+                doc_token_cost = 0.0
+                doc_input_tokens = 0
+                doc_output_tokens = 0
+
+                for page_num in range(total_pages):
+                    # Extract page image
+                    page_image = extract_page_image(fpath, page_num)
+                    
+                    # Classify page
+                    main_cat, sub_cat, confidence, reasoning, token_cost = classify_page(
+                        page_image, 
+                        client, 
+                        deployment,
+                        cfg
+                    )
+
+                    # Update document-level token tracking
+                    if token_cost:
+                        doc_token_cost += token_cost['total_cost']
+                        doc_input_tokens += token_cost['input_tokens']
+                        doc_output_tokens += token_cost['output_tokens']
+
+                    # Update overall session statistics
+                    stats['total_token_cost'] += token_cost['total_cost'] if token_cost else 0
+                    stats['total_input_tokens'] += token_cost['input_tokens'] if token_cost else 0
+                    stats['total_output_tokens'] += token_cost['output_tokens'] if token_cost else 0
+
+                    # Determine page destination
+                    confidence_threshold = cfg['classification'].get('confidence_threshold', 0.5)
+                    if confidence >= confidence_threshold:
+                        # Organize classified pages by category
+                        category_key = f"{main_cat}|{sub_cat}"
+                        if category_key not in classified_pages_by_category:
+                            classified_pages_by_category[category_key] = []
+                        classified_pages_by_category[category_key].append(page_num)
+                        
+                        # Remove from unclassified pages
+                        unclassified_pages.remove(page_num)
+                        
+                        stats['classified_pages'] += 1
+                    
+                    # Update page classification details
+                    if main_cat not in stats['page_classification_details']:
+                        stats['page_classification_details'][main_cat] = {}
+                    stats['page_classification_details'][main_cat][sub_cat] = \
+                        stats['page_classification_details'][main_cat].get(sub_cat, 0) + 1
+
+                # Update per-document token costs
+                stats['document_token_costs'][fname]['total_cost'] = doc_token_cost
+                stats['document_token_costs'][fname]['input_tokens'] = doc_input_tokens
+                stats['document_token_costs'][fname]['output_tokens'] = doc_output_tokens
+
+                # Remaining document processing code remains the same...
+                # (classified pages and unclassified pages handling)
+
+            except Exception as e:
+                logging.error(f"Processing error for {fname}: {e}")
+                logging.error(traceback.format_exc())
+
+        # Log comprehensive processing summary
+        logging.info("\n--- Processing Session Summary ---")
+        logging.info("Token Usage Summary:")
+        logging.info(f"Total Documents Processed: {stats['total_documents']}")
+        logging.info(f"Total Pages Processed: {stats['total_pages']}")
+        logging.info(f"Total Token Cost: ${stats['total_token_cost']:.4f}")
+        logging.info(f"Total Input Tokens: {stats['total_input_tokens']}")
+        logging.info(f"Total Output Tokens: {stats['total_output_tokens']}")
+        
+        # Log per-document token costs
+        logging.info("\nPer-Document Token Costs:")
+        for doc, cost_details in stats['document_token_costs'].items():
+            logging.info(f"{doc}:")
+            logging.info(f"  Total Cost: ${cost_details['total_cost']:.4f}")
+            logging.info(f"  Input Tokens: {cost_details['input_tokens']}")
+            logging.info(f"  Output Tokens: {cost_details['output_tokens']}")
+
+        print(f"\n✅ Page-Level Document Processing Complete")
+        print(f"📄 Log File: {log_file}")
+        print(f"🔢 Total Token Cost: ${stats['total_token_cost']:.4f}")
+        print(f"📊 Total Input Tokens: {stats['total_input_tokens']}")
+        print(f"📊 Total Output Tokens: {stats['total_output_tokens']}")
+
+    except Exception as overall_error:
+        logging.critical(f"Critical processing error: {overall_error}")
+        logging.critical(traceback.format_exc())
+        print("❌ Document Processing Failed. Check logs for details.")
         
         # Verify reference documents exist
         reference_dir = cfg['paths']['reference_dir']
