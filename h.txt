@@ -256,4 +256,55 @@ if __name__ == "__main__":
 
     classify_documents(config)
 
+
+----update
+
+import os
+import json
+import shutil
+from azure.core.credentials import AzureKeyCredential
+from azure.ai.documentintelligence import (
+    DocumentIntelligenceClient,
+    DocumentIntelligenceAdministrationClient,
+)
+from azure.ai.documentintelligence.models import (
+    BuildDocumentClassifierRequest,
+)
+from helper import upload_reference_to_blob, split_pdf_to_pages
+
+def train_model(config):
+    """
+    Trains a custom classifier using Azure Document Intelligence
+    with reference data uploaded to Blob Storage.
+    """
+    endpoint = config["document_intelligence"]["endpoint"]
+    key = config["document_intelligence"]["api_key"]
+    container_name = config["storage"]["container_name"]
+
+    print("🚀 Starting model training ...")
+    admin_client = DocumentIntelligenceAdministrationClient(
+        endpoint, AzureKeyCredential(key)
+    )
+
+    build_request = BuildDocumentClassifierRequest(
+        # Remove AzureBlobSource
+        container_url=f"https://<your-storage-account>.blob.core.windows.net/{container_name}",
+        description="Custom document classification model (auto-generated)",
+    )
+
+    poller = admin_client.begin_build_document_classifier(build_request)
+    model = poller.result()
+
+    print(f"✅ Model training completed successfully.")
+    print(f"🆔 New model ID: {model.model_id}")
+
+    # Save model_id back into config.json
+    config["document_intelligence"]["model_id"] = model.model_id
+    with open("config.json", "w") as f:
+        json.dump(config, f, indent=4)
+
+    return model.model_id
+
+# Rest of the code remains the same
+
     classify_documents(config)
