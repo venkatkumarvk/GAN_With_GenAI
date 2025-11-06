@@ -29,13 +29,12 @@ config.json
 ------------------
 
   helper.py
-
-  import os
+import os
 import json
 import hashlib
 import logging
 from datetime import datetime
-from azure.ai.formrecognizer import DocumentAnalysisClient
+from azure.ai.documentintelligence import DocumentIntelligenceClient
 from azure.core.credentials import AzureKeyCredential
 
 # Configure logging
@@ -119,7 +118,7 @@ def get_document_intelligence_client(cfg):
     """
     try:
         credential = AzureKeyCredential(cfg["azure_document_intelligence"]["key"])
-        client = DocumentAnalysisClient(
+        client = DocumentIntelligenceClient(
             endpoint=cfg["azure_document_intelligence"]["endpoint"],
             credential=credential
         )
@@ -130,10 +129,10 @@ def get_document_intelligence_client(cfg):
 
 def train_custom_model(cfg, reference_dir):
     """
-    Train a custom Document Intelligence model
+    Prepare training data for custom model
     """
     try:
-        logging.info("🚀 Initiating custom model training")
+        logging.info("🚀 Preparing custom model training data")
         
         # Collect training data
         training_data = []
@@ -158,7 +157,7 @@ def train_custom_model(cfg, reference_dir):
                         }
                     })
         
-        # Limit training documents if necessary
+        # Limit training documents
         max_docs = cfg['classification'].get('max_training_documents', 100)
         training_data = training_data[:max_docs]
         
@@ -177,16 +176,16 @@ def train_custom_model(cfg, reference_dir):
                 'categories': {d['category']['main_category'] for d in training_data}
             }, f, indent=2)
         
-        logging.info(f"✅ Custom model trained: {trained_model_id}")
+        logging.info(f"✅ Training data prepared: {trained_model_id}")
         return trained_model_id
     
     except Exception as e:
-        logging.error(f"Model training failed: {e}")
+        logging.error(f"Training data preparation failed: {e}")
         return None
 
 def fine_tune_if_new_reference(cfg):
     """
-    Check if reference data has changed and trigger model training
+    Check if reference data has changed and prepare training data
     """
     ref_dir = cfg["paths"]["reference_dir"]
     hash_file = os.path.join(ref_dir, ".reference_hash")
@@ -211,10 +210,10 @@ def fine_tune_if_new_reference(cfg):
             logging.info("Reference Document Metadata:")
             logging.info(json.dumps(current_metadata, indent=2))
             
-            # Train custom model
+            # Prepare training data
             trained_model_id = train_custom_model(cfg, ref_dir)
             
-            # Update configuration if model trained
+            # Update configuration if training data prepared
             if trained_model_id:
                 cfg['azure_document_intelligence']['custom_model_id'] = trained_model_id
             
@@ -247,11 +246,9 @@ def prepare_directories(cfg):
     for dir_path in directories:
         os.makedirs(dir_path, exist_ok=True)
 
-  ------------
 
-  #main.py
-
-  import os
+----
+import os
 import io
 import json
 import shutil
@@ -327,7 +324,7 @@ def classify_document(client, file_path, cfg):
         with open(analysis_file, "rb") as f:
             poller = client.begin_analyze_document(
                 model_id=model_id,
-                document=f
+                analyze_request=f
             )
             result = poller.result()
 
@@ -337,15 +334,20 @@ def classify_document(client, file_path, cfg):
         confidence_score = 0.0
         reasoning = "No specific reasoning"
 
-        # Custom logic to interpret results
-        if result.documents:
+        # Parsing result
+        if result.documents and len(result.documents) > 0:
             document = result.documents[0]
             
             # Example of extracting information
-            for field in document.fields:
-                if field.value and field.confidence > confidence_score:
-                    main_category = _map_field_to_category(field, cfg)
-                    confidence_score = field.confidence
+            if hasattr(document, 'fields'):
+                for field_name, field in document.fields.items():
+                    if field and hasattr(field, 'value'):
+                        # Add your custom mapping logic
+                        mapped_category = _map_field_to_category(field_name, field.value, cfg)
+                        if mapped_category != 'unknown':
+                            main_category = mapped_category
+                            confidence_score = getattr(field, 'confidence', 0.0)
+                            break
 
         # Clean up temporary file
         if analysis_file.startswith('temp_page_'):
@@ -358,13 +360,21 @@ def classify_document(client, file_path, cfg):
         logging.error(traceback.format_exc())
         return 'unknown', 'unknown', 0.0, f"Classification error: {str(e)}"
 
-def _map_field_to_category(field, cfg):
+def _map_field_to_category(field_name, field_value, cfg):
     """
     Map detected fields to categories
     """
+    # Convert to string and lowercase for comparison
+    str_field_name = str(field_name).lower()
+    str_field_value = str(field_value).lower()
+
     for main_cat, subcats in cfg['categories'].items():
-        if any(subcat.lower() in str(field.value).lower() for subcat in subcats):
+        # Check if field name or value matches any subcategory
+        if any(subcat.lower() in str_field_name or 
+               subcat.lower() in str_field_value 
+               for subcat in subcats):
             return main_cat
+    
     return 'unknown'
 
 def process_documents():
@@ -378,7 +388,7 @@ def process_documents():
         # Prepare directories
         prepare_directories(cfg)
         
-        # Check for reference changes and potentially train model
+        # Check for reference changes and prepare training data
         fine_tune_if_new_reference(cfg)
         
         # Initialize Document Intelligence client
