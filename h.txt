@@ -19,13 +19,11 @@ MODEL_ID = "your_custom_model_id"
 
 # Setup logging
 def setup_logging():
-    # Create logs directory if it doesn't exist
     log_dir = os.path.join(OUTPUT_BASE_FOLDER, 'logs')
     os.makedirs(log_dir, exist_ok=True)
     
     log_filename = os.path.join(log_dir, f'document_classification_{datetime.now().strftime("%Y%m%d_%H%M%S")}.log')
     
-    # Configure logging
     logging.basicConfig(
         level=logging.INFO,
         format='%(asctime)s - %(levelname)s: %(message)s',
@@ -47,21 +45,13 @@ document_intelligence_client = DocumentIntelligenceClient(
 
 # Robust PDF validation
 def is_valid_pdf(file_path):
-    """
-    Validate PDF file
-    - Checks file extension
-    - Attempts to open and read PDF
-    """
     try:
-        # Check file extension
         if not file_path.lower().endswith('.pdf'):
             return False
         
-        # Attempt to open PDF
         with open(file_path, 'rb') as file:
             pdf_reader = PyPDF2.PdfReader(file)
             
-            # Check if PDF has pages
             if len(pdf_reader.pages) == 0:
                 logger.warning(f"Empty PDF: {file_path}")
                 return False
@@ -73,47 +63,31 @@ def is_valid_pdf(file_path):
 
 # Sanitize filename
 def sanitize_filename(filename):
-    """
-    Sanitize filename to remove problematic characters
-    """
-    # Replace or remove problematic characters
     filename = re.sub(r'[<>:"/\\|?*]', '_', filename)
-    # Remove leading/trailing spaces and periods
-    filename = filename.strip('. ')
-    return filename
+    return filename.strip('. ')
 
 # Extract specific pages from a PDF
-def extract_pages(input_path, page_numbers, original_filename, doc_type):
+def extract_pages(input_path, page_numbers, original_filename):
     """
-    Extract specific pages from a PDF using a temporary file
+    Extract specific pages from a PDF
     
     :param input_path: Path to the source PDF
     :param page_numbers: List of page numbers to extract (1-indexed)
     :param original_filename: Original filename to preserve naming
-    :param doc_type: Document type for folder organization
-    :return: Tuple of (temp_output_path, output_filename, classified_output_folder)
+    :return: Path to the new PDF with extracted pages
     """
     try:
         # Create necessary directories
         temp_dir = os.path.join(OUTPUT_BASE_FOLDER, 'temp')
-        classified_base_dir = os.path.join(OUTPUT_BASE_FOLDER, 'classified')
         os.makedirs(temp_dir, exist_ok=True)
-        os.makedirs(classified_base_dir, exist_ok=True)
-        
-        # Create type-specific folder in classified output
-        classified_type_folder = os.path.join(classified_base_dir, doc_type)
-        os.makedirs(classified_type_folder, exist_ok=True)
         
         # Generate output filename maintaining original name
         base_name = os.path.splitext(original_filename)[0]
         pages_str = '_'.join(map(str, page_numbers))
-        output_filename = f"{base_name}_pages{pages_str}_classified.pdf"
+        output_filename = f"{base_name}_pages{pages_str}_extracted.pdf"
         
-        # Temporary output path
-        temp_output_path = os.path.join(temp_dir, output_filename)
-        
-        # Final classified output path
-        classified_output_path = os.path.join(classified_type_folder, output_filename)
+        # Full output path
+        output_path = os.path.join(temp_dir, output_filename)
         
         # Read the input PDF
         with open(input_path, 'rb') as file:
@@ -124,15 +98,15 @@ def extract_pages(input_path, page_numbers, original_filename, doc_type):
             for page_num in page_numbers:
                 writer.add_page(reader.pages[page_num - 1])
 
-            # Write the temporary PDF
-            with open(temp_output_path, 'wb') as output_file:
+            # Write the new PDF
+            with open(output_path, 'wb') as output_file:
                 writer.write(output_file)
 
-        return temp_output_path, output_filename, classified_output_path
+        return output_path, output_filename
     except Exception as e:
         logger.error(f"Error extracting pages from {input_path}: {e}")
         logger.error(traceback.format_exc())
-        return None, None, None
+        return None, None
 
 # Process a single PDF file
 def process_single_pdf(input_path, output_folders):
@@ -143,6 +117,7 @@ def process_single_pdf(input_path, output_folders):
     file_stats = {
         'processed': False,
         'classified_pages': [],
+        'unclassified_pages': [],
         'errors': []
     }
     
@@ -151,21 +126,17 @@ def process_single_pdf(input_path, output_folders):
         filename = os.path.basename(input_path)
         sanitized_filename = sanitize_filename(filename)
         
-        # Detailed logging
-        logger.info(f"Processing file: {input_path}")
-        
         # Copy to source folder
         source_output_path = os.path.join(output_folders['source'], sanitized_filename)
         shutil.copy2(input_path, source_output_path)
         
         # Open the PDF file
         with open(input_path, "rb") as file:
-            # Read PDF to get total page count
             pdf_reader = PyPDF2.PdfReader(file)
             total_pages = len(pdf_reader.pages)
         
         # Classify each page individually
-        classified_page_groups = {}
+        page_classifications = {}
         
         for page_num in range(1, total_pages + 1):
             try:
@@ -181,96 +152,97 @@ def process_single_pdf(input_path, output_folders):
                 result = poller.result()
                 
                 # Check classification for this page
+                classified = False
                 for document in result.documents:
-                    # Log confidence for debugging
                     logger.info(f"Page {page_num}: Confidence = {document.confidence}")
                     
                     if document.confidence >= CONFIDENCE_THRESHOLD:
                         doc_type = document.doc_type.lower().replace(' ', '_')
-                        
-                        # Group pages by their document type
-                        if doc_type not in classified_page_groups:
-                            classified_page_groups[doc_type] = []
-                        
-                        classified_page_groups[doc_type].append({
-                            'page_num': page_num,
-                            'confidence': document.confidence
-                        })
-                        
-                        # Track classified pages
-                        file_stats['classified_pages'].append({
-                            'page_num': page_num,
+                        page_classifications[page_num] = {
                             'type': doc_type,
                             'confidence': document.confidence
-                        })
-                        
+                        }
+                        file_stats['classified_pages'].append(page_num)
+                        classified = True
                         break
+                
+                # Track unclassified pages
+                if not classified:
+                    file_stats['unclassified_pages'].append(page_num)
+            
             except Exception as classification_error:
-                error_details = {
-                    'page': page_num,
-                    'error': 'Classification failed',
-                    'details': str(classification_error)
-                }
-                file_stats['errors'].append(error_details)
                 logger.error(f"Classification error for {input_path}, page {page_num}: {classification_error}")
+                file_stats['unclassified_pages'].append(page_num)
         
-        # Process classified pages
-        if classified_page_groups:
-            # Process each document type
-            for doc_type, page_info in classified_page_groups.items():
-                # Prepare classified page numbers
-                classified_nums = [page['page_num'] for page in page_info]
+        # Process classified and unclassified pages
+        if file_stats['classified_pages']:
+            # Group classified pages by type
+            classified_groups = {}
+            for page_num in file_stats['classified_pages']:
+                doc_type = page_classifications[page_num]['type']
+                if doc_type not in classified_groups:
+                    classified_groups[doc_type] = []
+                classified_groups[doc_type].append(page_num)
+            
+            # Extract and save classified page groups
+            for doc_type, pages in classified_groups.items():
+                # Create type-specific folder in classified output
+                type_output_folder = os.path.join(output_folders['classified'], doc_type)
+                os.makedirs(type_output_folder, exist_ok=True)
                 
                 # Extract classified pages
-                temp_pdf, output_filename, classified_output_path = extract_pages(
+                extracted_pdf, output_filename = extract_pages(
                     input_path, 
-                    classified_nums, 
-                    filename,
-                    doc_type
+                    pages, 
+                    sanitized_filename
                 )
                 
-                if temp_pdf and classified_output_path:
-                    try:
-                        # Move from temporary to classified folder
-                        shutil.move(temp_pdf, classified_output_path)
-                        
-                        # Logging
-                        logger.info(f"Classified File: {filename}")
-                        logger.info(f"  - Document Type: {doc_type}")
-                        logger.info(f"  - Classified Pages: {classified_nums}")
-                        logger.info(f"  - Output: {classified_output_path}")
-                        
-                        # Mark as processed
-                        file_stats['processed'] = True
-                    except Exception as move_error:
-                        logger.error(f"Error moving classified file: {move_error}")
-                        file_stats['errors'].append({
-                            'error': 'File move failed',
-                            'details': str(move_error)
-                        })
-        else:
-            # Move to unclassified folder
-            unclassified_output_path = os.path.join(output_folders['unclassified'], sanitized_filename)
-            shutil.copy2(input_path, unclassified_output_path)
+                if extracted_pdf:
+                    # Full output path for classified PDF
+                    output_path = os.path.join(type_output_folder, output_filename)
+                    
+                    # Move extracted PDF
+                    shutil.move(extracted_pdf, output_path)
+                    
+                    # Logging
+                    logger.info(f"Classified Pages: {pages}")
+                    logger.info(f"  - Document Type: {doc_type}")
+                    logger.info(f"  - Output: {output_path}")
+        
+        # Handle unclassified pages
+        if file_stats['unclassified_pages']:
+            # Extract unclassified pages
+            extracted_pdf, output_filename = extract_pages(
+                input_path, 
+                file_stats['unclassified_pages'], 
+                sanitized_filename
+            )
             
-            # Logging
-            logger.info(f"Unclassified File: {filename}")
-            logger.info(f"  - Moved to: {unclassified_output_path}")
+            if extracted_pdf:
+                # Move to unclassified folder
+                unclassified_output_path = os.path.join(output_folders['unclassified'], output_filename)
+                shutil.move(extracted_pdf, unclassified_output_path)
+                
+                # Logging
+                logger.info(f"Unclassified Pages: {file_stats['unclassified_pages']}")
+                logger.info(f"  - Moved to: {unclassified_output_path}")
+        
+        # Mark as processed if any pages were handled
+        file_stats['processed'] = bool(file_stats['classified_pages'] or file_stats['unclassified_pages'])
     
     except Exception as e:
         # Catch any unexpected errors
-        error_details = {
+        logger.error(f"Unexpected error processing {input_path}: {e}")
+        logger.error(traceback.format_exc())
+        file_stats['errors'].append({
             'error': 'Unexpected processing error',
             'details': str(e),
             'traceback': traceback.format_exc()
-        }
-        file_stats['errors'].append(error_details)
-        logger.error(f"Unexpected error processing {input_path}: {e}")
-        logger.error(traceback.format_exc())
+        })
     
     return file_stats
 
-# Main processing function
+# Main processing function remains the same as in the previous full script
 def process_pdf_folder(input_folder, output_base_folder):
     # Setup output folders
     output_folders = {
@@ -331,18 +303,15 @@ def process_pdf_folder(input_folder, output_base_folder):
         # Update overall stats
         if file_stats['processed']:
             stats['total_files_processed'] += 1
-            stats['classified_files'] += 1
             
             # Track classified pages
-            for page in file_stats['classified_pages']:
-                doc_type = page['type']
-                stats['classified_pages'] += 1
-                
-                if doc_type not in stats['document_types']:
-                    stats['document_types'][doc_type] = 0
-                stats['document_types'][doc_type] += 1
-        else:
-            stats['unclassified_files'] += 1
+            if file_stats['classified_pages']:
+                stats['classified_files'] += 1
+                stats['classified_pages'] += len(file_stats['classified_pages'])
+            
+            # Track unclassified pages
+            if file_stats['unclassified_pages']:
+                stats['unclassified_files'] += 1
         
         # Track errors
         if file_stats['errors']:
@@ -356,9 +325,6 @@ Total Files Processed: {stats['total_files_processed']}
 Classified Files: {stats['classified_files']}
 Unclassified Files: {stats['unclassified_files']}
 Classified Pages: {stats['classified_pages']}
-Document Types:
-{chr(10).join(f"  - {doc_type}: {count}" for doc_type, count in stats['document_types'].items())}
-
 Errors: {len(stats['errors'])}
 """
     print(summary_message)
