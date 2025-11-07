@@ -1,17 +1,29 @@
 import os
+import re
+import shutil
+import logging
 import traceback
+from datetime import datetime
 from azure.core.credentials import AzureKeyCredential
 from azure.ai.documentintelligence import DocumentIntelligenceClient
 from azure.ai.documentintelligence.models import AnalyzeDocumentRequest
 import PyPDF2
 
 # Configuration
-INPUT_FOLDER = r"path/to/input/pdfs"  # Use raw string for Windows paths
-OUTPUT_BASE_FOLDER = r"path/to/output/classified"  # Use raw string for Windows paths
+INPUT_FOLDER = r"path/to/input/pdfs"  # Input PDF folder
+OUTPUT_BASE_FOLDER = r"path/to/output"  # Base output folder
 CONFIDENCE_THRESHOLD = 0.6  # 60% confidence threshold
 ENDPOINT = "your_azure_endpoint"
 KEY = "your_azure_key"
 MODEL_ID = "your_custom_model_id"
+
+# Setup logging
+log_filename = f'document_classification_{datetime.now().strftime("%Y%m%d_%H%M%S")}.log'
+logging.basicConfig(
+    filename=log_filename,
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s: %(message)s'
+)
 
 # Create DocumentIntelligenceClient
 document_intelligence_client = DocumentIntelligenceClient(
@@ -19,15 +31,33 @@ document_intelligence_client = DocumentIntelligenceClient(
     credential=AzureKeyCredential(KEY)
 )
 
-# Ensure output folders exist
+# Setup output folders
 def setup_output_folders(base_folder):
+    """
+    Create source, classified, and unclassified folders
+    """
     folders = {
-        'classified': os.path.join(base_folder, "classified"),
-        'unclassified': os.path.join(base_folder, "unclassified")
+        'source': os.path.join(base_folder, 'source'),
+        'classified': os.path.join(base_folder, 'classified'),
+        'unclassified': os.path.join(base_folder, 'unclassified')
     }
+    
+    # Create folders
     for folder in folders.values():
         os.makedirs(folder, exist_ok=True)
+    
     return folders
+
+# Sanitize filename
+def sanitize_filename(filename):
+    """
+    Sanitize filename to remove problematic characters
+    """
+    # Replace or remove problematic characters
+    filename = re.sub(r'[<>:"/\\|?*]', '_', filename)
+    # Remove leading/trailing spaces and periods
+    filename = filename.strip('. ')
+    return filename
 
 # Extract specific pages from a PDF
 def extract_pages(input_path, page_numbers):
@@ -60,7 +90,7 @@ def extract_pages(input_path, page_numbers):
 
         return output_path
     except Exception as e:
-        print(f"Error extracting pages: {e}")
+        logging.error(f"Error extracting pages: {e}")
         return None
 
 # Process PDFs with page-level classification
@@ -74,22 +104,36 @@ def process_pdf_folder(input_folder, output_base_folder):
         'classified_files': 0,
         'unclassified_files': 0,
         'total_pages_processed': 0,
-        'classified_pages': 0,
-        'unclassified_pages': 0
+        'classified_pages': 0
     }
     
-    # Ensure input folder exists and is accessible
+    # Log start of processing
+    logging.info(f"Starting document classification")
+    logging.info(f"Input Folder: {input_folder}")
+    logging.info(f"Output Folder: {output_base_folder}")
+    logging.info(f"Confidence Threshold: {CONFIDENCE_THRESHOLD}")
+    
+    # Ensure input folder exists
     if not os.path.exists(input_folder):
-        print(f"Error: Input folder {input_folder} does not exist!")
+        logging.error(f"Input folder {input_folder} does not exist!")
         return
     
     # Iterate through all files in the input folder
     for filename in os.listdir(input_folder):
+        # Process only PDF files
         if filename.lower().endswith('.pdf'):
-            stats['total_files'] += 1
-            input_path = os.path.join(input_folder, filename)
-            
             try:
+                # Increment total files
+                stats['total_files'] += 1
+                
+                # Full input path
+                input_path = os.path.join(input_folder, filename)
+                
+                # Copy source file to source folder
+                sanitized_filename = sanitize_filename(filename)
+                source_output_path = os.path.join(output_folders['source'], sanitized_filename)
+                shutil.copy2(input_path, source_output_path)
+                
                 # Open the PDF file
                 with open(input_path, "rb") as file:
                     # Read PDF to get total page count
@@ -98,8 +142,7 @@ def process_pdf_folder(input_folder, output_base_folder):
                     stats['total_pages_processed'] += total_pages
                 
                 # Classify each page individually
-                classified_pages = []
-                unclassified_pages = []
+                classified_page_nums = []
                 
                 for page_num in range(1, total_pages + 1):
                     # Reset file pointer
@@ -114,107 +157,90 @@ def process_pdf_folder(input_folder, output_base_folder):
                     result = poller.result()
                     
                     # Check classification for this page
-                    page_classified = False
                     for document in result.documents:
                         if document.confidence >= CONFIDENCE_THRESHOLD:
-                            classified_pages.append({
+                            classified_page_nums.append({
                                 'page_num': page_num,
                                 'type': document.doc_type.lower().replace(' ', '_'),
                                 'confidence': document.confidence
                             })
-                            page_classified = True
                             stats['classified_pages'] += 1
                             break
-                    
-                    # Track unclassified pages
-                    if not page_classified:
-                        unclassified_pages.append(page_num)
-                        stats['unclassified_pages'] += 1
                 
                 # Process classified pages
-                if classified_pages:
+                if classified_page_nums:
                     stats['classified_files'] += 1
-                    for class_info in classified_pages:
-                        # Create type-specific folder
-                        type_folder = os.path.join(output_folders['classified'], class_info['type'])
-                        os.makedirs(type_folder, exist_ok=True)
-                        
-                        # Generate output filename
+                    
+                    # Prepare classified page numbers
+                    classified_nums = [page['page_num'] for page in classified_page_nums]
+                    
+                    # Extract classified pages
+                    extracted_pdf = extract_pages(input_path, classified_nums)
+                    
+                    if extracted_pdf:
+                        # Create output filename
                         output_filename = (
-                            f"{os.path.splitext(filename)[0]}_page{class_info['page_num']}_"
-                            f"type_{class_info['type']}_"
-                            f"conf_{class_info['confidence']:.2f}.pdf"
+                            f"{os.path.splitext(sanitized_filename)[0]}_"
+                            f"pages{'_'.join(map(str, classified_nums))}_"
+                            f"classified.pdf"
                         )
-                        output_path = os.path.join(type_folder, output_filename)
                         
-                        # Extract and save classified pages
-                        extracted_pdf = extract_pages(input_path, [class_info['page_num']])
-                        if extracted_pdf:
-                            import shutil
-                            shutil.move(extracted_pdf, output_path)
+                        # Full output path for classified PDF
+                        output_path = os.path.join(output_folders['classified'], output_filename)
                         
-                        print(f"Classified Page: {filename} - Page {class_info['page_num']}")
-                        print(f"  - Type: {class_info['type']}")
-                        print(f"  - Confidence: {class_info['confidence']:.2f}")
-                        print(f"  - Output: {output_path}")
-                
-                # Handle unclassified pages
-                if unclassified_pages:
+                        # Move extracted PDF
+                        shutil.move(extracted_pdf, output_path)
+                        
+                        # Logging
+                        logging.info(f"Classified File: {filename}")
+                        logging.info(f"  - Classified Pages: {classified_nums}")
+                        logging.info(f"  - Output: {output_path}")
+                else:
+                    # No pages classified - move to unclassified
                     stats['unclassified_files'] += 1
-                    # Create unclassified PDF with remaining pages
-                    unclassified_pdf = extract_pages(input_path, unclassified_pages)
-                    if unclassified_pdf:
-                        unclassified_output = os.path.join(
-                            output_folders['unclassified'], 
-                            f"{os.path.splitext(filename)[0]}_unclassified_pages.pdf"
-                        )
-                        import shutil
-                        shutil.move(unclassified_pdf, unclassified_output)
-                        print(f"Unclassified Pages: {filename} - Pages {unclassified_pages}")
-            
-            except FileNotFoundError:
-                print(f"Error: File not found - {input_path}")
-                print(traceback.format_exc())
-                continue
+                    
+                    # Move to unclassified folder
+                    unclassified_output_path = os.path.join(output_folders['unclassified'], sanitized_filename)
+                    shutil.copy2(input_path, unclassified_output_path)
+                    
+                    # Logging
+                    logging.info(f"Unclassified File: {filename}")
+                    logging.info(f"  - Moved to: {unclassified_output_path}")
+                
             except Exception as e:
-                print(f"Unexpected error processing {filename}: {e}")
-                print(traceback.format_exc())
+                logging.error(f"Error processing {filename}: {e}")
+                logging.error(traceback.format_exc())
                 continue
     
-    # Print processing summary
-    print("\n--- Processing Summary ---")
-    print(f"Total Files: {stats['total_files']}")
-    print(f"Classified Files: {stats['classified_files']}")
-    print(f"Unclassified Files: {stats['unclassified_files']}")
-    print(f"Total Pages Processed: {stats['total_pages_processed']}")
-    print(f"Classified Pages: {stats['classified_pages']}")
-    print(f"Unclassified Pages: {stats['unclassified_pages']}")
+    # Print and log processing summary
+    summary_message = f"""
+--- Processing Summary ---
+Total Files Processed: {stats['total_files']}
+Classified Files: {stats['classified_files']}
+Unclassified Files: {stats['unclassified_files']}
+Total Pages Processed: {stats['total_pages_processed']}
+Classified Pages: {stats['classified_pages']}
+"""
+    print(summary_message)
+    logging.info(summary_message)
 
 # Run the processing
 process_pdf_folder(INPUT_FOLDER, OUTPUT_BASE_FOLDER)
 ```
 
-Key Improvements:
-
-1. Robust Error Handling
-   - Uses `traceback` to provide detailed error information
-   - Handles `FileNotFoundError` and other exceptions
-   - Continues processing even if individual files fail
-
-2. Page-Level Classification
-   - Classifies each page individually
-   - Supports partial document classification
-   - Separates classified and unclassified pages
-
-3. Detailed Folder Structure
+Output Folder Structure:
 ```
-output_classified/
+output/
+├── source/
+│   ├── original_document1.pdf
+│   ├── original_document2.pdf
+│   └── ...
+│
 ├── classified/
-│   ├── invoice/
-│   │   ├── doc1_page2_type_invoice_conf_0.85.pdf
-│   │   └── doc1_page4_type_invoice_conf_0.72.pdf
-│   └── receipt/
-│       └── doc2_page3_type_receipt_conf_0.65.pdf
+│   ├── original_document1_pages2_4_7_invoice_classified.pdf
+│   ├── original_document2_pages6_18_receipt_classified.pdf
+│   └── ...
+│
 └── unclassified/
-    ├── doc1_unclassified_pages.pdf  # Contains pages 1, 3, 5
-    └── doc2_unclassified_pages.pdf
+    ├── original_document3.pdf
+    └── ...
