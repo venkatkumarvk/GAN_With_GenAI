@@ -1,0 +1,110 @@
+import os
+from azure.core.credentials import AzureKeyCredential
+from azure.ai.documentintelligence import DocumentIntelligenceClient
+from azure.ai.documentintelligence.models import AnalyzeDocumentRequest
+
+# Configuration
+input_folder = "path/to/input/pdfs"  # Folder containing input PDFs
+output_base_folder = "path/to/output/classified"  # Base output folder
+endpoint = "your_azure_endpoint"
+key = "your_azure_key"
+model_id = "your_custom_model_id"
+
+# Create DocumentIntelligenceClient
+document_intelligence_client = DocumentIntelligenceClient(
+    endpoint=endpoint,
+    credential=AzureKeyCredential(key)
+)
+
+# Ensure output base folder exists
+os.makedirs(output_base_folder, exist_ok=True)
+
+# Process all PDFs in the input folder
+def process_pdf_folder(input_folder, output_base_folder):
+    # Iterate through all files in the input folder
+    for filename in os.listdir(input_folder):
+        if filename.lower().endswith('.pdf'):
+            input_path = os.path.join(input_folder, filename)
+            
+            try:
+                # Open the PDF file
+                with open(input_path, "rb") as file:
+                    # Begin document classification
+                    poller = document_intelligence_client.begin_classify_document(
+                        classifier_id=model_id,
+                        body=file
+                    )
+                
+                # Get classification result
+                result = poller.result()
+                
+                # Process each classified document
+                for idx, document in enumerate(result.documents):
+                    # Determine document type (for folder structure)
+                    doc_type = document.doc_type.lower().replace(' ', '_')
+                    
+                    # Create output folder for this document type
+                    type_output_folder = os.path.join(output_base_folder, doc_type)
+                    os.makedirs(type_output_folder, exist_ok=True)
+                    
+                    # Generate output filename
+                    output_filename = f"{os.path.splitext(filename)[0]}_{idx+1}_type_{doc_type}.pdf"
+                    output_path = os.path.join(type_output_folder, output_filename)
+                    
+                    # Copy original file to classified folder
+                    import shutil
+                    shutil.copy2(input_path, output_path)
+                    
+                    # Print classification details
+                    print(f"Processed {filename}:")
+                    print(f"  - Document Type: {document.doc_type}")
+                    print(f"  - Confidence: {document.confidence}")
+                    print(f"  - Output Path: {output_path}")
+                    print("---")
+            
+            except Exception as e:
+                print(f"Error processing {filename}: {str(e)}")
+
+# Run the processing
+process_pdf_folder(input_folder, output_base_folder)
+```
+
+This script does the following:
+
+1. Processes all PDF files in the specified input folder
+2. Uses Azure Document Intelligence to classify each document
+3. Creates a folder structure in the output directory based on document types
+4. Copies classified documents to their respective type-based folders
+5. Handles potential errors for individual files
+6. Provides detailed logging of the classification process
+
+Key modifications:
+- Adds folder processing capability
+- Creates a hierarchical output structure
+- Includes error handling
+- Provides detailed logging
+
+Folder Structure Example:
+```
+output_classified/
+├── invoice/
+│   ├── document1_1_type_invoice.pdf
+│   └── document2_1_type_invoice.pdf
+├── receipt/
+│   ├── document3_1_type_receipt.pdf
+│   └── document4_1_type_receipt.pdf
+└── contract/
+    └── document5_1_type_contract.pdf
+```
+
+Recommendations:
+1. Replace placeholders:
+   - `input_folder`: Path to your PDF input folder
+   - `output_base_folder`: Path where you want classified documents
+   - `endpoint`: Your Azure Document Intelligence endpoint
+   - `key`: Your Azure access key
+   - `model_id`: Your trained custom classification model ID
+
+2. Ensure you have the latest Azure Document Intelligence SDK:
+```
+   pip install azure-ai-documentintelligence
