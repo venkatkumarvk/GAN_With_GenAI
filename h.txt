@@ -4,26 +4,43 @@ from azure.ai.documentintelligence import DocumentIntelligenceClient
 from azure.ai.documentintelligence.models import AnalyzeDocumentRequest
 
 # Configuration
-input_folder = "path/to/input/pdfs"  # Folder containing input PDFs
-output_base_folder = "path/to/output/classified"  # Base output folder
-endpoint = "your_azure_endpoint"
-key = "your_azure_key"
-model_id = "your_custom_model_id"
+INPUT_FOLDER = "path/to/input/pdfs"  # Folder containing input PDFs
+OUTPUT_BASE_FOLDER = "path/to/output/classified"  # Base output folder
+CONFIDENCE_THRESHOLD = 0.6  # 60% confidence threshold
+ENDPOINT = "your_azure_endpoint"
+KEY = "your_azure_key"
+MODEL_ID = "your_custom_model_id"
 
 # Create DocumentIntelligenceClient
 document_intelligence_client = DocumentIntelligenceClient(
-    endpoint=endpoint,
-    credential=AzureKeyCredential(key)
+    endpoint=ENDPOINT,
+    credential=AzureKeyCredential(KEY)
 )
 
-# Ensure output base folder exists
-os.makedirs(output_base_folder, exist_ok=True)
+# Ensure output base folders exist
+def setup_output_folders(base_folder):
+    folders = [
+        os.path.join(base_folder, "classified"),
+        os.path.join(base_folder, "unclassified")
+    ]
+    for folder in folders:
+        os.makedirs(folder, exist_ok=True)
+    return folders
 
-# Process all PDFs in the input folder
+# Process PDFs with confidence threshold
 def process_pdf_folder(input_folder, output_base_folder):
+    # Setup output folders
+    classified_folder, unclassified_folder = setup_output_folders(output_base_folder)
+    
+    # Logging variables
+    total_files = 0
+    classified_files = 0
+    unclassified_files = 0
+    
     # Iterate through all files in the input folder
     for filename in os.listdir(input_folder):
         if filename.lower().endswith('.pdf'):
+            total_files += 1
             input_path = os.path.join(input_folder, filename)
             
             try:
@@ -31,7 +48,7 @@ def process_pdf_folder(input_folder, output_base_folder):
                 with open(input_path, "rb") as file:
                     # Begin document classification
                     poller = document_intelligence_client.begin_classify_document(
-                        classifier_id=model_id,
+                        classifier_id=MODEL_ID,
                         body=file
                     )
                 
@@ -39,72 +56,78 @@ def process_pdf_folder(input_folder, output_base_folder):
                 result = poller.result()
                 
                 # Process each classified document
+                document_classified = False
                 for idx, document in enumerate(result.documents):
-                    # Determine document type (for folder structure)
-                    doc_type = document.doc_type.lower().replace(' ', '_')
-                    
-                    # Create output folder for this document type
-                    type_output_folder = os.path.join(output_base_folder, doc_type)
-                    os.makedirs(type_output_folder, exist_ok=True)
-                    
-                    # Generate output filename
-                    output_filename = f"{os.path.splitext(filename)[0]}_{idx+1}_type_{doc_type}.pdf"
-                    output_path = os.path.join(type_output_folder, output_filename)
-                    
-                    # Copy original file to classified folder
+                    # Check confidence threshold
+                    if document.confidence >= CONFIDENCE_THRESHOLD:
+                        # Determine document type (for folder structure)
+                        doc_type = document.doc_type.lower().replace(' ', '_')
+                        
+                        # Create output folder for this document type
+                        type_output_folder = os.path.join(classified_folder, doc_type)
+                        os.makedirs(type_output_folder, exist_ok=True)
+                        
+                        # Generate output filename
+                        output_filename = f"{os.path.splitext(filename)[0]}_{idx+1}_type_{doc_type}_conf_{document.confidence:.2f}.pdf"
+                        output_path = os.path.join(type_output_folder, output_filename)
+                        
+                        # Copy original file to classified folder
+                        import shutil
+                        shutil.copy2(input_path, output_path)
+                        
+                        # Mark as classified and log
+                        document_classified = True
+                        classified_files += 1
+                        
+                        print(f"Classified: {filename}")
+                        print(f"  - Document Type: {document.doc_type}")
+                        print(f"  - Confidence: {document.confidence:.2f}")
+                        print(f"  - Output Path: {output_path}")
+                        print("---")
+                
+                # If no document meets confidence threshold, move to unclassified
+                if not document_classified:
+                    output_path = os.path.join(unclassified_folder, filename)
                     import shutil
                     shutil.copy2(input_path, output_path)
-                    
-                    # Print classification details
-                    print(f"Processed {filename}:")
-                    print(f"  - Document Type: {document.doc_type}")
-                    print(f"  - Confidence: {document.confidence}")
-                    print(f"  - Output Path: {output_path}")
-                    print("---")
+                    unclassified_files += 1
+                    print(f"Unclassified (low confidence): {filename}")
             
             except Exception as e:
+                # Move to unclassified if processing fails
+                output_path = os.path.join(unclassified_folder, filename)
+                import shutil
+                shutil.copy2(input_path, output_path)
+                unclassified_files += 1
                 print(f"Error processing {filename}: {str(e)}")
+    
+    # Print summary
+    print("\n--- Processing Summary ---")
+    print(f"Total files processed: {total_files}")
+    print(f"Classified files: {classified_files}")
+    print(f"Unclassified files: {unclassified_files}")
 
 # Run the processing
-process_pdf_folder(input_folder, output_base_folder)
+process_pdf_folder(INPUT_FOLDER, OUTPUT_BASE_FOLDER)
 ```
 
-This script does the following:
+Key Enhancements:
+1. Confidence Threshold (60%)
+   - Only documents with confidence >= 0.6 are classified
+   - Low confidence documents moved to "unclassified" folder
 
-1. Processes all PDF files in the specified input folder
-2. Uses Azure Document Intelligence to classify each document
-3. Creates a folder structure in the output directory based on document types
-4. Copies classified documents to their respective type-based folders
-5. Handles potential errors for individual files
-6. Provides detailed logging of the classification process
-
-Key modifications:
-- Adds folder processing capability
-- Creates a hierarchical output structure
-- Includes error handling
-- Provides detailed logging
-
-Folder Structure Example:
+2. Detailed Folder Structure
 ```
 output_classified/
-├── invoice/
-│   ├── document1_1_type_invoice.pdf
-│   └── document2_1_type_invoice.pdf
-├── receipt/
-│   ├── document3_1_type_receipt.pdf
-│   └── document4_1_type_receipt.pdf
-└── contract/
-    └── document5_1_type_contract.pdf
-```
-
-Recommendations:
-1. Replace placeholders:
-   - `input_folder`: Path to your PDF input folder
-   - `output_base_folder`: Path where you want classified documents
-   - `endpoint`: Your Azure Document Intelligence endpoint
-   - `key`: Your Azure access key
-   - `model_id`: Your trained custom classification model ID
-
-2. Ensure you have the latest Azure Document Intelligence SDK:
-```
-   pip install azure-ai-documentintelligence
+├── classified/
+│   ├── invoice/
+│   │   ├── doc1_1_type_invoice_conf_0.85.pdf
+│   │   └── doc2_1_type_invoice_conf_0.72.pdf
+│   ├── receipt/
+│   │   └── doc3_1_type_receipt_conf_0.65.pdf
+│   └── contract/
+│       └── doc4_1_type_contract_conf_0.68.pdf
+└── unclassified/
+    ├── low_confidence_doc1.pdf
+    ├── low_confidence_doc2.pdf
+    └── processing_error_doc.pdf
