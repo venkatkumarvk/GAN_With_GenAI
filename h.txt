@@ -104,7 +104,8 @@ def process_pdf_folder(input_folder, output_base_folder):
         'classified_files': 0,
         'unclassified_files': 0,
         'total_pages_processed': 0,
-        'classified_pages': 0
+        'classified_pages': 0,
+        'document_types': {}
     }
     
     # Log start of processing
@@ -142,7 +143,7 @@ def process_pdf_folder(input_folder, output_base_folder):
                     stats['total_pages_processed'] += total_pages
                 
                 # Classify each page individually
-                classified_page_nums = []
+                classified_page_groups = {}
                 
                 for page_num in range(1, total_pages + 1):
                     # Reset file pointer
@@ -159,42 +160,60 @@ def process_pdf_folder(input_folder, output_base_folder):
                     # Check classification for this page
                     for document in result.documents:
                         if document.confidence >= CONFIDENCE_THRESHOLD:
-                            classified_page_nums.append({
+                            doc_type = document.doc_type.lower().replace(' ', '_')
+                            
+                            # Group pages by their document type
+                            if doc_type not in classified_page_groups:
+                                classified_page_groups[doc_type] = []
+                            
+                            classified_page_groups[doc_type].append({
                                 'page_num': page_num,
-                                'type': document.doc_type.lower().replace(' ', '_'),
                                 'confidence': document.confidence
                             })
+                            
+                            # Update document type stats
+                            if doc_type not in stats['document_types']:
+                                stats['document_types'][doc_type] = 0
+                            stats['document_types'][doc_type] += 1
+                            
                             stats['classified_pages'] += 1
                             break
                 
                 # Process classified pages
-                if classified_page_nums:
+                if classified_page_groups:
                     stats['classified_files'] += 1
                     
-                    # Prepare classified page numbers
-                    classified_nums = [page['page_num'] for page in classified_page_nums]
-                    
-                    # Extract classified pages
-                    extracted_pdf = extract_pages(input_path, classified_nums)
-                    
-                    if extracted_pdf:
-                        # Create output filename
-                        output_filename = (
-                            f"{os.path.splitext(sanitized_filename)[0]}_"
-                            f"pages{'_'.join(map(str, classified_nums))}_"
-                            f"classified.pdf"
-                        )
+                    # Process each document type
+                    for doc_type, page_info in classified_page_groups.items():
+                        # Create type-specific folder in classified output
+                        type_output_folder = os.path.join(output_folders['classified'], doc_type)
+                        os.makedirs(type_output_folder, exist_ok=True)
                         
-                        # Full output path for classified PDF
-                        output_path = os.path.join(output_folders['classified'], output_filename)
+                        # Prepare classified page numbers
+                        classified_nums = [page['page_num'] for page in page_info]
                         
-                        # Move extracted PDF
-                        shutil.move(extracted_pdf, output_path)
+                        # Extract classified pages
+                        extracted_pdf = extract_pages(input_path, classified_nums)
                         
-                        # Logging
-                        logging.info(f"Classified File: {filename}")
-                        logging.info(f"  - Classified Pages: {classified_nums}")
-                        logging.info(f"  - Output: {output_path}")
+                        if extracted_pdf:
+                            # Create output filename
+                            output_filename = (
+                                f"{os.path.splitext(sanitized_filename)[0]}_"
+                                f"pages{'_'.join(map(str, classified_nums))}_"
+                                f"classified.pdf"
+                            )
+                            
+                            # Full output path for classified PDF
+                            output_path = os.path.join(type_output_folder, output_filename)
+                            
+                            # Move extracted PDF
+                            shutil.move(extracted_pdf, output_path)
+                            
+                            # Logging
+                            logging.info(f"Classified File: {filename}")
+                            logging.info(f"  - Document Type: {doc_type}")
+                            logging.info(f"  - Classified Pages: {classified_nums}")
+                            logging.info(f"  - Output: {output_path}")
                 else:
                     # No pages classified - move to unclassified
                     stats['unclassified_files'] += 1
@@ -220,6 +239,8 @@ Classified Files: {stats['classified_files']}
 Unclassified Files: {stats['unclassified_files']}
 Total Pages Processed: {stats['total_pages_processed']}
 Classified Pages: {stats['classified_pages']}
+Document Types:
+{chr(10).join(f"  - {doc_type}: {count}" for doc_type, count in stats['document_types'].items())}
 """
     print(summary_message)
     logging.info(summary_message)
@@ -237,10 +258,16 @@ output/
 │   └── ...
 │
 ├── classified/
-│   ├── original_document1_pages2_4_7_invoice_classified.pdf
-│   ├── original_document2_pages6_18_receipt_classified.pdf
-│   └── ...
+│   ├── invoice/
+│   │   ├── original_document1_pages2_4_invoice_classified.pdf
+│   │   └── original_document2_pages6_invoice_classified.pdf
+│   │
+│   ├── receipt/
+│   │   └── original_document3_pages7_receipt_classified.pdf
+│   │
+│   └── contract/
+│       └── original_document4_pages9_contract_classified.pdf
 │
 └── unclassified/
-    ├── original_document3.pdf
+    ├── original_document5.pdf
     └── ...
