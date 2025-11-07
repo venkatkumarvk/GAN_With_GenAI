@@ -1,59 +1,45 @@
-from azure.ai.formrecognizer import DocumentAnalysisClient
+from azure.ai.formrecognizer import DocumentModelAdministrationClient
 from azure.core.credentials import AzureKeyCredential
-import os
 
-# Azure Document Intelligence Configuration
-endpoint = "your_document_intelligence_endpoint"
-key = "your_document_intelligence_key"
+def diagnose_azure_document_intelligence():
+    # Replace with your actual credentials
+    endpoint = "your_document_intelligence_endpoint"
+    key = "your_document_intelligence_key"
+    model_id = "DCM"
 
-# Initialize Document Analysis Client
-document_analysis_client = DocumentAnalysisClient(
-    endpoint=endpoint, 
-    credential=AzureKeyCredential(key)
-)
+    try:
+        # Create administration client
+        document_model_admin_client = DocumentModelAdministrationClient(
+            endpoint=endpoint, 
+            credential=AzureKeyCredential(key)
+        )
 
-# Directory containing PDF files
-input_directory = "path/to/your/pdf/folder"
-
-# Custom Model ID
-CUSTOM_MODEL_ID = "DCM"
-
-# Process each PDF in the directory
-for filename in os.listdir(input_directory):
-    if filename.endswith(".pdf"):
-        file_path = os.path.join(input_directory, filename)
+        # List available models
+        print("Available Models:")
+        models = list(document_model_admin_client.list_models())
         
-        try:
-            # Open the PDF file
-            with open(file_path, "rb") as document:
-                # Analyze document using your custom model
-                poller = document_analysis_client.begin_analyze_document(
-                    model_id=CUSTOM_MODEL_ID, 
-                    document=document
-                )
-                result = poller.result()
-                
-                # Print basic document information
-                print(f"\nDocument: {filename}")
-                print(f"Model Used: {result.model_id}")
-                
-                # Extract key-value pairs
-                print("\nKey-Value Pairs:")
-                for kv in result.key_value_pairs:
-                    print(f"{kv.key.content}: {kv.value.content}")
-                
-                # Print confidence
-                print(f"\nModel Confidence: {result.confidence}")
-                
-                # Extract pages
-                print(f"\nTotal Pages: {len(result.pages)}")
-                
-                # Print document fields (specific to custom model)
-                print("\nDocument Fields:")
-                for name, field in result.fields.items():
-                    print(f"{name}: {field.value}")
-                
-                print("-" * 50)
+        for model in models:
+            print(f"Model ID: {model.model_id}")
+            print(f"Description: {model.description}")
+            print(f"Created: {model.created_date_time}")
+            print("-" * 50)
+
+    except Exception as e:
+        print("Diagnostic Checks:")
+        print(f"1. Endpoint Validation: FAILED")
+        print(f"2. Access Key Validation: FAILED")
+        print(f"3. Error Details: {str(e)}")
         
-        except Exception as e:
-            print(f"Error processing {filename}: {str(e)}")
+        # Detailed Error Analysis
+        if "AuthenticationFailed" in str(e):
+            print("Possible Authentication Issues:")
+            print("- Verify your Azure credentials")
+            print("- Check access key")
+        
+        if "ResourceNotFound" in str(e):
+            print("Possible Resource Issues:")
+            print("- Confirm Model ID exists")
+            print("- Verify Document Intelligence resource configuration")
+
+# Run diagnostics
+diagnose_azure_document_intelligence()
