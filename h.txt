@@ -16,6 +16,13 @@ client = AzureOpenAI(
 # Deployment Configuration
 DEPLOYMENT_NAME = "gpt-4o"  # Your specific GPT-4o deployment name
 
+# Few-shot Example Images
+FEW_SHOT_EXAMPLES = {
+    "cms1500_wo": "samples/cms1500_wo_example.png",
+    "cms1500_w": "samples/cms1500_w_example.png",
+    "invoice_cadwell": "samples/invoice_cadwell_example.png"
+}
+
 def encode_image_to_base64(image_path):
     """
     Encode an image to base64 with size optimization.
@@ -31,36 +38,74 @@ def encode_image_to_base64(image_path):
         img.save(buffered, format="PNG")
         return base64.b64encode(buffered.getvalue()).decode('utf-8')
 
-def classify_document(image_path):
+def prepare_few_shot_messages():
     """
-    Classify a document using Azure OpenAI GPT-4o vision model
+    Prepare few-shot learning messages with example documents
     """
-    try:
-        # Encode the image
-        base64_image = encode_image_to_base64(image_path)
-
-        # Prepare messages for classification
-        messages = [
-            {
-                "role": "system",
-                "content": "You are an expert document classifier. Analyze the document image and classify it precisely."
-            },
-            {
+    messages = []
+    
+    # System message
+    messages.append({
+        "role": "system",
+        "content": "You are an expert document classifier. Analyze document images and classify them precisely."
+    })
+    
+    # Add few-shot examples
+    for label, image_path in FEW_SHOT_EXAMPLES.items():
+        if os.path.exists(image_path):
+            # Example input
+            messages.append({
                 "role": "user",
                 "content": [
                     {
                         "type": "text",
-                        "text": "Classify this document. Provide the classification in JSON format with these keys: 'type' (document type), 'confidence' (0-100%), and 'reasoning' (brief explanation)."
+                        "text": f"Classify this document example of type {label}:"
                     },
                     {
                         "type": "image",
                         "image": {
-                            "base64": base64_image
+                            "base64": encode_image_to_base64(image_path)
                         }
                     }
                 ]
-            }
-        ]
+            })
+            
+            # Corresponding classification
+            messages.append({
+                "role": "assistant",
+                "content": json.dumps({
+                    "type": label,
+                    "confidence": 95,
+                    "reasoning": f"Typical {label} document structure and content"
+                })
+            })
+    
+    return messages
+
+def classify_document(image_path):
+    """
+    Classify a document using Azure OpenAI GPT-4o vision model with few-shot learning
+    """
+    try:
+        # Prepare messages with few-shot examples
+        messages = prepare_few_shot_messages()
+        
+        # Add the document to be classified
+        messages.append({
+            "role": "user",
+            "content": [
+                {
+                    "type": "text",
+                    "text": "Classify this document. Provide the classification in JSON format with these keys: 'type' (document type), 'confidence' (0-100%), and 'reasoning' (brief explanation)."
+                },
+                {
+                    "type": "image",
+                    "image": {
+                        "base64": encode_image_to_base64(image_path)
+                    }
+                }
+            ]
+        })
 
         # Call Azure OpenAI with vision input
         response = client.chat.completions.create(
