@@ -1,111 +1,124 @@
 import os
+import sys
 import base64
 import json
 from pathlib import Path
 from openai import AzureOpenAI
-from PIL import Image
+import fitz  # PyMuPDF
 import io
+import logging
+import traceback
 
-# Azure OpenAI Configuration
-client = AzureOpenAI(
-    azure_endpoint=os.environ.get("AZURE_OPENAI_ENDPOINT", "https://YOUR_RESOURCE_NAME.openai.azure.com/"),
-    api_key=os.environ.get("AZURE_OPENAI_API_KEY", "YOUR_API_KEY"),
-    api_version="2024-02-15-preview"  # Ensure this supports vision
+# Logging Setup
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s: %(message)s',
+    handlers=[
+        logging.FileHandler('pdf_classification_log.txt'),
+        logging.StreamHandler(sys.stdout)
+    ]
 )
 
-# Deployment Configuration
-DEPLOYMENT_NAME = "gpt-4o"  # Your specific GPT-4o deployment name
+# Azure OpenAI Configuration
+try:
+    client = AzureOpenAI(
+        azure_endpoint=os.environ.get("AZURE_OPENAI_ENDPOINT"),
+        api_key=os.environ.get("AZURE_OPENAI_API_KEY"),
+        api_version="2024-02-15-preview"
+    )
+    logging.info("Azure OpenAI Client initialized successfully")
+except Exception as e:
+    logging.error(f"Failed to initialize Azure OpenAI Client: {e}")
+    sys.exit(1)
 
-# Few-shot Example Images
-FEW_SHOT_EXAMPLES = {
-    "cms1500_wo": "samples/cms1500_wo_example.png",
-    "cms1500_w": "samples/cms1500_w_example.png",
-    "invoice_cadwell": "samples/invoice_cadwell_example.png"
-}
+# Deployment Configuration
+DEPLOYMENT_NAME = os.environ.get("AZURE_OPENAI_DEPLOYMENT", "gpt-4o")
+
+def convert_pdf_to_images(pdf_path, dpi=300):
+    """
+    Convert PDF pages to images using PyMuPDF
+    
+    Args:
+        pdf_path (str): Path to the PDF file
+        dpi (int): Dots per inch for image conversion
+    
+    Returns:
+        list: List of image paths
+    """
+    image_paths = []
+    try:
+        # Open the PDF
+        doc = fitz.open(pdf_path)
+        
+        # Create a temporary directory for images
+        os.makedirs('temp_pdf_images', exist_ok=True)
+        
+        # Convert each page
+        for page_num in range(len(doc)):
+            page = doc[page_num]
+            
+            # Render page to an image
+            pix = page.get_pixmap(dpi=dpi)
+            
+            # Save image
+            image_path = f'temp_pdf_images/page_{page_num + 1}.png'
+            pix.save(image_path)
+            image_paths.append(image_path)
+        
+        doc.close()
+        logging.info(f"Converted {len(image_paths)} pages from {pdf_path}")
+        return image_paths
+    
+    except Exception as e:
+        logging.error(f"Error converting PDF to images: {e}")
+        traceback.print_exc()
+        return []
 
 def encode_image_to_base64(image_path):
     """
-    Encode an image to base64 with size optimization.
-    Resize large images to reduce token usage.
+    Encode an image to base64 with comprehensive error handling
     """
-    with Image.open(image_path) as img:
-        # Resize if image is too large
-        max_size = (1024, 1024)
-        img.thumbnail(max_size, Image.LANCZOS)
-        
-        # Save to a bytes buffer
-        buffered = io.BytesIO()
-        img.save(buffered, format="PNG")
-        return base64.b64encode(buffered.getvalue()).decode('utf-8')
+    try:
+        with open(image_path, "rb") as image_file:
+            base64_image = base64.b64encode(image_file.read()).decode('utf-8')
+            logging.info(f"Image {image_path} encoded successfully. Size: {len(base64_image)} characters")
+            return base64_image
+    except Exception as e:
+        logging.error(f"Error encoding image {image_path}: {e}")
+        traceback.print_exc()
+        raise
 
-def prepare_few_shot_messages():
+def classify_document_page(base64_image, page_num):
     """
-    Prepare few-shot learning messages with example documents
+    Classify a single document page using Azure OpenAI GPT-4o vision model
     """
-    messages = []
-    
-    # System message
-    messages.append({
-        "role": "system",
-        "content": "You are an expert document classifier. Analyze document images and classify them precisely."
-    })
-    
-    # Add few-shot examples
-    for label, image_path in FEW_SHOT_EXAMPLES.items():
-        if os.path.exists(image_path):
-            # Example input
-            messages.append({
+    try:
+        messages = [
+            {
+                "role": "system",
+                "content": "You are an expert document classifier. Analyze the document page and classify it precisely."
+            },
+            {
                 "role": "user",
                 "content": [
                     {
                         "type": "text",
-                        "text": f"Classify this document example of type {label}:"
+                        "text": f"Analyze page {page_num} of this document. "
+                                "Respond ONLY with a JSON object containing: "
+                                "- 'type': document type (string) "
+                                "- 'confidence': certainty percentage (0-100) "
+                                "- 'reasoning': brief explanation of classification "
+                                "- 'page_number': the page number being classified"
                     },
                     {
                         "type": "image",
                         "image": {
-                            "base64": encode_image_to_base64(image_path)
+                            "base64": base64_image
                         }
                     }
                 ]
-            })
-            
-            # Corresponding classification
-            messages.append({
-                "role": "assistant",
-                "content": json.dumps({
-                    "type": label,
-                    "confidence": 95,
-                    "reasoning": f"Typical {label} document structure and content"
-                })
-            })
-    
-    return messages
-
-def classify_document(image_path):
-    """
-    Classify a document using Azure OpenAI GPT-4o vision model with few-shot learning
-    """
-    try:
-        # Prepare messages with few-shot examples
-        messages = prepare_few_shot_messages()
-        
-        # Add the document to be classified
-        messages.append({
-            "role": "user",
-            "content": [
-                {
-                    "type": "text",
-                    "text": "Classify this document. Provide the classification in JSON format with these keys: 'type' (document type), 'confidence' (0-100%), and 'reasoning' (brief explanation)."
-                },
-                {
-                    "type": "image",
-                    "image": {
-                        "base64": encode_image_to_base64(image_path)
-                    }
-                }
-            ]
-        })
+            }
+        ]
 
         # Call Azure OpenAI with vision input
         response = client.chat.completions.create(
@@ -115,54 +128,125 @@ def classify_document(image_path):
             temperature=0.1
         )
 
-        # Extract and parse the response
+        # Extract response
         response_text = response.choices[0].message.content.strip()
-        
-        # Attempt to parse JSON response
+        logging.info(f"Raw Response for Page {page_num}: {response_text}")
+
+        # Parse JSON response
         try:
             classification = json.loads(response_text)
+            classification['page_number'] = page_num
+            logging.info(f"Classification Result for Page {page_num}: {classification}")
             return classification
         except json.JSONDecodeError:
-            # Fallback if JSON parsing fails
+            logging.error(f"JSON Parsing Error on Page {page_num}. Response: {response_text}")
             return {
                 "type": "unclassified",
-                "confidence": 50,
-                "reasoning": "Unable to parse classification JSON"
+                "confidence": 0,
+                "reasoning": f"Failed to parse JSON. Raw response: {response_text}",
+                "page_number": page_num
             }
 
     except Exception as e:
-        print(f"Classification error: {e}")
+        logging.error(f"Classification Error on Page {page_num}: {e}")
+        traceback.print_exc()
         return {
             "type": "error",
             "confidence": 0,
-            "reasoning": str(e)
+            "reasoning": str(e),
+            "page_number": page_num
         }
+
+def process_pdf(pdf_path):
+    """
+    Process a multi-page PDF for classification
+    """
+    try:
+        # Convert PDF to images
+        image_paths = convert_pdf_to_images(pdf_path)
+        
+        if not image_paths:
+            logging.error(f"No images generated from PDF: {pdf_path}")
+            return []
+        
+        # Classify each page
+        classifications = []
+        for idx, image_path in enumerate(image_paths, 1):
+            try:
+                # Encode image
+                base64_image = encode_image_to_base64(image_path)
+                
+                # Classify page
+                page_classification = classify_document_page(base64_image, idx)
+                classifications.append(page_classification)
+            
+            except Exception as e:
+                logging.error(f"Error processing page {idx}: {e}")
+                classifications.append({
+                    "type": "error",
+                    "confidence": 0,
+                    "reasoning": str(e),
+                    "page_number": idx
+                })
+        
+        return classifications
+    
+    finally:
+        # Clean up temporary images
+        try:
+            import shutil
+            shutil.rmtree('temp_pdf_images', ignore_errors=True)
+        except Exception as e:
+            logging.warning(f"Error cleaning up temporary images: {e}")
 
 def main():
     # Input and output directories
-    input_dir = "input_images"
+    input_dir = "input_pdfs"
     output_dir = "classification_results"
     
+    # Validate environment setup
+    if not os.environ.get("AZURE_OPENAI_ENDPOINT"):
+        logging.error("AZURE_OPENAI_ENDPOINT environment variable is not set")
+        sys.exit(1)
+    
+    if not os.environ.get("AZURE_OPENAI_API_KEY"):
+        logging.error("AZURE_OPENAI_API_KEY environment variable is not set")
+        sys.exit(1)
+
     # Create output directory if it doesn't exist
     os.makedirs(output_dir, exist_ok=True)
 
-    # Process all images in input directory
-    for filename in os.listdir(input_dir):
-        if filename.lower().endswith(('.png', '.jpg', '.jpeg', '.gif', '.bmp')):
-            image_path = os.path.join(input_dir, filename)
+    # Ensure input directory exists
+    if not os.path.exists(input_dir):
+        logging.error(f"Input directory {input_dir} does not exist")
+        sys.exit(1)
+
+    # Process all PDFs in input directory
+    pdf_files = [f for f in os.listdir(input_dir) if f.lower().endswith('.pdf')]
+    
+    if not pdf_files:
+        logging.warning(f"No PDF files found in {input_dir}")
+        sys.exit(0)
+
+    for filename in pdf_files:
+        try:
+            pdf_path = os.path.join(input_dir, filename)
             
-            print(f"Processing {filename}...")
-            result = classify_document(image_path)
+            logging.info(f"Processing PDF: {filename}")
+            results = process_pdf(pdf_path)
             
-            # Save classification result
+            # Save classification results
             result_path = os.path.join(output_dir, f"{Path(filename).stem}_classification.json")
             with open(result_path, 'w') as f:
-                json.dump(result, f, indent=2)
+                json.dump(results, f, indent=2)
             
-            # Print result to console
-            print(f"Classification for {filename}:")
-            print(json.dumps(result, indent=2))
-            print("\n")
+            # Print results to console
+            logging.info(f"Classification for {filename}:")
+            logging.info(json.dumps(results, indent=2))
+
+        except Exception as e:
+            logging.error(f"Error processing PDF {filename}: {e}")
+            traceback.print_exc()
 
 if __name__ == "__main__":
     main()
