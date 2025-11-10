@@ -1,3 +1,87 @@
+from openai import AzureOpenAI
+import base64, json, os
+
+client = AzureOpenAI(
+    api_key="YOUR_AZURE_API_KEY",
+    api_version="2024-08-01-preview",
+    azure_endpoint="https://YOUR_RESOURCE_NAME.openai.azure.com/"
+)
+
+def encode_image(image_path):
+    with open(image_path, "rb") as f:
+        return base64.b64encode(f.read()).decode("utf-8")
+
+def classify_page(image_path):
+    messages = [
+        {
+            "role": "system",
+            "content": (
+                "You are a precise document classifier. "
+                "Classify the input image into one of these categories: "
+                "cms1500_wo, cms1500_w, invoice_cadwell. "
+                "Respond ONLY in JSON with keys 'label' and 'confidence'."
+            ),
+        }
+    ]
+
+    # Add few-shot examples
+    FEW_SHOT_EXAMPLES = {
+        "cms1500_wo": "samples/cms1500_wo_example.png",
+        "cms1500_w": "samples/cms1500_w_example.png",
+        "invoice_cadwell": "samples/invoice_cadwell_example.png"
+    }
+
+    for label, path in FEW_SHOT_EXAMPLES.items():
+        if os.path.exists(path):
+            img_data = encode_image(path)
+            messages.append({
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": f"Example of {label}"},
+                    {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{img_data}"}}
+                ]
+            })
+            messages.append({
+                "role": "assistant",
+                "content": json.dumps({"label": label, "confidence": 95})
+            })
+
+    # Add target page
+    img_data = encode_image(image_path)
+    messages.append({
+        "role": "user",
+        "content": [
+            {"type": "text", "text": "Classify this page and return JSON:"},
+            {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{img_data}"}}
+        ]
+    })
+
+    # ✅ Azure GPT-4o chat call (new SDK)
+    response = client.chat.completions.create(
+        model="gpt-4o",
+        messages=messages
+    )
+
+    result_text = response.choices[0].message.content.strip()
+
+    try:
+        result_json = json.loads(result_text)
+        label = result_json.get("label", "unclassified").lower()
+        confidence = float(result_json.get("confidence", 0))
+    except Exception:
+        label, confidence = "unclassified", 0.0
+
+    if confidence < 50:
+        label = "unclassified"
+
+    print(f"🔍 {os.path.basename(image_path)} → {label} ({confidence:.1f}%)")
+    return label, confidence
+
+
+
+
+
+
 import fitz  # PyMuPDF
 
 def process_pdf(pdf_path):
