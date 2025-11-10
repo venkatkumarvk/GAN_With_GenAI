@@ -2,182 +2,122 @@ import os
 import base64
 import json
 from pathlib import Path
-import fitz  # PyMuPDF
-import shutil
-from datetime import datetime
 from openai import AzureOpenAI
+from PIL import Image
+import io
 
-# ============================
-# 🔧 Azure GPT-4o Configuration
-# ============================
+# Azure OpenAI Configuration
 client = AzureOpenAI(
     azure_endpoint=os.environ.get("AZURE_OPENAI_ENDPOINT", "https://YOUR_RESOURCE_NAME.openai.azure.com/"),
-    api_key=os.environ.get("AZURE_OPENAI_API_KEY", "YOUR_AZURE_API_KEY"),
-    api_version="2024-08-01-preview"
+    api_key=os.environ.get("AZURE_OPENAI_API_KEY", "YOUR_API_KEY"),
+    api_version="2024-02-15-preview"  # Ensure this supports vision
 )
 
-# Configuration Parameters
-INPUT_DIR = "input_pdfs"
-OUTPUT_DIR = "output"
-LOG_FILE = "classification_log.txt"
-DEPLOYMENT_NAME = "gpt-4o"  # Your specific deployment name
+# Deployment Configuration
+DEPLOYMENT_NAME = "gpt-4o"  # Your specific GPT-4o deployment name
 
-# Create output folders
-OUTPUT_SUBFOLDERS = ["source", "cms1500_wo", "cms1500_w", "cadwell", "unclassified"]
-for folder in OUTPUT_SUBFOLDERS:
-    Path(OUTPUT_DIR, folder).mkdir(parents=True, exist_ok=True)
+def encode_image_to_base64(image_path):
+    """
+    Encode an image to base64 with size optimization.
+    Resize large images to reduce token usage.
+    """
+    with Image.open(image_path) as img:
+        # Resize if image is too large
+        max_size = (1024, 1024)
+        img.thumbnail(max_size, Image.LANCZOS)
+        
+        # Save to a bytes buffer
+        buffered = io.BytesIO()
+        img.save(buffered, format="PNG")
+        return base64.b64encode(buffered.getvalue()).decode('utf-8')
 
-# Few-shot examples
-FEW_SHOT_EXAMPLES = {
-    "cms1500_wo": "samples/cms1500_wo_example.png",
-    "cms1500_w": "samples/cms1500_w_example.png",
-    "invoice_cadwell": "samples/invoice_cadwell_example.png"
-}
+def classify_document(image_path):
+    """
+    Classify a document using Azure OpenAI GPT-4o vision model
+    """
+    try:
+        # Encode the image
+        base64_image = encode_image_to_base64(image_path)
 
-# ============================
-# 🧩 Helper Functions
-# ============================
-def encode_image(image_path):
-    """Encode an image to base64."""
-    with open(image_path, "rb") as f:
-        return base64.b64encode(f.read()).decode("utf-8")
-
-def save_page_as_pdf(page, output_pdf_path):
-    """Save a PyMuPDF page as a PDF."""
-    page.get_pixmap().save(output_pdf_path)
-    print(f"📄 Saved: {output_pdf_path}")
-
-def log_result(pdf_name, page_no, label, confidence):
-    """Log classification results."""
-    with open(LOG_FILE, "a") as f:
-        f.write(f"{datetime.now()} | {pdf_name} | page {page_no} | {label} | {confidence}%\n")
-
-# ============================
-# 🧠 GPT-4o Vision Classification with Confidence
-# ============================
-def classify_page(image_path):
-    """Classify a page using Azure OpenAI GPT-4o vision."""
-    messages = [
-        {
-            "role": "system",
-            "content": (
-                "You are a precise document classifier. "
-                "Classify the input image into one of these categories: "
-                "cms1500_wo, cms1500_w, invoice_cadwell. "
-                "Respond ONLY in JSON with two keys: 'label' and 'confidence', "
-                "where confidence is a number between 0 and 100 representing certainty."
-            ),
-        }
-    ]
-
-    # Add few-shot examples
-    for label, path in FEW_SHOT_EXAMPLES.items():
-        if os.path.exists(path):
-            messages.append({
+        # Prepare messages for classification
+        messages = [
+            {
+                "role": "system",
+                "content": "You are an expert document classifier. Analyze the document image and classify it precisely."
+            },
+            {
                 "role": "user",
                 "content": [
-                    {"type": "text", "text": f"Example of {label}"},
-                    {"type": "image_url", "image_url": f"data:image/png;base64,{encode_image(path)}"}
+                    {
+                        "type": "text",
+                        "text": "Classify this document. Provide the classification in JSON format with these keys: 'type' (document type), 'confidence' (0-100%), and 'reasoning' (brief explanation)."
+                    },
+                    {
+                        "type": "image",
+                        "image": {
+                            "base64": base64_image
+                        }
+                    }
                 ]
-            })
-            messages.append({
-                "role": "assistant",
-                "content": json.dumps({"label": label, "confidence": 95})
-            })
-
-    # Add the target page
-    messages.append({
-        "role": "user",
-        "content": [
-            {"type": "text", "text": "Classify this page and return JSON:"},
-            {"type": "image_url",
-             "image_url": f"data:image/png;base64,{encode_image(image_path)}"}
+            }
         ]
-    })
 
-    try:
+        # Call Azure OpenAI with vision input
         response = client.chat.completions.create(
             model=DEPLOYMENT_NAME,
             messages=messages,
-            max_tokens=100,
+            max_tokens=300,
             temperature=0.1
         )
 
-        result_text = response.choices[0].message.content.strip()
+        # Extract and parse the response
+        response_text = response.choices[0].message.content.strip()
+        
+        # Attempt to parse JSON response
         try:
-            result_json = json.loads(result_text)
-            label = result_json.get("label", "unclassified").lower()
-            confidence = float(result_json.get("confidence", 0))
-        except Exception:
-            label, confidence = "unclassified", 0.0
-
-        # Apply confidence threshold
-        if confidence < 50:
-            label = "unclassified"
-
-        print(f"🔍 Classified {os.path.basename(image_path)} → {label} ({confidence:.1f}%)")
-        return label, confidence
+            classification = json.loads(response_text)
+            return classification
+        except json.JSONDecodeError:
+            # Fallback if JSON parsing fails
+            return {
+                "type": "unclassified",
+                "confidence": 50,
+                "reasoning": "Unable to parse classification JSON"
+            }
 
     except Exception as e:
-        print(f"Error in classification: {e}")
-        return "unclassified", 0.0
-
-# ============================
-# 📄 Process Each PDF Page
-# ============================
-def process_pdf(pdf_path):
-    """Process a single PDF file, classifying and sorting its pages."""
-    print(f"\n📘 Processing: {pdf_path}")
-    pdf_name = Path(pdf_path).stem
-
-    # Copy original PDF to source/
-    shutil.copy(pdf_path, Path(OUTPUT_DIR) / "source" / Path(pdf_path).name)
-
-    # Open PDF with PyMuPDF
-    doc = fitz.open(pdf_path)
-
-    for page_no in range(len(doc)):
-        page = doc[page_no]
-        
-        # Convert page to image
-        pix = page.get_pixmap(dpi=200)
-        temp_image = f"temp_page_{page_no+1}.png"
-        pix.save(temp_image)
-
-        label, confidence = classify_page(temp_image)
-
-        folder_map = {
-            "cms1500_wo": "cms1500_wo",
-            "cms1500_w": "cms1500_w",
-            "invoice_cadwell": "cadwell",
-            "unclassified": "unclassified"
+        print(f"Classification error: {e}")
+        return {
+            "type": "error",
+            "confidence": 0,
+            "reasoning": str(e)
         }
-        output_folder = Path(OUTPUT_DIR) / folder_map[label]
 
-        output_pdf_path = output_folder / f"{pdf_name}_page_{page_no+1}.pdf"
-        save_page_as_pdf(page, output_pdf_path)
-        log_result(pdf_name, page_no+1, label, confidence)
-
-        os.remove(temp_image)
-
-    doc.close()
-
-# ============================
-# 🚀 Batch Run
-# ============================
 def main():
-    """Main function to process all PDFs in the input directory."""
-    pdf_files = [f for f in os.listdir(INPUT_DIR) if f.lower().endswith(".pdf")]
-    if not pdf_files:
-        print("⚠️ No PDFs found in input_pdfs/")
-        return
+    # Input and output directories
+    input_dir = "input_images"
+    output_dir = "classification_results"
+    
+    # Create output directory if it doesn't exist
+    os.makedirs(output_dir, exist_ok=True)
 
-    open(LOG_FILE, "w").write("=== Classification Log ===\n")
-
-    for pdf_name in pdf_files:
-        process_pdf(os.path.join(INPUT_DIR, pdf_name))
-
-    print("\n🎉 Page-level classification with confidence complete!")
+    # Process all images in input directory
+    for filename in os.listdir(input_dir):
+        if filename.lower().endswith(('.png', '.jpg', '.jpeg', '.gif', '.bmp')):
+            image_path = os.path.join(input_dir, filename)
+            
+            print(f"Processing {filename}...")
+            result = classify_document(image_path)
+            
+            # Save classification result
+            result_path = os.path.join(output_dir, f"{Path(filename).stem}_classification.json")
+            with open(result_path, 'w') as f:
+                json.dump(result, f, indent=2)
+            
+            # Print result to console
+            print(f"Classification for {filename}:")
+            print(json.dumps(result, indent=2))
+            print("\n")
 
 if __name__ == "__main__":
     main()
