@@ -1,3 +1,49 @@
+import fitz  # PyMuPDF
+
+def process_pdf(pdf_path):
+    print(f"\n📘 Processing: {pdf_path}")
+    pdf_name = Path(pdf_path).stem
+
+    # Copy original PDF to source/
+    shutil.copy(pdf_path, Path(OUTPUT_DIR) / "source" / Path(pdf_path).name)
+
+    # Open PDF with PyMuPDF
+    pdf_document = fitz.open(pdf_path)
+
+    for page_no in range(len(pdf_document)):
+        page = pdf_document.load_page(page_no)
+        pix = page.get_pixmap(dpi=200)  # Render the page to an image
+        temp_image = f"temp_page_{page_no + 1}.png"
+        pix.save(temp_image)
+
+        label, confidence = classify_page(temp_image)
+
+        folder_map = {
+            "cms1500_wo": "cms1500_wo",
+            "cms1500_w": "cms1500_w",
+            "invoice_cadwell": "cadwell",
+            "unclassified": "unclassified"
+        }
+        output_folder = Path(OUTPUT_DIR) / folder_map[label]
+
+        # Save page as PDF
+        page_image = fitz.open()  # create new pdf
+        rect = page.rect
+        pdf_bytes = fitz.open("pdf", pix.tobytes("pdf"))
+        pdf_bytes.save(str(output_folder / f"{pdf_name}_page_{page_no + 1}.pdf"))
+        pdf_bytes.close()
+
+        log_result(pdf_name, page_no + 1, label, confidence)
+
+        os.remove(temp_image)
+
+    pdf_document.close()
+
+
+
+
+
+
 import os
 import base64
 import openai
