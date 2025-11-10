@@ -1,5 +1,14 @@
 import base64
 
+from openai import AzureOpenAI
+
+client = AzureOpenAI(
+    api_key="YOUR_AZURE_OPENAI_KEY",
+    api_version="2024-02-15-preview",
+    azure_endpoint="https://<your-resource-name>.openai.azure.com/"
+)
+
+
 def encode_image(path):
     with open(path, "rb") as f:
         return base64.b64encode(f.read()).decode("utf-8")
