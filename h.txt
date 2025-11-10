@@ -1,0 +1,165 @@
+import os
+import base64
+import openai
+import json
+from pathlib import Path
+from pdf2image import convert_from_path
+import shutil
+from datetime import datetime
+
+# ============================
+# 🔧 Azure GPT-4o Configuration
+# ============================
+openai.api_type = "azure"
+openai.api_key = "YOUR_AZURE_API_KEY"
+openai.api_base = "https://YOUR_RESOURCE_NAME.openai.azure.com/"
+openai.api_version = "2024-08-01-preview"
+
+INPUT_DIR = "input_pdfs"
+OUTPUT_DIR = "output"
+LOG_FILE = "classification_log.txt"
+
+# Create output folders
+OUTPUT_SUBFOLDERS = ["source", "cms1500_wo", "cms1500_w", "cadwell", "unclassified"]
+for folder in OUTPUT_SUBFOLDERS:
+    Path(OUTPUT_DIR, folder).mkdir(parents=True, exist_ok=True)
+
+# Few-shot examples
+FEW_SHOT_EXAMPLES = {
+    "cms1500_wo": "samples/cms1500_wo_example.png",
+    "cms1500_w": "samples/cms1500_w_example.png",
+    "invoice_cadwell": "samples/invoice_cadwell_example.png"
+}
+
+# ============================
+# 🧩 Helper Functions
+# ============================
+def encode_image(image_path):
+    with open(image_path, "rb") as f:
+        return base64.b64encode(f.read()).decode("utf-8")
+
+def save_page_as_pdf(page_image, output_pdf_path):
+    """Convert single PIL image to a one-page PDF."""
+    page_image.save(output_pdf_path, "PDF", resolution=100.0)
+    print(f"📄 Saved: {output_pdf_path}")
+
+def log_result(pdf_name, page_no, label, confidence):
+    with open(LOG_FILE, "a") as f:
+        f.write(f"{datetime.now()} | {pdf_name} | page {page_no} | {label} | {confidence}%\n")
+
+# ============================
+# 🧠 GPT-4o Vision Classification with Confidence
+# ============================
+def classify_page(image_path):
+    messages = [
+        {
+            "role": "system",
+            "content": (
+                "You are a precise document classifier. "
+                "Classify the input image into one of these categories: "
+                "cms1500_wo, cms1500_w, invoice_cadwell. "
+                "Respond ONLY in JSON with two keys: 'label' and 'confidence', "
+                "where confidence is a number between 0 and 100 representing certainty."
+            ),
+        }
+    ]
+
+    # Add few-shot examples
+    for label, path in FEW_SHOT_EXAMPLES.items():
+        if os.path.exists(path):
+            messages.append({
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": f"Example of {label}"},
+                    {"type": "image_url", "image_url": f"data:image/png;base64,{encode_image(path)}"}
+                ]
+            })
+            messages.append({
+                "role": "assistant",
+                "content": json.dumps({"label": label, "confidence": 95})
+            })
+
+    # Add the target page
+    messages.append({
+        "role": "user",
+        "content": [
+            {"type": "text", "text": "Classify this page and return JSON:"},
+            {"type": "image_url",
+             "image_url": f"data:image/png;base64,{encode_image(image_path)}"}
+        ]
+    })
+
+    response = openai.ChatCompletion.create(
+        model="gpt-4o",
+        messages=messages
+    )
+
+    result_text = response.choices[0].message["content"].strip()
+    try:
+        result_json = json.loads(result_text)
+        label = result_json.get("label", "unclassified").lower()
+        confidence = float(result_json.get("confidence", 0))
+    except Exception:
+        label, confidence = "unclassified", 0.0
+
+    # Apply confidence threshold
+    if confidence < 50:
+        label = "unclassified"
+
+    print(f"🔍 Classified {os.path.basename(image_path)} → {label} ({confidence:.1f}%)")
+    return label, confidence
+
+
+# ============================
+# 📄 Process Each PDF Page
+# ============================
+def process_pdf(pdf_path):
+    print(f"\n📘 Processing: {pdf_path}")
+    pdf_name = Path(pdf_path).stem
+
+    # Copy original PDF to source/
+    shutil.copy(pdf_path, Path(OUTPUT_DIR) / "source" / Path(pdf_path).name)
+
+    # Convert to images
+    pages = convert_from_path(pdf_path, dpi=200)
+
+    for page_no, page_image in enumerate(pages, start=1):
+        temp_image = f"temp_page_{page_no}.png"
+        page_image.save(temp_image, "PNG")
+
+        label, confidence = classify_page(temp_image)
+
+        folder_map = {
+            "cms1500_wo": "cms1500_wo",
+            "cms1500_w": "cms1500_w",
+            "invoice_cadwell": "cadwell",
+            "unclassified": "unclassified"
+        }
+        output_folder = Path(OUTPUT_DIR) / folder_map[label]
+
+        output_pdf_path = output_folder / f"{pdf_name}_page_{page_no}.pdf"
+        save_page_as_pdf(page_image, output_pdf_path)
+        log_result(pdf_name, page_no, label, confidence)
+
+        os.remove(temp_image)
+
+
+# ============================
+# 🚀 Batch Run
+# ============================
+def main():
+    pdf_files = [f for f in os.listdir(INPUT_DIR) if f.lower().endswith(".pdf")]
+    if not pdf_files:
+        print("⚠️ No PDFs found in input_pdfs/")
+        return
+
+    open(LOG_FILE, "w").write("=== Classification Log ===\n")
+
+    for pdf_name in pdf_files:
+        process_pdf(os.path.join(INPUT_DIR, pdf_name))
+
+    print("\n🎉 Page-level classification with confidence complete!")
+
+
+if __name__ == "__main__":
+    main()
