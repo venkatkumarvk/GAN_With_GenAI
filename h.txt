@@ -1,0 +1,27 @@
+import base64
+
+def encode_image(path):
+    with open(path, "rb") as f:
+        return base64.b64encode(f.read()).decode("utf-8")
+
+example_cat = encode_image("cat1.jpg")
+example_dog = encode_image("dog1.jpg")
+test_image = encode_image("test.jpg")
+
+response = client.chat.completions.create(
+    model="gpt-4o",
+    messages=[
+        {"role": "system", "content": "You are an image classification assistant."},
+        {"role": "user", "content": [
+            {"type": "text", "text": "Here are labeled examples:"},
+            {"type": "image", "image_url": f"data:image/jpeg;base64,{example_cat}"},
+            {"type": "text", "text": "Label: cat"},
+            {"type": "image", "image_url": f"data:image/jpeg;base64,{example_dog}"},
+            {"type": "text", "text": "Label: dog"},
+            {"type": "text", "text": "Now classify the next image:"},
+            {"type": "image", "image_url": f"data:image/jpeg;base64,{test_image}"},
+        ]}
+    ]
+)
+
+print(response.choices[0].message.content)
