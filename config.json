@@ -1,0 +1,52 @@
+{
+    "azure_openai": {
+        "api_key": "YOUR_AZURE_OPENAI_KEY",
+        "endpoint": "https://your-resource-name.openai.azure.com/",
+        "deployment_name": "your-gpt-4o-deployment-name",
+        "api_version": "2024-02-15-preview"
+    },
+    "azure_storage": {
+        "connection_string": "YOUR_AZURE_STORAGE_CONNECTION_STRING",
+        "input_container": "document-input",
+        "output_container": "document-output",
+        "reference_container": "document-reference",
+        "few_shot_path": "few-shot-examples/",
+        "log_path": "logs/"
+    },
+    "paths": {
+        "input_dir": "./input",
+        "output_dir": "./output",
+        "reference_dir": "./reference",
+        "few_shot_path": "few-shot-examples/",
+        "log_path": "logs/"
+    },
+    "categories": {
+        "cms": [
+            "cms1500_wo", 
+            "cms1500_w"
+        ],
+        "invoice": [
+            "cadwell",
+            "rhythmlink" 
+        ]
+    },
+    "classification": {
+        "confidence_threshold": 0.6
+    },
+    "token_pricing": {
+        "gpt-4o": {
+            "input": {
+                "price_per_million": 2.50,
+                "description": "Input token pricing"
+            },
+            "output": {
+                "price_per_million": 10.00,
+                "description": "Output token pricing"
+            },
+            "cached_input": {
+                "price_per_million": 1.25,
+                "description": "Cached input token pricing"
+            }
+        }
+    }
+}
