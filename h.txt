@@ -248,6 +248,47 @@ def upload_azure_blobs(cfg, local_dir, container_name):
     except Exception as e:
         logging.error(f"Azure Blob upload error: {e}")
         raise
+
+def validate_azure_containers(cfg):
+    """
+    Validate existence of Azure Blob Storage containers
+    """
+    try:
+        from azure.storage.blob import BlobServiceClient
+        
+        # Create blob service client
+        blob_service_client = BlobServiceClient.from_connection_string(
+            cfg['azure_storage']['connection_string']
+        )
+        
+        # Containers to check
+        containers_to_check = [
+            cfg['azure_storage']['input_container'],
+            cfg['azure_storage']['reference_container'],
+            cfg['azure_storage']['output_container']
+        ]
+        
+        # Check each container
+        for container_name in containers_to_check:
+            try:
+                container_client = blob_service_client.get_container_client(container_name)
+                
+                # Check if container exists
+                if not container_client.exists():
+                    logging.error(f"Container does not exist: {container_name}")
+                    raise ValueError(f"Container {container_name} does not exist")
+                
+                logging.info(f"Container verified: {container_name}")
+            
+            except Exception as container_error:
+                logging.error(f"Error accessing container {container_name}: {container_error}")
+                raise
+        
+        return True
+    
+    except Exception as e:
+        logging.critical(f"Azure container validation error: {e}")
+        raise
 -----
 
   document.py
@@ -838,7 +879,6 @@ def parse_arguments():
         help='Confidence threshold for classification'
     )
     return parser.parse_args()
-
 def main():
     """
     Main entry point for document processing
@@ -869,6 +909,14 @@ def main():
             )
         
         elif args.source == 'azure':
+            # Validate Azure containers first
+            try:
+                validate_azure_containers(cfg)
+            except Exception as container_error:
+                logging.critical(f"Azure container validation failed: {container_error}")
+                print(f"Error: {container_error}")
+                return
+            
             # Use input container from config or command-line input folder
             input_container = args.inputfolder or cfg['azure_storage']['input_container']
             
@@ -877,7 +925,7 @@ def main():
             os.makedirs(local_input_dir, exist_ok=True)
             
             # Download blobs from Azure
-            download_azure_blobs(
+            downloaded_files = download_azure_blobs(
                 cfg, 
                 input_container, 
                 local_input_dir
@@ -903,6 +951,3 @@ def main():
         print(f"Error processing documents: {e}")
         import traceback
         traceback.print_exc()
-
-if __name__ == "__main__":
-    main()
