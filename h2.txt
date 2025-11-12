@@ -831,6 +831,7 @@ def process_azure_documents_old(config, input_folder, confidence_threshold=0.6, 
                 document_classified_pages = []
                 document_unclassified_pages = []
 
+
                 # Process each page
                 for page_num in range(total_pages):
                     try:
@@ -839,6 +840,12 @@ def process_azure_documents_old(config, input_folder, confidence_threshold=0.6, 
                         
                         # Classify page
                         classification = classifier.classify_document(page_image, reference_dir)
+
+                        # Track token cost (ensure this is added)
+                        if classification.get('token_usage'):
+                            page_token_cost = classification['token_usage'].get('total_cost', 0)
+                            total_token_cost += page_token_cost
+                            logging.debug(f"Page {page_num+1} token cost: ${page_token_cost:.4f}")
                         
                         # Check classification confidence
                         if (classification['confidence'] >= confidence_threshold 
@@ -1297,3 +1304,55 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+-----
+
+llm.py
+
+def classify_document(self, document_image, reference_dir):
+    try:
+        # ... existing classification code ...
+
+        # Ensure token usage is returned
+        token_cost = self._calculate_token_cost(response.usage)
+        
+        return {
+            'main_category': result.get('main_category', 'unknown').lower(),
+            'subcategory': result.get('subcategory', 'unknown').lower(),
+            'confidence': float(result.get('confidence_score', 0.0)),
+            'reasoning': result.get('reasoning', 'No reasoning provided'),
+            'token_usage': {
+                'input_tokens': response.usage.prompt_tokens,
+                'output_tokens': response.usage.completion_tokens,
+                'total_cost': token_cost
+            }
+        }
+
+    def _calculate_token_cost(self, usage):
+        """
+        Calculate the cost based on token usage
+        """
+        try:
+            # Get pricing from configuration
+            pricing = self.config.get('token_pricing', {}).get('gpt-4o', {
+                'input': {'price_per_million': 2.50},
+                'output': {'price_per_million': 10.00}
+            })
+
+            # Calculate input token cost
+            input_cost = (usage.prompt_tokens / 1_000_000) * pricing['input'].get('price_per_million', 2.50)
+            
+            # Calculate output token cost
+            output_cost = (usage.completion_tokens / 1_000_000) * pricing['output'].get('price_per_million', 10.00)
+            
+            # Total cost
+            total_cost = input_cost + output_cost
+            
+            return round(total_cost, 4)
+        
+        except Exception as e:
+            logging.error(f"Token cost calculation error: {e}")
+            return 0.0
+
+
+---
