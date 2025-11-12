@@ -561,7 +561,6 @@ def classify_page(document_image, client, deployment_name, cfg):
         logging.error(traceback.format_exc())
         
         return 'unknown', 'unknown', 0.0, f"Error in page classification: {str(e)}", None
-
 def process_documents(
     source='local', 
     config_path='config.json', 
@@ -573,18 +572,47 @@ def process_documents(
     Comprehensive document processing pipeline
     """
     try:
-        # Setup logging
-        log_file = setup_logging()
+        # Ensure output directory exists and is writable
+        os.makedirs(output_dir, exist_ok=True)
+        
+        # Ensure subdirectories exist
+        source_dir = os.path.join(output_dir, 'source')
+        classified_dir = os.path.join(output_dir, 'classified')
+        unclassified_dir = os.path.join(output_dir, 'unclassified')
+        logs_dir = os.path.join(output_dir, 'logs')
+        
+        # Create all necessary directories with full permissions
+        for directory in [source_dir, classified_dir, unclassified_dir, logs_dir]:
+            try:
+                os.makedirs(directory, exist_ok=True)
+                # Set full read, write, execute permissions
+                os.chmod(directory, 0o777)
+            except Exception as dir_error:
+                logging.error(f"Could not create directory {directory}: {dir_error}")
+                raise
+
+        # Setup logging with full path
+        log_file = os.path.join(logs_dir, f'documentclassification_{datetime.now().strftime("%Y%m%d_%H%M%S")}.log')
+        logging.basicConfig(
+            level=logging.INFO, 
+            format='%(asctime)s - %(levelname)s: %(message)s',
+            handlers=[
+                logging.FileHandler(log_file, mode='a'),
+                logging.StreamHandler()
+            ]
+        )
+        logging.info(f"Log file created: {log_file}")
         
         # Load configuration
         cfg = load_config(config_path)
         
-        # Prepare directories
-        prepare_directories(cfg)
-        
         # Initialize Azure client
-        client, deployment = get_azure_client(cfg)
-        
+        try:
+            client, deployment = get_azure_client(cfg)
+        except Exception as client_error:
+            logging.critical(f"Failed to initialize Azure client: {client_error}")
+            raise
+
         # Processing statistics
         stats = {
             'total_documents': 0,
@@ -593,167 +621,198 @@ def process_documents(
             'unclassified_pages': 0,
             'total_token_cost': 0.0,
             'total_input_tokens': 0,
-            'total_output_tokens': 0
+            'total_output_tokens': 0,
+            'processed_files': [],
+            'failed_files': []
         }
-        
-        # Create output subdirectories
-        source_dir = os.path.join(output_dir, 'source')
-        classified_dir = os.path.join(output_dir, 'classified')
-        unclassified_dir = os.path.join(output_dir, 'unclassified')
-        
-        os.makedirs(source_dir, exist_ok=True)
-        os.makedirs(classified_dir, exist_ok=True)
-        os.makedirs(unclassified_dir, exist_ok=True)
+
+        # Ensure input directory exists
+        if not os.path.exists(input_dir):
+            logging.critical(f"Input directory does not exist: {input_dir}")
+            raise FileNotFoundError(f"Input directory not found: {input_dir}")
 
         # Process each document
         for fname in os.listdir(input_dir):
-            fpath = os.path.join(input_dir, fname)
-            
-            # Skip directories and hidden files
-            if not os.path.isfile(fpath) or fname.startswith('.'):
-                continue
-
-            # Convert to PDF
-            pdf_path = convert_to_pdf(fpath)
-            if not pdf_path:
-                logging.error(f"Failed to convert {fname} to PDF")
-                continue
-
-            # Copy source PDF
-            shutil.copy2(pdf_path, os.path.join(source_dir, os.path.basename(pdf_path)))
-
-            # Open PDF
-            doc = fitz.open(pdf_path)
-            total_pages = len(doc)
-            stats['total_documents'] += 1
-            stats['total_pages'] += total_pages
-
-            # Classified and unclassified page tracking
-            classified_pages = []
-            unclassified_pages = []
-
-            # Process each page
-            for page_num in range(total_pages):
-                # Extract page image
-                page_image = extract_page_image(pdf_path, page_num)
+            try:
+                fpath = os.path.join(input_dir, fname)
                 
-                # Classify page
-                main_cat, sub_cat, confidence, reasoning, token_cost = classify_page(
-                    page_image, client, deployment, cfg
-                )
+                # Skip directories and hidden files
+                if not os.path.isfile(fpath) or fname.startswith('.'):
+                    logging.warning(f"Skipping non-file or hidden file: {fname}")
+                    continue
 
-                # Update token cost tracking
-                if token_cost:
-                    stats['total_token_cost'] += token_cost['total_cost']
-                    stats['total_input_tokens'] += token_cost['input_tokens']
-                    stats['total_output_tokens'] += token_cost['output_tokens']
-
-                # Check classification confidence
-                if confidence >= confidence_threshold and main_cat != 'unknown':
-                    classified_pages.append({
-                        'page': page_num,
-                        'main_category': main_cat,
-                        'subcategory': sub_cat,
-                        'confidence': confidence
-                    })
-                    stats['classified_pages'] += 1
-                else:
-                    unclassified_pages.append(page_num)
-                    stats['unclassified_pages'] += 1
-
-            # Close original document
-            doc.close()
-
-            # Process classified pages
-            if classified_pages:
-                # Group by subcategory
-                subcategory_pages = {}
-                for page_info in classified_pages:
-                    key = (page_info['main_category'], page_info['subcategory'])
-                    if key not in subcategory_pages:
-                        subcategory_pages[key] = []
-                    subcategory_pages[key].append(page_info['page'])
-
-                # Create PDFs for each subcategory
-                for (main_cat, sub_cat), pages in subcategory_pages.items():
-                    # Convert page numbers to 1-based for filename
-                    page_nums_str = '_'.join(str(p+1) for p in pages)
-                    
-                    # Open original PDF
-                    doc = fitz.open(pdf_path)
-                    classified_doc = fitz.open()
-                    
-                    # Add classified pages
-                    for page_num in pages:
-                        classified_doc.insert_pdf(doc, from_page=page_num, to_page=page_num)
-                    
-                    # Save classified PDF
-                    output_filename = f"{os.path.splitext(fname)[0]}_classified_{page_nums_str}.pdf"
-                    category_path = os.path.join(classified_dir, main_cat, sub_cat)
-                    os.makedirs(category_path, exist_ok=True)
-                    output_path = os.path.join(category_path, output_filename)
-                    classified_doc.save(output_path)
-                    classified_doc.close()
-                    doc.close()
-
-            # Process unclassified pages
-            if unclassified_pages:
-                # Convert page numbers to 1-based for filename
-                page_nums_str = '_'.join(str(p+1) for p in unclassified_pages)
+                # Determine file type
+                file_type = os.path.splitext(fname)[1].lower()
                 
-                # Open original PDF
+                # Skip non-processable file types
+                if file_type not in ['.pdf', '.jpg', '.jpeg', '.png']:
+                    logging.warning(f"Unsupported file type: {fname}")
+                    continue
+
+                logging.info(f"Processing document: {fname}")
+
+                # Convert to PDF
+                try:
+                    pdf_path = convert_to_pdf(fpath)
+                    if not pdf_path:
+                        raise ValueError(f"Failed to convert {fname} to PDF")
+                except Exception as conv_error:
+                    logging.error(f"Conversion error for {fname}: {conv_error}")
+                    stats['failed_files'].append(fname)
+                    continue
+
+                # Copy source PDF
+                try:
+                    shutil.copy2(pdf_path, os.path.join(source_dir, os.path.basename(pdf_path)))
+                except Exception as copy_error:
+                    logging.warning(f"Could not copy source file {fname}: {copy_error}")
+
+                # Open PDF
                 doc = fitz.open(pdf_path)
-                unclassified_doc = fitz.open()
+                total_pages = len(doc)
                 
-                # Add unclassified pages
-                for page_num in unclassified_pages:
-                    unclassified_doc.insert_pdf(doc, from_page=page_num, to_page=page_num)
-                
-                # Save unclassified PDF
-                output_filename = f"{os.path.splitext(fname)[0]}_unclassified_{page_nums_str}.pdf"
-                output_path = os.path.join(unclassified_dir, output_filename)
-                unclassified_doc.save(output_path)
-                unclassified_doc.close()
+                # Update statistics
+                stats['total_documents'] += 1
+                stats['total_pages'] += total_pages
+                stats['processed_files'].append(fname)
+
+                # Classified and unclassified page tracking
+                classified_pages = []
+                unclassified_pages = []
+
+                # Process each page
+                for page_num in range(total_pages):
+                    try:
+                        # Extract page image
+                        page_image = extract_page_image(pdf_path, page_num)
+                        
+                        # Classify page
+                        main_cat, sub_cat, confidence, reasoning, token_cost = classify_page(
+                            page_image, client, deployment, cfg
+                        )
+
+                        # Update token cost tracking
+                        if token_cost:
+                            stats['total_token_cost'] += token_cost['total_cost']
+                            stats['total_input_tokens'] += token_cost['input_tokens']
+                            stats['total_output_tokens'] += token_cost['output_tokens']
+
+                        # Check classification confidence
+                        if confidence >= confidence_threshold and main_cat != 'unknown':
+                            classified_pages.append({
+                                'page': page_num,
+                                'main_category': main_cat,
+                                'subcategory': sub_cat,
+                                'confidence': confidence
+                            })
+                            stats['classified_pages'] += 1
+                        else:
+                            unclassified_pages.append(page_num)
+                            stats['unclassified_pages'] += 1
+
+                    except Exception as page_error:
+                        logging.error(f"Error processing page {page_num} in {fname}: {page_error}")
+                        unclassified_pages.append(page_num)
+
+                # Close original document
                 doc.close()
 
-            # Log processing results
-            logging.info(f"Document {fname} Processing Summary:")
-            logging.info(f"Total Pages: {total_pages}")
-            logging.info(f"Classified Pages: {len(classified_pages)}")
-            logging.info(f"Unclassified Pages: {len(unclassified_pages)}")
+                # Process classified pages
+                if classified_pages:
+                    # Group by subcategory
+                    subcategory_pages = {}
+                    for page_info in classified_pages:
+                        key = (page_info['main_category'], page_info['subcategory'])
+                        if key not in subcategory_pages:
+                            subcategory_pages[key] = []
+                        subcategory_pages[key].append(page_info['page'])
+
+                    # Create PDFs for each subcategory
+                    for (main_cat, sub_cat), pages in subcategory_pages.items():
+                        try:
+                            # Convert page numbers to 1-based for filename
+                            page_nums_str = '_'.join(str(p+1) for p in pages)
+                            
+                            # Open original PDF
+                            doc = fitz.open(pdf_path)
+                            classified_doc = fitz.open()
+                            
+                            # Add classified pages
+                            for page_num in pages:
+                                classified_doc.insert_pdf(doc, from_page=page_num, to_page=page_num)
+                            
+                            # Prepare output path
+                            category_path = os.path.join(classified_dir, main_cat, sub_cat)
+                            os.makedirs(category_path, exist_ok=True)
+                            
+                            # Save classified PDF
+                            output_filename = f"{os.path.splitext(fname)[0]}_classified_{page_nums_str}.pdf"
+                            output_path = os.path.join(category_path, output_filename)
+                            
+                            classified_doc.save(output_path)
+                            classified_doc.close()
+                            doc.close()
+                            
+                            logging.info(f"Saved classified PDF: {output_path}")
+
+                        except Exception as classified_save_error:
+                            logging.error(f"Error saving classified PDF for {fname}: {classified_save_error}")
+
+                # Process unclassified pages
+                if unclassified_pages:
+                    try:
+                        # Convert page numbers to 1-based for filename
+                        page_nums_str = '_'.join(str(p+1) for p in unclassified_pages)
+                        
+                        # Open original PDF
+                        doc = fitz.open(pdf_path)
+                        unclassified_doc = fitz.open()
+                        
+                        # Add unclassified pages
+                        for page_num in unclassified_pages:
+                            unclassified_doc.insert_pdf(doc, from_page=page_num, to_page=page_num)
+                        
+                        # Save unclassified PDF
+                        output_filename = f"{os.path.splitext(fname)[0]}_unclassified_{page_nums_str}.pdf"
+                        output_path = os.path.join(unclassified_dir, output_filename)
+                        
+                        unclassified_doc.save(output_path)
+                        unclassified_doc.close()
+                        doc.close()
+                        
+                        logging.info(f"Saved unclassified PDF: {output_path}")
+
+                    except Exception as unclassified_save_error:
+                        logging.error(f"Error saving unclassified PDF for {fname}: {unclassified_save_error}")
+
+                # Log processing results
+                logging.info(f"Document {fname} Processing Summary:")
+                logging.info(f"Total Pages: {total_pages}")
+                logging.info(f"Classified Pages: {len(classified_pages)}")
+                logging.info(f"Unclassified Pages: {len(unclassified_pages)}")
+
+            except Exception as doc_error:
+                logging.error(f"Error processing document {fname}: {doc_error}")
+                stats['failed_files'].append(fname)
 
         # Log overall processing statistics
         logging.info("Processing Session Statistics:")
         logging.info(json.dumps(stats, indent=2))
 
+        # Print summary to console
         print("Document Processing Complete")
+        print(f"Total Documents: {stats['total_documents']}")
+        print(f"Total Pages: {stats['total_pages']}")
+        print(f"Classified Pages: {stats['classified_pages']}")
+        print(f"Unclassified Pages: {stats['unclassified_pages']}")
         print(f"Total Token Cost: ${stats['total_token_cost']:.4f}")
-        print(f"Total Input Tokens: {stats['total_input_tokens']}")
-        print(f"Total Output Tokens: {stats['total_output_tokens']}")
+        print(f"Processed Files:", ', '.join(stats['processed_files']))
+        print(f"Failed Files:", ', '.join(stats['failed_files']) if stats['failed_files'] else "None")
 
-    except Exception as e:
-        logging.critical(f"Critical processing error: {e}")
+    except Exception as critical_error:
+        logging.critical(f"Critical processing error: {critical_error}")
         logging.critical(traceback.format_exc())
-        print(f"Document Processing Failed: {e}")
-
-# Standalone script execution
-if __name__ == "__main__":
-    # Example usage
-    input_pdf = './input/claim.pdf'
-    output_dir = './output'
-    config_path = './config.json'
-    
-    # Ensure input and output directories exist
-    os.makedirs(output_dir, exist_ok=True)
-    os.makedirs('./input', exist_ok=True)
-    
-    # Process documents
-    process_documents(
-        source='local', 
-        config_path=config_path,
-        output_dir=output_dir, 
-        input_dir='./input'
-    )
+        print(f"Document Processing Failed: {critical_error}")
 -----
   main.py
 
