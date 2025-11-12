@@ -304,7 +304,227 @@ def process_local_documents(config, input_folder=None, confidence_threshold=0.6)
             unprocessed_files.append(fpath)
 
     return processed_files, unprocessed_files
+
+
 def process_azure_documents(config, input_folder, confidence_threshold=0.6, archive_enabled=True):
+    """
+    Process documents from Azure Blob Storage
+    """
+    from helper import AzureStorageManager
+    import zipfile
+    from datetime import datetime
+    import tempfile
+
+    # Use Azure storage configuration for Azure source
+    input_container = config['azure_storage']['input_container']
+    output_container = config['azure_storage']['output_container']
+    archive_container = config['azure_storage']['archive_container']
+    
+    # Initialize Azure Storage Manager
+    storage_manager = AzureStorageManager(config)
+    
+    # Initialize document classifier
+    classifier = DocumentClassifier(config)
+    
+    # Reference directory
+    reference_dir = config['paths']['reference_dir']
+    
+    # List blobs in input container/folder
+    blobs = storage_manager.list_blobs(input_container, prefix=input_folder)
+    
+    # Use tempfile for secure, automatic temporary directory creation
+    with tempfile.TemporaryDirectory() as local_input_dir:
+        # Track processed and unprocessed files
+        processed_files = []
+        unprocessed_files = []
+
+        # Download and process blobs
+        for blob_name in blobs:
+            try:
+                # Download blob
+                local_path = os.path.join(local_input_dir, os.path.basename(blob_name))
+                if not storage_manager.download_blob(input_container, blob_name, local_path):
+                    logging.error(f"Failed to download blob: {blob_name}")
+                    unprocessed_files.append(blob_name)
+                    continue
+
+                # Determine file type
+                file_type = os.path.splitext(local_path)[1].lower()
+                
+                # Process only supported file types
+                if file_type not in ['.pdf', '.jpg', '.jpeg', '.png']:
+                    logging.warning(f"Unsupported file type: {blob_name}")
+                    unprocessed_files.append(blob_name)
+                    continue
+
+                # Convert to PDF if needed
+                pdf_path = convert_to_pdf(local_path)
+                if not pdf_path:
+                    logging.error(f"Failed to convert {blob_name} to PDF")
+                    unprocessed_files.append(blob_name)
+                    continue
+
+                # Open PDF
+                doc = fitz.open(pdf_path)
+                total_pages = len(doc)
+
+                # Track page classifications for this document
+                document_classified_pages = []
+                document_unclassified_pages = []
+
+                # Process each page
+                for page_num in range(total_pages):
+                    try:
+                        # Extract page image
+                        page_image = extract_page_image(pdf_path, page_num)
+                        
+                        # Classify page
+                        classification = classifier.classify_document(page_image, reference_dir)
+                        
+                        # Check classification confidence
+                        if (classification['confidence'] >= confidence_threshold 
+                            and classification['main_category'] != 'unknown'):
+                            document_classified_pages.append({
+                                'page': page_num,
+                                'category': classification['main_category'],
+                                'subcategory': classification['subcategory'],
+                                'confidence': classification['confidence']
+                            })
+                        else:
+                            document_unclassified_pages.append(page_num)
+
+                    except Exception as page_error:
+                        logging.error(f"Error processing page {page_num} in {blob_name}: {page_error}")
+                        document_unclassified_pages.append(page_num)
+
+                # Close original document
+                doc.close()
+
+                # Add to processed files if any pages were processed
+                if document_classified_pages or document_unclassified_pages:
+                    processed_files.append({
+                        'original_path': pdf_path,
+                        'original_blob': blob_name,
+                        'classified_pages': document_classified_pages,
+                        'unclassified_pages': document_unclassified_pages
+                    })
+
+            except Exception as doc_error:
+                logging.error(f"Error processing blob {blob_name}: {doc_error}")
+                unprocessed_files.append(blob_name)
+
+        # Archiving block
+        if archive_enabled:
+            try:
+                # Create a BytesIO object to store the ZIP
+                archive_buffer = io.BytesIO()
+                
+                with zipfile.ZipFile(archive_buffer, 'w', zipfile.ZIP_DEFLATED) as zipf:
+                    # Add processed files
+                    for doc in processed_files:
+                        original_filename = os.path.basename(doc['original_path'])
+                        zipf.write(
+                            doc['original_path'], 
+                            arcname=f"processed/{original_filename}"
+                        )
+                    
+                    # Add unprocessed files (blob names)
+                    for blob_name in unprocessed_files:
+                        zipf.writestr(
+                            f"unprocessed/{os.path.basename(blob_name)}", 
+                            f"Unprocessed blob: {blob_name}"
+                        )
+                
+                # Prepare archive name
+                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                archive_name = f"documentclassification_{timestamp}.zip"
+                
+                # Upload archive to storage
+                archive_buffer.seek(0)
+                blob_client = storage_manager.blob_service_client.get_blob_client(
+                    container=archive_container, 
+                    blob=archive_name
+                )
+                blob_client.upload_blob(archive_buffer.getvalue())
+                
+                logging.info(f"Created archive: {archive_name}")
+            
+            except Exception as archive_error:
+                logging.error(f"Error creating archive: {archive_error}")
+
+        # Upload source files to output container
+        for doc in processed_files:
+            source_blob_name = f"source/{os.path.basename(doc['original_path'])}"
+            storage_manager.upload_blob(
+                output_container, 
+                source_blob_name, 
+                doc['original_path']
+            )
+
+        # Upload processed documents to output container
+        for doc in processed_files:
+            for page_info in doc['classified_pages']:
+                # Create blob name for classified pages
+                blob_name = f"classified/{page_info['category']}/{page_info['subcategory']}/{os.path.basename(doc['original_path'])}_page{page_info['page']+1}.pdf"
+                
+                # Upload to output container
+                storage_manager.upload_blob(
+                    output_container, 
+                    blob_name, 
+                    doc['original_path']
+                )
+            
+            # Upload unclassified pages
+            if doc['unclassified_pages']:
+                blob_name = f"unclassified/{os.path.basename(doc['original_path'])}_unclassified_pages.pdf"
+                storage_manager.upload_blob(
+                    output_container, 
+                    blob_name, 
+                    doc['original_path']
+                )
+
+        # Upload unprocessed files to output container
+        for blob_name in unprocessed_files:
+            unprocessed_blob_name = f"unprocessed/{os.path.basename(blob_name)}"
+            storage_manager.upload_blob(
+                output_container, 
+                unprocessed_blob_name, 
+                f"Unprocessed blob: {blob_name}"
+            )
+
+        # Clean up input container
+        storage_manager.delete_multiple_blobs(blobs, input_container)
+
+    return processed_files, unprocessed_files
+```
+
+Key improvements:
+1. Uses `tempfile.TemporaryDirectory()` context manager
+   - Automatically creates and cleans up temporary directory
+   - No visible temp folder during processing
+2. Uploads source files to output container
+3. Uploads unprocessed files to output container
+4. Maintains existing archiving and input container cleanup logic
+
+The output container will now have a structure like:
+```
+output_container/
+├── source/
+│   └── original_document.pdf
+├── classified/
+│   ├── medical/
+│   │   └── insurance_claim/
+│   │       └── document_page1.pdf
+│   └── financial/
+│       └── invoice/
+│           └── document_page2.pdf
+├── unclassified/
+│   └── document_unclassified_pages.pdf
+└── unprocessed/
+    └── unsupported_document.txt
+
+
+def process_azure_documents_old(config, input_folder, confidence_threshold=0.6, archive_enabled=True):
     """
     Process documents from Azure Blob Storage with completely separate logic
     """
