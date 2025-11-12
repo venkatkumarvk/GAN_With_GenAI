@@ -1032,3 +1032,200 @@ config.json
         }
     }
 }
+
+
+------
+
+def parse_arguments():
+    """
+    Parse command-line arguments for document processing
+    """
+    parser = argparse.ArgumentParser(description='Document Classification Pipeline')
+    parser.add_argument(
+        '--source', 
+        choices=['local', 'azure'], 
+        default='local',
+        help='Source of documents: local filesystem or Azure Blob Storage'
+    )
+    parser.add_argument(
+        '--inputfolder', 
+        default='./input',
+        help='Input folder path or Azure Blob Storage container/folder'
+    )
+    # ... rest of existing arguments ...
+    return parser.parse_args()
+
+def main():
+    # Parse arguments
+    args = parse_arguments()
+    
+    try:
+        # Load configuration
+        config = load_config(args.config)
+        
+        # Setup logging
+        setup_logging(config)
+        
+        # Prepare output directory
+        os.makedirs(args.output, exist_ok=True)
+        
+        # Process based on source
+        if args.source == 'local':
+            # Process local documents
+            processed_files, unprocessed_files = process_documents(
+                source='local',
+                config_path=args.config,
+                output_dir=args.output,
+                input_dir=args.inputfolder,
+                confidence_threshold=args.confidence
+            )
+        
+        elif args.source == 'azure':
+            # Initialize Azure Storage Manager
+            storage_manager = AzureStorageManager(config)
+            
+            # Prepare reference documents
+            storage_manager.prepare_reference_documents()
+            
+            # Create local input directory
+            local_input_dir = config['paths']['input_dir']
+            os.makedirs(local_input_dir, exist_ok=True)
+            
+            # Parse input folder (container/folder)
+            input_parts = args.inputfolder.split('/')
+            if len(input_parts) < 2:
+                raise ValueError("Input folder must be in format 'container/folder'")
+            
+            input_container = input_parts[0]
+            input_folder = '/'.join(input_parts[1:])
+            
+            # List blobs in the specific input folder
+            blobs = storage_manager.list_blobs(input_container, prefix=input_folder)
+            
+            # Download each blob
+            downloaded_files = []
+            for blob_name in blobs:
+                local_path = os.path.join(local_input_dir, os.path.basename(blob_name))
+                if storage_manager.download_blob(input_container, blob_name, local_path):
+                    downloaded_files.append(local_path)
+            
+            # Process downloaded documents
+            processed_files, unprocessed_files = process_documents(
+                source='azure',
+                config_path=args.config,
+                output_dir=args.output,
+                input_dir=local_input_dir,
+                confidence_threshold=args.confidence
+            )
+            
+            # Archive if enabled
+            archive_enabled = config.get('archiving', {}).get('enabled', True)
+            if archive_enabled:
+                # Create archive with processed and unprocessed files
+                archive_name = storage_manager.create_archive(
+                    processed_files, 
+                    unprocessed_files
+                )
+                
+                if archive_name:
+                    logging.info(f"Created archive: {archive_name}")
+                
+                # Clean input container
+                if config.get('archiving', {}).get('clean_input_container', True):
+                    # Delete all blobs from input folder
+                    storage_manager.delete_multiple_blobs(blobs, input_container)
+                    logging.info(f"Cleaned input folder: {args.inputfolder}")
+        
+        logging.info("Document processing completed successfully")
+    
+    except Exception as e:
+        logging.critical(f"Critical error in document processing: {e}")
+        import traceback
+        traceback.print_exc()
+        raise
+
+# Update in helper.py
+def list_blobs(self, container_name, prefix=None):
+    """
+    List blobs in a container, optionally filtered by prefix
+    """
+    try:
+        container_client = self.blob_service_client.get_container_client(container_name)
+        
+        # If prefix is provided, list blobs with that prefix
+        if prefix:
+            blobs = [blob.name for blob in container_client.list_blobs(name_starts_with=prefix)]
+        else:
+            blobs = [blob.name for blob in container_client.list_blobs()]
+        
+        return blobs
+    except Exception as e:
+        logging.error(f"Error listing blobs in {container_name}: {e}")
+        return []
+
+
+----
+
+def sanitize_filename(filename):
+    """
+    Sanitize filename to remove or replace special characters
+    """
+    import re
+    
+    # Remove or replace problematic characters
+    sanitized = re.sub(r'[^\w\-_\.]', '_', filename)
+    
+    # Ensure filename is not empty
+    if not sanitized:
+        sanitized = 'unnamed_document'
+    
+    # Truncate very long filenames
+    if len(sanitized) > 255:
+        sanitized = sanitized[:255]
+    
+    return sanitized
+
+def process_documents(
+    source='local', 
+    config_path='config.json', 
+    output_dir='./output', 
+    input_dir='./input', 
+    confidence_threshold=0.6
+):
+    # ... existing code ...
+    
+    # When creating output filenames, use sanitize_filename
+    output_filename = f"{sanitize_filename(os.path.splitext(fname)[0])}_classified_{page_nums_str}.pdf"
+    output_filename = f"{sanitize_filename(os.path.splitext(fname)[0])}_unclassified_{page_nums_str}.pdf"
+
+-----
+
+def delete_multiple_blobs(self, blob_names, container_name):
+    """
+    Delete multiple blobs from a container
+    """
+    try:
+        container_client = self.blob_service_client.get_container_client(container_name)
+        
+        # If no blobs provided, attempt to delete all blobs in the container
+        if not blob_names:
+            blob_names = [blob.name for blob in container_client.list_blobs()]
+        
+        deleted_count = 0
+        total_blobs = len(blob_names)
+        
+        for blob_name in blob_names:
+            try:
+                blob_client = container_client.get_blob_client(blob_name)
+                blob_client.delete_blob()
+                deleted_count += 1
+                logging.info(f"Deleted blob: {blob_name}")
+            except Exception as blob_error:
+                logging.warning(f"Could not delete blob {blob_name}: {blob_error}")
+        
+        logging.info(f"Successfully deleted {deleted_count}/{total_blobs} blobs from container {container_name}")
+        
+        return deleted_count == total_blobs
+    except Exception as e:
+        logging.error(f"Error deleting blobs from container {container_name}: {e}")
+        return False
