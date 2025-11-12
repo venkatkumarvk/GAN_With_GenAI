@@ -1229,3 +1229,151 @@ def delete_multiple_blobs(self, blob_names, container_name):
     except Exception as e:
         logging.error(f"Error deleting blobs from container {container_name}: {e}")
         return False
+
+
+-----
+
+import os
+import argparse
+import logging
+import shutil
+from document_process import process_documents
+from helper import load_config, setup_logging, AzureStorageManager
+
+def parse_arguments():
+    """
+    Parse command-line arguments for document processing
+    """
+    parser = argparse.ArgumentParser(description='Document Classification Pipeline')
+    parser.add_argument(
+        '--source', 
+        choices=['local', 'azure'], 
+        default='local',
+        help='Source of documents: local filesystem or Azure Blob Storage'
+    )
+    parser.add_argument(
+        '--inputfolder', 
+        default='./input',
+        help='Input folder path or Azure Blob Storage container/folder'
+    )
+    parser.add_argument(
+        '--output', 
+        default='./output', 
+        help='Path to output directory'
+    )
+    parser.add_argument(
+        '--config', 
+        default='config.json', 
+        help='Path to configuration file'
+    )
+    parser.add_argument(
+        '--confidence', 
+        type=float, 
+        default=0.6, 
+        help='Confidence threshold for classification'
+    )
+    parser.add_argument(
+        '--no-archive', 
+        action='store_true',
+        help='Disable archiving of processed files'
+    )
+    return parser.parse_args()
+
+def main():
+    """
+    Main entry point for document processing
+    """
+    # Parse arguments
+    args = parse_arguments()
+    
+    try:
+        # Load configuration
+        config = load_config(args.config)
+        
+        # Setup logging
+        setup_logging(config)
+        
+        # Determine archiving setting
+        archive_enabled = config.get('archiving', {}).get('enabled', True)
+        if args.no_archive:
+            archive_enabled = False
+        
+        # Prepare output directory
+        os.makedirs(args.output, exist_ok=True)
+        
+        # Process based on source
+        if args.source == 'local':
+            # Process local documents
+            processed_files, unprocessed_files = process_documents(
+                source='local',
+                config_path=args.config,
+                output_dir=args.output,
+                input_dir=args.inputfolder,
+                confidence_threshold=args.confidence
+            )
+        
+        elif args.source == 'azure':
+            # Initialize Azure Storage Manager
+            storage_manager = AzureStorageManager(config)
+            
+            # Prepare reference documents
+            storage_manager.prepare_reference_documents()
+            
+            # Create local input directory
+            local_input_dir = config['paths']['input_dir']
+            os.makedirs(local_input_dir, exist_ok=True)
+            
+            # Parse input folder (container/folder)
+            input_parts = args.inputfolder.split('/')
+            if len(input_parts) < 2:
+                raise ValueError("Input folder must be in format 'container/folder'")
+            
+            input_container = input_parts[0]
+            input_folder = '/'.join(input_parts[1:])
+            
+            # List blobs in the specific input folder
+            blobs = storage_manager.list_blobs(input_container, prefix=input_folder)
+            
+            # Download each blob
+            downloaded_files = []
+            for blob_name in blobs:
+                local_path = os.path.join(local_input_dir, os.path.basename(blob_name))
+                if storage_manager.download_blob(input_container, blob_name, local_path):
+                    downloaded_files.append(local_path)
+            
+            # Process downloaded documents
+            processed_files, unprocessed_files = process_documents(
+                source='azure',
+                config_path=args.config,
+                output_dir=args.output,
+                input_dir=local_input_dir,
+                confidence_threshold=args.confidence
+            )
+            
+            # Archive if enabled
+            if archive_enabled:
+                # Create archive with processed and unprocessed files
+                archive_name = storage_manager.create_archive(
+                    processed_files, 
+                    unprocessed_files
+                )
+                
+                if archive_name:
+                    logging.info(f"Created archive: {archive_name}")
+                
+                # Clean input container
+                if config.get('archiving', {}).get('clean_input_container', True):
+                    # Delete all blobs from input container
+                    storage_manager.delete_multiple_blobs([], input_container)
+                    logging.info(f"Cleaned input container: {input_container}")
+        
+        logging.info("Document processing completed successfully")
+    
+    except Exception as e:
+        logging.critical(f"Critical error in document processing: {e}")
+        import traceback
+        traceback.print_exc()
+        raise
+
+if __name__ == "__main__":
+    main()
