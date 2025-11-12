@@ -452,6 +452,14 @@ def process_azure_documents(config, input_folder, confidence_threshold=0.6, arch
             except Exception as archive_error:
                 logging.error(f"Error creating archive: {archive_error}")
 
+     try:
+        # Delete all blobs in the specified input folder
+        storage_manager.delete_multiple_blobs(blobs, input_container)
+        logging.info(f"Cleaned input container {input_container} for folder {input_folder}")
+    except Exception as cleanup_error:
+        logging.error(f"Error cleaning input container: {cleanup_error}")
+
+
     finally:
         # Always clean up temporary input directory
         shutil.rmtree(local_input_dir, ignore_errors=True)
@@ -818,7 +826,7 @@ def main():
                 config,
                 input_folder=args.inputfolder,
                 confidence_threshold=args.confidence,
-                archive_enabled=config.get('archiving', {}).get('enabled', True)
+                archive_enabled=not args.no_archive
             )
         
         logging.info("Document processing completed successfully")
