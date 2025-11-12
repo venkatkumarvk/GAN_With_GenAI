@@ -415,7 +415,47 @@ def process_azure_documents(config, input_folder, confidence_threshold=0.6):
         # Always clean up temporary input directory
         shutil.rmtree(local_input_dir, ignore_errors=True)
 
+    # Archiving block (add this after processing all documents)
+    if archive_enabled:
+        try:
+            # Create a BytesIO object to store the ZIP
+            archive_buffer = io.BytesIO()
+            
+            with zipfile.ZipFile(archive_buffer, 'w', zipfile.ZIP_DEFLATED) as zipf:
+                # Add processed files
+                for doc in processed_files:
+                    original_filename = os.path.basename(doc['original_path'])
+                    zipf.write(
+                        doc['original_path'], 
+                        arcname=f"processed/{original_filename}"
+                    )
+                
+                # Add unprocessed files (blob names)
+                for blob_name in unprocessed_files:
+                    zipf.writestr(
+                        f"unprocessed/{os.path.basename(blob_name)}", 
+                        f"Unprocessed blob: {blob_name}"
+                    )
+            
+            # Prepare archive name
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            archive_name = f"documentclassification_{timestamp}.zip"
+            
+            # Upload archive to storage
+            archive_buffer.seek(0)
+            blob_client = storage_manager.blob_service_client.get_blob_client(
+                container=archive_container, 
+                blob=archive_name
+            )
+            blob_client.upload_blob(archive_buffer.getvalue())
+            
+            logging.info(f"Created archive: {archive_name}")
+        
+        except Exception as archive_error:
+            logging.error(f"Error creating archive: {archive_error}")
+
     return processed_files, unprocessed_files
+
 
 def process_documents(source='local', config_path='config.json', **kwargs):
     """
@@ -742,6 +782,11 @@ def parse_arguments():
         default=0.6, 
         help='Confidence threshold for classification'
     )
+ parser.add_argument(
+        '--no-archive', 
+        action='store_true',
+        help='Disable archiving for Azure source'
+    )
     return parser.parse_args()
 
 def main():
@@ -770,7 +815,8 @@ def main():
             processed_files, unprocessed_files = process_azure_documents(
                 config,
                 input_folder=args.inputfolder,
-                confidence_threshold=args.confidence
+                confidence_threshold=args.confidence,
+                archive_enabled=config.get('archiving', {}).get('enabled', True)
             )
         
         logging.info("Document processing completed successfully")
