@@ -304,8 +304,269 @@ def process_local_documents(config, input_folder=None, confidence_threshold=0.6)
             unprocessed_files.append(fpath)
 
     return processed_files, unprocessed_files
-
 def process_azure_documents(config, input_folder, confidence_threshold=0.6, archive_enabled=True):
+    """
+    Process documents from Azure Blob Storage
+    """
+    from helper import AzureStorageManager
+    import zipfile
+    from datetime import datetime
+    import tempfile
+
+    # Use Azure storage configuration for Azure source
+    input_container = config['azure_storage']['input_container']
+    output_container = config['azure_storage']['output_container']
+    archive_container = config['azure_storage']['archive_container']
+    
+    # Initialize Azure Storage Manager
+    storage_manager = AzureStorageManager(config)
+    
+    # Initialize document classifier
+    classifier = DocumentClassifier(config)
+    
+    # Reference directory
+    reference_dir = config['paths']['reference_dir']
+    
+    # List blobs in input container/folder
+    blobs = storage_manager.list_blobs(input_container, prefix=input_folder)
+    
+    # Use tempfile for secure, automatic temporary directory creation
+    with tempfile.TemporaryDirectory() as local_input_dir:
+        # Track processed and unprocessed files
+        processed_files = []
+        unprocessed_files = []
+
+        # Track overall processing statistics
+        total_documents = 0
+        total_pages = 0
+        total_source_files = 0
+        total_classified_pages = 0
+        total_unclassified_pages = 0
+        total_unprocessed_files = 0
+        total_token_cost = 0.0
+
+        # Download and process blobs
+        for blob_name in blobs:
+            try:
+                # Download blob
+                local_path = os.path.join(local_input_dir, os.path.basename(blob_name))
+                if not storage_manager.download_blob(input_container, blob_name, local_path):
+                    logging.error(f"Failed to download blob: {blob_name}")
+                    unprocessed_files.append(blob_name)
+                    total_unprocessed_files += 1
+                    continue
+
+                # Determine file type
+                file_type = os.path.splitext(local_path)[1].lower()
+                
+                # Process only supported file types
+                if file_type not in ['.pdf', '.jpg', '.jpeg', '.png']:
+                    logging.warning(f"Unsupported file type: {blob_name}")
+                    unprocessed_files.append(blob_name)
+                    total_unprocessed_files += 1
+                    continue
+
+                # Convert to PDF if needed
+                pdf_path = convert_to_pdf(local_path)
+                if not pdf_path:
+                    logging.error(f"Failed to convert {blob_name} to PDF")
+                    unprocessed_files.append(blob_name)
+                    total_unprocessed_files += 1
+                    continue
+
+                # Open PDF
+                doc = fitz.open(pdf_path)
+                current_doc_pages = len(doc)
+                total_pages += current_doc_pages
+                total_documents += 1
+
+                # Track page classifications for this document
+                document_classified_pages = []
+                document_unclassified_pages = []
+
+                # Process each page
+                for page_num in range(current_doc_pages):
+                    try:
+                        # Extract page image
+                        page_image = extract_page_image(pdf_path, page_num)
+                        
+                        # Classify page
+                        classification = classifier.classify_document(page_image, reference_dir)
+                        
+                        # Track token cost
+                        if classification.get('token_usage'):
+                            page_token_cost = classification['token_usage'].get('total_cost', 0)
+                            total_token_cost += page_token_cost
+                            logging.debug(f"Page {page_num+1} token cost: ${page_token_cost:.4f}")
+                        
+                        # Check classification confidence
+                        if (classification['confidence'] >= confidence_threshold 
+                            and classification['main_category'] != 'unknown'):
+                            document_classified_pages.append({
+                                'page': page_num,
+                                'category': classification['main_category'],
+                                'subcategory': classification['subcategory'],
+                                'confidence': classification['confidence']
+                            })
+                        else:
+                            document_unclassified_pages.append(page_num)
+
+                    except Exception as page_error:
+                        logging.error(f"Error processing page {page_num} in {blob_name}: {page_error}")
+                        document_unclassified_pages.append(page_num)
+
+                # Close original document
+                doc.close()
+
+                # Add to processed files if any pages were processed
+                if document_classified_pages or document_unclassified_pages:
+                    processed_files.append({
+                        'original_path': pdf_path,
+                        'original_blob': blob_name,
+                        'classified_pages': document_classified_pages,
+                        'unclassified_pages': document_unclassified_pages
+                    })
+                    total_classified_pages += len(document_classified_pages)
+                    total_unclassified_pages += len(document_unclassified_pages)
+
+            except Exception as doc_error:
+                logging.error(f"Error processing blob {blob_name}: {doc_error}")
+                unprocessed_files.append(blob_name)
+                total_unprocessed_files += 1
+
+        # Archiving block
+        if archive_enabled:
+            try:
+                # Create a BytesIO object to store the ZIP
+                archive_buffer = io.BytesIO()
+                
+                with zipfile.ZipFile(archive_buffer, 'w', zipfile.ZIP_DEFLATED) as zipf:
+                    # Add processed files
+                    for doc in processed_files:
+                        original_filename = os.path.basename(doc['original_path'])
+                        zipf.write(
+                            doc['original_path'], 
+                            arcname=f"processed/{original_filename}"
+                        )
+                    
+                    # Add unprocessed files (blob names)
+                    for blob_name in unprocessed_files:
+                        zipf.writestr(
+                            f"unprocessed/{os.path.basename(blob_name)}", 
+                            f"Unprocessed blob: {blob_name}"
+                        )
+                
+                # Prepare archive name
+                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                archive_name = f"documentclassification_{timestamp}.zip"
+                
+                # Upload archive to storage
+                archive_buffer.seek(0)
+                blob_client = storage_manager.blob_service_client.get_blob_client(
+                    container=archive_container, 
+                    blob=archive_name
+                )
+                blob_client.upload_blob(archive_buffer.getvalue())
+                
+                logging.info(f"Created archive: {archive_name}")
+            
+            except Exception as archive_error:
+                logging.error(f"Error creating archive: {archive_error}")
+
+        # Upload processed documents to output container
+        for doc in processed_files:
+            # Open the original PDF
+            original_doc = fitz.open(doc['original_path'])
+            
+            # Classified pages processing
+            if doc['classified_pages']:
+                # Create a new PDF with only classified pages
+                classified_doc = fitz.open()
+                
+                # Add only classified pages to the new PDF
+                for page_info in doc['classified_pages']:
+                    classified_doc.insert_pdf(original_doc, from_page=page_info['page'], to_page=page_info['page'])
+                
+                # Remove .pdf extension from base filename
+                base_filename = os.path.splitext(os.path.basename(doc['original_path']))[0]
+                
+                # Create page number string for classified pages
+                classified_page_nums = '_'.join(str(p['page']+1) for p in doc['classified_pages'])
+                
+                # Create blob name for classified pages
+                classified_blob_name = f"classified/{doc['classified_pages'][0]['category']}/{doc['classified_pages'][0]['subcategory']}/{base_filename}_page{classified_page_nums}.pdf"
+                
+                # Save classified PDF to a temporary file
+                temp_classified_path = os.path.join(local_input_dir, f"{base_filename}_classified.pdf")
+                classified_doc.save(temp_classified_path)
+                classified_doc.close()
+                
+                # Upload classified PDF to output container
+                storage_manager.upload_blob(
+                    output_container, 
+                    classified_blob_name, 
+                    temp_classified_path
+                )
+            
+            # Unclassified pages processing
+            if doc['unclassified_pages']:
+                # Create a new PDF with only unclassified pages
+                unclassified_doc = fitz.open()
+                
+                # Add only unclassified pages to the new PDF
+                for page_num in doc['unclassified_pages']:
+                    unclassified_doc.insert_pdf(original_doc, from_page=page_num, to_page=page_num)
+                
+                # Remove .pdf extension from base filename
+                base_filename = os.path.splitext(os.path.basename(doc['original_path']))[0]
+                
+                # Create page number string for unclassified pages
+                unclassified_page_nums = '_'.join(str(p+1) for p in doc['unclassified_pages'])
+                
+                # Create blob name for unclassified pages
+                unclassified_blob_name = f"unclassified/{base_filename}_unclassified_pages{unclassified_page_nums}.pdf"
+                
+                # Save unclassified PDF to a temporary file
+                temp_unclassified_path = os.path.join(local_input_dir, f"{base_filename}_unclassified.pdf")
+                unclassified_doc.save(temp_unclassified_path)
+                unclassified_doc.close()
+                
+                # Upload unclassified PDF to output container
+                storage_manager.upload_blob(
+                    output_container, 
+                    unclassified_blob_name, 
+                    temp_unclassified_path
+                )
+            
+            # Close the original document
+            original_doc.close()
+
+        # Clean up input container
+        storage_manager.delete_multiple_blobs(blobs, input_container)
+
+        # Logging and terminal output
+        logging.info("\n--- Processing Statistics ---")
+        logging.info(f"Total Documents Processed: {total_documents}")
+        logging.info(f"Total Pages: {total_pages}")
+        logging.info(f"Source Files: {total_source_files}")
+        logging.info(f"Classified Pages: {total_classified_pages}")
+        logging.info(f"Unclassified Pages: {total_unclassified_pages}")
+        logging.info(f"Unprocessed Files: {total_unprocessed_files}")
+        logging.info(f"Total Token Cost: ${total_token_cost:.4f}")
+
+        # Print to terminal
+        print("\n--- Processing Statistics ---")
+        print(f"Total Documents Processed: {total_documents}")
+        print(f"Total Pages: {total_pages}")
+        print(f"Source Files: {total_source_files}")
+        print(f"Classified Pages: {total_classified_pages}")
+        print(f"Unclassified Pages: {total_unclassified_pages}")
+        print(f"Unprocessed Files: {total_unprocessed_files}")
+        print(f"Total Token Cost: ${total_token_cost:.4f}")
+
+    return processed_files, unprocessed_files
+
+def process_azure_documents12_old(config, input_folder, confidence_threshold=0.6, archive_enabled=True):
     """
     Process documents from Azure Blob Storage
     """
