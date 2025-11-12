@@ -1,0 +1,841 @@
+#document.py
+
+import os
+import io
+import json
+import base64
+import shutil
+import logging
+import traceback
+import fitz  # PyMuPDF
+from PIL import Image
+from datetime import datetime
+
+from helper import load_config
+from llm import DocumentClassifier
+
+def sanitize_filename(filename):
+    """
+    Robust filename sanitization
+    """
+    import re
+    
+    # Remove or replace problematic characters
+    sanitized = re.sub(r'[^\w\-\. ]', '_', filename)
+    
+    # Truncate very long filenames
+    if len(sanitized) > 255:
+        sanitized = sanitized[:255]
+    
+    # Ensure filename is not empty
+    if not sanitized or sanitized.isspace():
+        sanitized = 'unnamed_document'
+    
+    return sanitized.strip()
+
+def convert_to_pdf(input_file):
+    """
+    Convert various file types to PDF
+    """
+    try:
+        # Get file extension
+        _, ext = os.path.splitext(input_file)
+        ext = ext.lower()
+
+        # PDF files are already in the right format
+        if ext == '.pdf':
+            return input_file
+
+        # Image files conversion
+        if ext in ['.jpg', '.jpeg', '.png']:
+            img = Image.open(input_file)
+            
+            # Convert to RGB if needed
+            if img.mode != 'RGB':
+                img = img.convert('RGB')
+            
+            # Resize if very large
+            max_size = (2000, 2000)
+            img.thumbnail(max_size, Image.LANCZOS)
+            
+            pdf_path = input_file.replace(ext, '.pdf')
+            img.save(pdf_path, 'PDF', resolution=100.0)
+            
+            return pdf_path
+
+        # For other file types like .doc, .docx, use PyMuPDF
+        try:
+            doc = fitz.open(input_file)
+            pdf_path = input_file.replace(ext, '.pdf')
+            doc.save(pdf_path)
+            doc.close()
+            return pdf_path
+        except Exception as conversion_error:
+            logging.error(f"Conversion error for {input_file}: {conversion_error}")
+            return None
+
+    except Exception as e:
+        logging.error(f"PDF conversion error for {input_file}: {e}")
+        return None
+
+def extract_page_image(file_path, page_number):
+    """
+    Extract image for a specific page from various document types
+    """
+    try:
+        # PDF handling
+        if file_path.lower().endswith('.pdf'):
+            doc = fitz.open(file_path)
+            
+            # Validate page number
+            if page_number < 0 or page_number >= len(doc):
+                logging.error(f"Invalid page number {page_number} for {file_path}")
+                return _create_blank_image()
+            
+            page = doc.load_page(page_number)
+            pix = page.get_pixmap(matrix=fitz.Matrix(300/72, 300/72))
+            
+            # Validate pixmap
+            if not pix or pix.width <= 0 or pix.height <= 0:
+                logging.error(f"Invalid page {page_number} in {file_path}")
+                return _create_blank_image()
+            
+            img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
+            doc.close()
+        
+        # Image handling
+        elif file_path.lower().endswith(('.jpg', '.jpeg', '.png')):
+            img = Image.open(file_path)
+        
+        else:
+            logging.error(f"Unsupported file type: {file_path}")
+            return _create_blank_image()
+        
+        # Resize and convert to bytes
+        img = img.resize((800, 600), Image.LANCZOS)
+        buf = io.BytesIO()
+        img.save(buf, format="PNG")
+        return buf.getvalue()
+    
+    except Exception as e:
+        logging.error(f"Error extracting page {page_number} from {file_path}: {e}")
+        logging.error(traceback.format_exc())
+        return _create_blank_image()
+
+def _create_blank_image():
+    """
+    Create a blank white image for error cases
+    """
+    img = Image.new('RGB', (800, 600), color='white')
+    buf = io.BytesIO()
+    img.save(buf, format="PNG")
+    return buf.getvalue()
+
+def process_local_documents(config, input_dir=None, output_dir=None, confidence_threshold=0.6):
+    """
+    Process documents from local filesystem
+    """
+    # Use default input and output directories if not provided
+    input_dir = input_dir or config['paths']['input_dir']
+    output_dir = output_dir or config['paths']['output_dir']
+    
+    # Prepare output directories
+    source_dir = os.path.join(output_dir, 'source')
+    classified_dir = os.path.join(output_dir, 'classified')
+    unclassified_dir = os.path.join(output_dir, 'unclassified')
+    unprocessed_dir = os.path.join(output_dir, 'unprocessed')
+    
+    # Create directories
+    for directory in [source_dir, classified_dir, unclassified_dir, unprocessed_dir]:
+        os.makedirs(directory, exist_ok=True)
+    
+    # Initialize document classifier
+    classifier = DocumentClassifier(config)
+    
+    # Reference directory
+    reference_dir = config['paths']['reference_dir']
+    
+    # Track processed and unprocessed files
+    processed_files = []
+    unprocessed_files = []
+
+    # Process each document in local input directory
+    for fname in os.listdir(input_dir):
+        try:
+            fpath = os.path.join(input_dir, fname)
+            
+            # Skip directories and hidden files
+            if not os.path.isfile(fpath) or fname.startswith('.'):
+                continue
+
+            # Determine file type
+            file_type = os.path.splitext(fname)[1].lower()
+            
+            # Process only supported file types
+            if file_type not in ['.pdf', '.jpg', '.jpeg', '.png']:
+                # Move unprocessable files to unprocessed folder
+                unprocessed_path = os.path.join(unprocessed_dir, fname)
+                shutil.copy2(fpath, unprocessed_path)
+                logging.warning(f"Unsupported file type, moved to unprocessed: {fname}")
+                unprocessed_files.append(fpath)
+                continue
+
+            # Convert to PDF
+            pdf_path = convert_to_pdf(fpath)
+            if not pdf_path:
+                raise ValueError(f"Failed to convert {fname} to PDF")
+
+            # Copy source PDF
+            shutil.copy2(pdf_path, os.path.join(source_dir, os.path.basename(pdf_path)))
+
+            # Open PDF
+            doc = fitz.open(pdf_path)
+            total_pages = len(doc)
+
+            # Track page classifications
+            classified_pages = []
+            unclassified_pages = []
+
+            # Process each page
+            for page_num in range(total_pages):
+                try:
+                    # Extract page image
+                    page_image = extract_page_image(pdf_path, page_num)
+                    
+                    # Classify page
+                    classification = classifier.classify_document(page_image, reference_dir)
+                    
+                    # Check classification confidence
+                    if (classification['confidence'] >= confidence_threshold 
+                        and classification['main_category'] != 'unknown'):
+                        classified_pages.append({
+                            'page': page_num,
+                            'category': classification['main_category'],
+                            'subcategory': classification['subcategory'],
+                            'confidence': classification['confidence']
+                        })
+                    else:
+                        unclassified_pages.append(page_num)
+
+                except Exception as page_error:
+                    logging.error(f"Error processing page {page_num} in {fname}: {page_error}")
+                    unclassified_pages.append(page_num)
+
+            # Close original document
+            doc.close()
+
+            # Process classified pages
+            if classified_pages:
+                # Group by subcategory
+                subcategory_groups = {}
+                for page in classified_pages:
+                    key = (page['category'], page['subcategory'])
+                    if key not in subcategory_groups:
+                        subcategory_groups[key] = []
+                    subcategory_groups[key].append(page['page'])
+
+                # Create PDFs for each subcategory
+                for (main_cat, sub_cat), pages in subcategory_groups.items():
+                    # Convert page numbers to 1-based for filename
+                    page_nums_str = '_'.join(str(p+1) for p in pages)
+                    
+                    # Open original PDF
+                    doc = fitz.open(pdf_path)
+                    classified_doc = fitz.open()
+                    
+                    # Add classified pages
+                    for page_num in pages:
+                        classified_doc.insert_pdf(doc, from_page=page_num, to_page=page_num)
+                    
+                    # Sanitize original filename
+                    base_name = os.path.splitext(fname)[0]
+                    sanitized_base = sanitize_filename(base_name)
+                    
+                    # Prepare output path
+                    category_path = os.path.join(classified_dir, main_cat, sub_cat)
+                    os.makedirs(category_path, exist_ok=True)
+                    
+                    # Create output filename
+                    output_filename = f"{sanitized_base}_classified_{page_nums_str}.pdf"
+                    output_path = os.path.join(category_path, output_filename)
+                    
+                    # Save PDF
+                    classified_doc.save(output_path)
+                    classified_doc.close()
+                    doc.close()
+                    
+                    # Add to processed files
+                    processed_files.append(output_path)
+
+            # Process unclassified pages
+            if unclassified_pages:
+                # Convert page numbers to 1-based for filename
+                page_nums_str = '_'.join(str(p+1) for p in unclassified_pages)
+                
+                # Open original PDF
+                doc = fitz.open(pdf_path)
+                unclassified_doc = fitz.open()
+                
+                # Add unclassified pages
+                for page_num in unclassified_pages:
+                    unclassified_doc.insert_pdf(doc, from_page=page_num, to_page=page_num)
+                
+                # Sanitize original filename
+                base_name = os.path.splitext(fname)[0]
+                sanitized_base = sanitize_filename(base_name)
+                
+                # Save unclassified PDF
+                output_filename = f"{sanitized_base}_unclassified_{page_nums_str}.pdf"
+                output_path = os.path.join(unclassified_dir, output_filename)
+                
+                unclassified_doc.save(output_path)
+                unclassified_doc.close()
+                doc.close()
+                
+                # Add to processed files
+                processed_files.append(output_path)
+
+        except Exception as doc_error:
+            logging.error(f"Error processing document {fname}: {doc_error}")
+            logging.error(traceback.format_exc())
+            
+            # Move source document to unprocessed folder
+            unprocessed_path = os.path.join(unprocessed_dir, fname)
+            try:
+                shutil.copy2(fpath, unprocessed_path)
+                logging.info(f"Moved unprocessed document to: {unprocessed_path}")
+            except Exception as move_error:
+                logging.error(f"Could not move unprocessed document {fname}: {move_error}")
+            
+            unprocessed_files.append(fpath)
+
+    return processed_files, unprocessed_files
+
+def process_azure_documents(config, input_folder, output_dir=None, confidence_threshold=0.6):
+    """
+    Process documents from Azure Blob Storage
+    """
+    # Use default output directory if not provided
+    output_dir = output_dir or config['paths']['output_dir']
+    
+    # Prepare output directories
+    source_dir = os.path.join(output_dir, 'source')
+    classified_dir = os.path.join(output_dir, 'classified')
+    unclassified_dir = os.path.join(output_dir, 'unclassified')
+    unprocessed_dir = os.path.join(output_dir, 'unprocessed')
+    
+    # Create directories
+    for directory in [source_dir, classified_dir, unclassified_dir, unprocessed_dir]:
+        os.makedirs(directory, exist_ok=True)
+    
+    # Initialize document classifier
+    classifier = DocumentClassifier(config)
+    
+    # Reference directory
+    reference_dir = config['paths']['reference_dir']
+    
+    # Track processed and unprocessed files
+    processed_files = []
+    unprocessed_files = []
+
+    # Parse input folder
+    input_parts = input_folder.split('/')
+    if len(input_parts) < 2:
+        raise ValueError("Input folder must be in format 'container/folder'")
+    
+    # Initialize Azure Storage Manager
+    from helper import AzureStorageManager
+    storage_manager = AzureStorageManager(config)
+    
+    input_container = input_parts[0]
+    input_folder_prefix = '/'.join(input_parts[1:])
+    
+    # List blobs in the specific input folder
+    blobs = storage_manager.list_blobs(input_container, prefix=input_folder_prefix)
+    
+    # Local input directory for downloading
+    local_input_dir = os.path.join(output_dir, 'temp_input')
+    os.makedirs(local_input_dir, exist_ok=True)
+    
+    # Download blobs
+    for blob_name in blobs:
+        local_path = os.path.join(local_input_dir, os.path.basename(blob_name))
+        if storage_manager.download_blob(input_container, blob_name, local_path):
+            # Process downloaded file using local document processing
+            local_processed, local_unprocessed = process_local_documents(
+                config, 
+                input_dir=local_input_dir, 
+                output_dir=output_dir,
+                confidence_threshold=confidence_threshold
+            )
+            
+            processed_files.extend(local_processed)
+            unprocessed_files.extend(local_unprocessed)
+    
+    # Clean up temporary input directory
+    shutil.rmtree(local_input_dir, ignore_errors=True)
+    
+    return processed_files, unprocessed_files
+
+def process_documents(source='local', config_path='config.json', **kwargs):
+    """
+    Main document processing dispatcher
+    """
+    # Load configuration
+    config = load_config(config_path)
+    
+    # Determine processing method based on source
+    if source == 'local':
+        return process_local_documents(config, **kwargs)
+    elif source == 'azure':
+        return process_azure_documents(config, **kwargs)
+    else:
+        raise ValueError(f"Unsupported source: {source}")
+
+
+
+--------------------
+#help.pyp
+
+  import os
+import io
+import json
+import logging
+import shutil
+import zipfile
+from datetime import datetime, timedelta
+from azure.storage.blob import BlobServiceClient
+from azure.core.exceptions import ResourceExistsError
+
+def load_config(config_path='config.json'):
+    """
+    Load configuration from JSON file
+    """
+    try:
+        with open(config_path, 'r') as f:
+            return json.load(f)
+    except Exception as e:
+        logging.error(f"Error loading configuration: {e}")
+        raise
+
+def setup_logging(config):
+    """
+    Configure logging based on configuration
+    """
+    # Ensure output directory exists
+    output_dir = config['paths']['output_dir']
+    log_dir = os.path.join(output_dir, 'logs')
+    os.makedirs(log_dir, exist_ok=True)
+
+    # Create timestamped log filename
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    log_file = os.path.join(log_dir, f'document_classification_{timestamp}.log')
+
+    # Configure logging
+    logging.basicConfig(
+        level=getattr(logging, config['logging']['level'].upper()),
+        format='%(asctime)s - %(levelname)s: %(message)s',
+        handlers=[
+            logging.FileHandler(log_file, mode='a'),
+            logging.StreamHandler()
+        ]
+    )
+
+    # Log rotation and cleanup
+    _cleanup_old_logs(log_dir, config['logging'])
+
+    return log_file
+
+def _cleanup_old_logs(log_dir, log_config):
+    """
+    Clean up old log files based on configuration
+    """
+    try:
+        # Get all log files
+        log_files = [
+            os.path.join(log_dir, f) for f in os.listdir(log_dir) 
+            if f.startswith('document_classification_') and f.endswith('.log')
+        ]
+
+        # Sort logs by creation time
+        log_files.sort(key=os.path.getctime, reverse=True)
+
+        # Remove excess log files
+        if len(log_files) > log_config.get('max_log_files', 10):
+            for log_file in log_files[log_config.get('max_log_files', 10):]:
+                os.remove(log_file)
+
+        # Remove logs older than specified retention days
+        retention_days = log_config.get('log_retention_days', 30)
+        cutoff_date = datetime.now() - timedelta(days=retention_days)
+        
+        for log_file in log_files:
+            file_created = datetime.fromtimestamp(os.path.getctime(log_file))
+            if file_created < cutoff_date:
+                os.remove(log_file)
+
+    except Exception as e:
+        logging.warning(f"Error during log cleanup: {e}")
+
+def ensure_container_exists(connection_string, container_name):
+    """
+    Ensure the specified Azure Blob Storage container exists
+    """
+    try:
+        blob_service_client = BlobServiceClient.from_connection_string(connection_string)
+        container_client = blob_service_client.get_container_client(container_name)
+        
+        # Try to create container if it doesn't exist
+        try:
+            container_client.create_container()
+            logging.info(f"Container {container_name} created successfully")
+        except ResourceExistsError:
+            logging.info(f"Container {container_name} already exists")
+        
+        return True
+    except Exception as e:
+        logging.error(f"Error ensuring container {container_name} exists: {e}")
+        return False
+
+class AzureStorageManager:
+    def __init__(self, config):
+        """
+        Initialize Azure Storage client
+        """
+        self.config = config
+        self.blob_service_client = BlobServiceClient.from_connection_string(
+            config['azure_storage']['connection_string']
+        )
+
+    def list_blobs(self, container_name, prefix=None):
+        """
+        List blobs in a container, optionally filtered by prefix
+        """
+        try:
+            container_client = self.blob_service_client.get_container_client(container_name)
+            
+            # If prefix is provided, list blobs with that prefix
+            if prefix:
+                blobs = [blob.name for blob in container_client.list_blobs(name_starts_with=prefix)]
+            else:
+                blobs = [blob.name for blob in container_client.list_blobs()]
+            
+            return blobs
+        except Exception as e:
+            logging.error(f"Error listing blobs in {container_name}: {e}")
+            return []
+
+    def download_blob(self, container_name, blob_name, local_path):
+        """
+        Download a blob to a local file
+        """
+        try:
+            blob_client = self.blob_service_client.get_blob_client(
+                container=container_name, 
+                blob=blob_name
+            )
+            with open(local_path, "wb") as file:
+                blob_data = blob_client.download_blob()
+                blob_data.readinto(file)
+            return True
+        except Exception as e:
+            logging.error(f"Error downloading {blob_name}: {e}")
+            return False
+
+    def upload_blob(self, container_name, blob_name, local_path):
+        """
+        Upload a local file to blob storage
+        """
+        try:
+            blob_client = self.blob_service_client.get_blob_client(
+                container=container_name, 
+                blob=blob_name
+            )
+            with open(local_path, "rb") as data:
+                blob_client.upload_blob(data, overwrite=True)
+            return True
+        except Exception as e:
+            logging.error(f"Error uploading {blob_name}: {e}")
+            return False
+
+    def prepare_reference_documents(self):
+        """
+        Download reference documents from Azure Blob Storage
+        """
+        try:
+            # Get reference container name
+            reference_container = self.config['azure_storage']['reference_container']
+            
+            # Create local reference directory
+            reference_dir = self.config['paths']['reference_dir']
+            os.makedirs(reference_dir, exist_ok=True)
+            
+            # List blobs in reference container
+            reference_blobs = self.list_blobs(reference_container)
+            
+            # Download and organize reference documents
+            for blob_name in reference_blobs:
+                # Create local file path preserving original structure
+                local_file_path = os.path.join(reference_dir, *blob_name.split('/'))
+                
+                # Ensure the directory for the file exists
+                os.makedirs(os.path.dirname(local_file_path), exist_ok=True)
+                
+                # Download blob
+                if self.download_blob(reference_container, blob_name, local_file_path):
+                    logging.info(f"Downloaded reference document: {blob_name}")
+                else:
+                    logging.warning(f"Failed to download reference document: {blob_name}")
+            
+            logging.info("Reference document preparation completed")
+            return True
+        
+        except Exception as e:
+            logging.error(f"Error preparing reference documents: {e}")
+            return False
+
+    def create_archive(self, processed_files, unprocessed_files):
+        """
+        Create a comprehensive archive of all processed and unprocessed documents
+        """
+        try:
+            # Create a BytesIO object to store the ZIP
+            archive_buffer = io.BytesIO()
+            
+            with zipfile.ZipFile(archive_buffer, 'w', zipfile.ZIP_DEFLATED) as zipf:
+                # Add processed files
+                for file_path in processed_files:
+                    filename = os.path.basename(file_path)
+                    zipf.write(file_path, arcname=f"processed/{filename}")
+                    logging.info(f"Adding processed file to archive: {filename}")
+                
+                # Add unprocessed files
+                for file_path in unprocessed_files:
+                    filename = os.path.basename(file_path)
+                    zipf.write(file_path, arcname=f"unprocessed/{filename}")
+                    logging.info(f"Adding unprocessed file to archive: {filename}")
+            
+            # Prepare archive name
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            archive_name = f"document_archive_{timestamp}.zip"
+            
+            # Upload archive to storage
+            archive_buffer.seek(0)
+            archive_container = self.config['azure_storage']['archive_container']
+            
+            blob_client = self.blob_service_client.get_blob_client(
+                container=archive_container, 
+                blob=archive_name
+            )
+            blob_client.upload_blob(archive_buffer.getvalue())
+            
+            logging.info(f"Created archive: {archive_name}")
+            return archive_name
+        
+        except Exception as e:
+            logging.error(f"Error creating archive: {e}")
+            return None
+
+    def delete_multiple_blobs(self, blob_names, container_name):
+        """
+        Delete multiple blobs from a container
+        """
+        try:
+            container_client = self.blob_service_client.get_container_client(container_name)
+            
+            # If no blobs provided, attempt to delete all blobs in the container
+            if not blob_names:
+                blob_names = [blob.name for blob in container_client.list_blobs()]
+            
+            deleted_count = 0
+            total_blobs = len(blob_names)
+            
+            for blob_name in blob_names:
+                try:
+                    blob_client = container_client.get_blob_client(blob_name)
+                    blob_client.delete_blob()
+                    deleted_count += 1
+                    logging.info(f"Deleted blob: {blob_name}")
+                except Exception as blob_error:
+                    logging.warning(f"Could not delete blob {blob_name}: {blob_error}")
+            
+            logging.info(f"Successfully deleted {deleted_count}/{total_blobs} blobs from container {container_name}")
+            
+            return deleted_count == total_blobs
+        except Exception as e:
+            logging.error(f"Error deleting blobs from container {container_name}: {e}")
+            return False
+
+
+  -----
+
+  main.py
+
+
+
+  import os
+import argparse
+import logging
+import shutil
+from document_process import process_documents
+from helper import (
+    load_config, 
+    setup_logging, 
+    AzureStorageManager, 
+    ensure_container_exists
+)
+
+def parse_arguments():
+    """
+    Parse command-line arguments for document processing
+    """
+    parser = argparse.ArgumentParser(description='Document Classification Pipeline')
+    parser.add_argument(
+        '--source', 
+        choices=['local', 'azure'], 
+        default='local',
+        help='Source of documents: local filesystem or Azure Blob Storage'
+    )
+    parser.add_argument(
+        '--inputfolder', 
+        required=True,
+        help='Input folder path (local directory or Azure Blob Storage container/folder)'
+    )
+    parser.add_argument(
+        '--output', 
+        default=None,
+        help='Path to output directory'
+    )
+    parser.add_argument(
+        '--config', 
+        default='config.json', 
+        help='Path to configuration file'
+    )
+    parser.add_argument(
+        '--confidence', 
+        type=float, 
+        default=0.6, 
+        help='Confidence threshold for classification'
+    )
+    parser.add_argument(
+        '--no-archive', 
+        action='store_true',
+        help='Disable archiving of processed files'
+    )
+    return parser.parse_args()
+
+def upload_output_to_azure(storage_manager, output_dir, config):
+    """
+    Upload output directory to Azure Blob Storage
+    """
+    output_container = config['azure_storage']['output_container']
+    
+    # Upload classified, unclassified, source, and logs
+    output_subdirs = ['classified', 'unclassified', 'source', 'logs']
+    
+    for subdir in output_subdirs:
+        subdir_path = os.path.join(output_dir, subdir)
+        if os.path.exists(subdir_path):
+            # Walk through directory and upload files
+            for root, _, files in os.walk(subdir_path):
+                for file in files:
+                    local_file_path = os.path.join(root, file)
+                    
+                    # Create blob path maintaining directory structure
+                    relative_path = os.path.relpath(local_file_path, output_dir)
+                    blob_name = os.path.join(subdir, relative_path)
+                    
+                    # Upload to Azure Blob Storage
+                    storage_manager.upload_blob(output_container, blob_name, local_file_path)
+                    logging.info(f"Uploaded {local_file_path} to {blob_name}")
+
+def main():
+    # Parse arguments
+    args = parse_arguments()
+    
+    try:
+        # Load configuration
+        config = load_config(args.config)
+        
+        # Setup logging
+        setup_logging(config)
+        
+        # Process based on source
+        if args.source == 'local':
+            # Existing local processing logic
+            processed_files, unprocessed_files = process_documents(
+                source='local',
+                config_path=args.config,
+                input_dir=args.inputfolder,
+                output_dir=args.output,
+                confidence_threshold=args.confidence
+            )
+        
+        elif args.source == 'azure':
+            # Initialize Azure Storage Manager
+            storage_manager = AzureStorageManager(config)
+            
+            # Parse input folder
+            input_parts = args.inputfolder.split('/')
+            if len(input_parts) < 2:
+                input_container = config['azure_storage']['input_container']
+                input_folder = input_parts[0]
+            else:
+                input_container = input_parts[0]
+                input_folder = '/'.join(input_parts[1:])
+            
+            # Output and archive containers from config
+            output_container = config['azure_storage']['output_container']
+            archive_container = config['azure_storage']['archive_container']
+            
+            # List blobs in input container/folder
+            blobs = storage_manager.list_blobs(input_container, prefix=input_folder)
+            
+            # Temporary local input directory
+            local_input_dir = os.path.join(output_dir, 'temp_input')
+            os.makedirs(local_input_dir, exist_ok=True)
+            
+            # Download blobs
+            for blob_name in blobs:
+                local_path = os.path.join(local_input_dir, os.path.basename(blob_name))
+                storage_manager.download_blob(input_container, blob_name, local_path)
+            
+            # Process documents locally
+            processed_files, unprocessed_files = process_documents(
+                source='local',
+                config_path=args.config,
+                input_dir=local_input_dir,
+                output_dir=output_dir,
+                confidence_threshold=args.confidence
+            )
+            
+            # Upload processed files to Azure output container
+            output_subdirs = ['classified', 'unclassified', 'source']
+            for subdir in output_subdirs:
+                subdir_path = os.path.join(output_dir, subdir)
+                if os.path.exists(subdir_path):
+                    for root, _, files in os.walk(subdir_path):
+                        for file in files:
+                            local_file_path = os.path.join(root, file)
+                            blob_name = os.path.join(subdir, os.path.relpath(local_file_path, subdir_path))
+                            storage_manager.upload_blob(output_container, blob_name, local_file_path)
+            
+            # Create archive in archive container
+            archive_name = storage_manager.create_archive(
+                processed_files + unprocessed_files, 
+                []  # Empty list since files are combined
+            )
+            
+            # Clean up input container
+            storage_manager.delete_multiple_blobs(blobs, input_container)
+        
+        logging.info("Document processing completed successfully")
+    
+    except Exception as e:
+        logging.critical(f"Critical error in document processing: {e}")
+        import traceback
+        traceback.print_exc()
+        raise
+
+if __name__ == "__main__":
+    main()
