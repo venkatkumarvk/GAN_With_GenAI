@@ -473,6 +473,8 @@ def process_azure_documents(config, input_folder, confidence_threshold=0.6, arch
             except Exception as archive_error:
                 logging.error(f"Error creating archive: {archive_error}")
 
+
+
         # Upload processed documents to output container
         for doc in processed_files:
             # Open the original PDF
@@ -530,6 +532,40 @@ def process_azure_documents(config, input_folder, confidence_threshold=0.6, arch
                 temp_unclassified_path = os.path.join(local_input_dir, f"{base_filename}_unclassified.pdf")
                 unclassified_doc.save(temp_unclassified_path)
                 unclassified_doc.close()
+
+    # Upload source files to output container
+    for doc in processed_files:
+        # Remove .pdf extension from base filename
+        base_filename = os.path.splitext(os.path.basename(doc['original_path']))[0]
+        
+        # Create source blob name
+        source_blob_name = f"source/{base_filename}.pdf"
+        
+        # Upload source PDF to output container
+        storage_manager.upload_blob(
+            output_container, 
+            source_blob_name, 
+            doc['original_path']
+        )
+        total_source_files += 1
+    
+    # Upload unprocessed files to output container
+    for blob_name in unprocessed_files:
+        # Create unprocessed blob name
+        unprocessed_blob_name = f"unprocessed/{os.path.basename(blob_name)}"
+        
+        # Create a text file with unprocessed blob information
+        unprocessed_file_path = os.path.join(local_input_dir, f"unprocessed_{os.path.basename(blob_name)}.txt")
+        with open(unprocessed_file_path, 'w') as f:
+            f.write(f"Unprocessed blob: {blob_name}")
+        
+        # Upload unprocessed file to output container
+        storage_manager.upload_blob(
+            output_container, 
+            unprocessed_blob_name, 
+            unprocessed_file_path
+        )
+        total_unprocessed_files += 1
                 
                 # Upload unclassified PDF to output container
                 storage_manager.upload_blob(
