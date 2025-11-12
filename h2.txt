@@ -671,12 +671,11 @@ class AzureStorageManager:
 
   main.py
 
-
-
-  import os
+import os
 import argparse
 import logging
 import shutil
+import traceback
 from document_process import process_documents
 from helper import (
     load_config, 
@@ -724,32 +723,10 @@ def parse_arguments():
     )
     return parser.parse_args()
 
-def upload_output_to_azure(storage_manager, output_dir, config):
-    """
-    Upload output directory to Azure Blob Storage
-    """
-    output_container = config['azure_storage']['output_container']
-    
-    # Upload classified, unclassified, source, and logs
-    output_subdirs = ['classified', 'unclassified', 'source', 'logs']
-    
-    for subdir in output_subdirs:
-        subdir_path = os.path.join(output_dir, subdir)
-        if os.path.exists(subdir_path):
-            # Walk through directory and upload files
-            for root, _, files in os.walk(subdir_path):
-                for file in files:
-                    local_file_path = os.path.join(root, file)
-                    
-                    # Create blob path maintaining directory structure
-                    relative_path = os.path.relpath(local_file_path, output_dir)
-                    blob_name = os.path.join(subdir, relative_path)
-                    
-                    # Upload to Azure Blob Storage
-                    storage_manager.upload_blob(output_container, blob_name, local_file_path)
-                    logging.info(f"Uploaded {local_file_path} to {blob_name}")
-
 def main():
+    """
+    Main entry point for document processing
+    """
     # Parse arguments
     args = parse_arguments()
     
@@ -760,14 +737,23 @@ def main():
         # Setup logging
         setup_logging(config)
         
+        # Determine archiving setting
+        archive_enabled = config.get('archiving', {}).get('enabled', True)
+        if args.no_archive:
+            archive_enabled = False
+        
+        # Determine output directory
+        output_dir = args.output or config['paths']['output_dir']
+        os.makedirs(output_dir, exist_ok=True)
+        
         # Process based on source
         if args.source == 'local':
-            # Existing local processing logic
+            # Process local documents
             processed_files, unprocessed_files = process_documents(
                 source='local',
                 config_path=args.config,
                 input_dir=args.inputfolder,
-                output_dir=args.output,
+                output_dir=output_dir,
                 confidence_threshold=args.confidence
             )
         
@@ -820,11 +806,15 @@ def main():
                             blob_name = os.path.join(subdir, os.path.relpath(local_file_path, subdir_path))
                             storage_manager.upload_blob(output_container, blob_name, local_file_path)
             
-            # Create archive in archive container
-            archive_name = storage_manager.create_archive(
-                processed_files + unprocessed_files, 
-                []  # Empty list since files are combined
-            )
+            # Create archive if enabled
+            if archive_enabled:
+                archive_name = storage_manager.create_archive(
+                    processed_files + unprocessed_files, 
+                    []  # Empty list since files are combined
+                )
+            
+            # Clean up local temporary directory
+            shutil.rmtree(local_input_dir, ignore_errors=True)
             
             # Clean up input container
             storage_manager.delete_multiple_blobs(blobs, input_container)
@@ -833,7 +823,6 @@ def main():
     
     except Exception as e:
         logging.critical(f"Critical error in document processing: {e}")
-        import traceback
         traceback.print_exc()
         raise
 
