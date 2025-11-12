@@ -1,4 +1,4 @@
-#document.py
+#docup.py
 
 import os
 import io
@@ -131,15 +131,15 @@ def _create_blank_image():
     img.save(buf, format="PNG")
     return buf.getvalue()
 
-def process_local_documents(config, input_dir=None, output_dir=None, confidence_threshold=0.6):
+def process_local_documents(config, input_folder=None, confidence_threshold=0.6):
     """
     Process documents from local filesystem
     """
-    # Use default input and output directories if not provided
-    input_dir = input_dir or config['paths']['input_dir']
-    output_dir = output_dir or config['paths']['output_dir']
+    # Use paths from configuration for local source
+    input_dir = input_folder or config['paths']['input_dir']
+    output_dir = config['paths']['output_dir']
     
-    # Prepare output directories
+    # Create output directories
     source_dir = os.path.join(output_dir, 'source')
     classified_dir = os.path.join(output_dir, 'classified')
     unclassified_dir = os.path.join(output_dir, 'unclassified')
@@ -263,9 +263,6 @@ def process_local_documents(config, input_dir=None, output_dir=None, confidence_
                     classified_doc.save(output_path)
                     classified_doc.close()
                     doc.close()
-                    
-                    # Add to processed files
-                    processed_files.append(output_path)
 
             # Process unclassified pages
             if unclassified_pages:
@@ -291,9 +288,6 @@ def process_local_documents(config, input_dir=None, output_dir=None, confidence_
                 unclassified_doc.save(output_path)
                 unclassified_doc.close()
                 doc.close()
-                
-                # Add to processed files
-                processed_files.append(output_path)
 
         except Exception as doc_error:
             logging.error(f"Error processing document {fname}: {doc_error}")
@@ -310,23 +304,19 @@ def process_local_documents(config, input_dir=None, output_dir=None, confidence_
             unprocessed_files.append(fpath)
 
     return processed_files, unprocessed_files
-
-def process_azure_documents(config, input_folder, output_dir=None, confidence_threshold=0.6):
+def process_azure_documents(config, input_folder, confidence_threshold=0.6):
     """
-    Process documents from Azure Blob Storage
+    Process documents from Azure Blob Storage with completely separate logic
     """
-    # Use default output directory if not provided
-    output_dir = output_dir or config['paths']['output_dir']
+    from helper import AzureStorageManager
     
-    # Prepare output directories
-    source_dir = os.path.join(output_dir, 'source')
-    classified_dir = os.path.join(output_dir, 'classified')
-    unclassified_dir = os.path.join(output_dir, 'unclassified')
-    unprocessed_dir = os.path.join(output_dir, 'unprocessed')
+    # Use Azure storage configuration for Azure source
+    input_container = config['azure_storage']['input_container']
+    output_container = config['azure_storage']['output_container']
+    archive_container = config['azure_storage']['archive_container']
     
-    # Create directories
-    for directory in [source_dir, classified_dir, unclassified_dir, unprocessed_dir]:
-        os.makedirs(directory, exist_ok=True)
+    # Initialize Azure Storage Manager
+    storage_manager = AzureStorageManager(config)
     
     # Initialize document classifier
     classifier = DocumentClassifier(config)
@@ -334,47 +324,97 @@ def process_azure_documents(config, input_folder, output_dir=None, confidence_th
     # Reference directory
     reference_dir = config['paths']['reference_dir']
     
+    # List blobs in input container/folder
+    blobs = storage_manager.list_blobs(input_container, prefix=input_folder)
+    
+    # Temporary local input directory
+    local_input_dir = os.path.join(os.getcwd(), 'temp_input')
+    os.makedirs(local_input_dir, exist_ok=True)
+    
     # Track processed and unprocessed files
     processed_files = []
     unprocessed_files = []
 
-    # Parse input folder
-    input_parts = input_folder.split('/')
-    if len(input_parts) < 2:
-        raise ValueError("Input folder must be in format 'container/folder'")
-    
-    # Initialize Azure Storage Manager
-    from helper import AzureStorageManager
-    storage_manager = AzureStorageManager(config)
-    
-    input_container = input_parts[0]
-    input_folder_prefix = '/'.join(input_parts[1:])
-    
-    # List blobs in the specific input folder
-    blobs = storage_manager.list_blobs(input_container, prefix=input_folder_prefix)
-    
-    # Local input directory for downloading
-    local_input_dir = os.path.join(output_dir, 'temp_input')
-    os.makedirs(local_input_dir, exist_ok=True)
-    
-    # Download blobs
-    for blob_name in blobs:
-        local_path = os.path.join(local_input_dir, os.path.basename(blob_name))
-        if storage_manager.download_blob(input_container, blob_name, local_path):
-            # Process downloaded file using local document processing
-            local_processed, local_unprocessed = process_local_documents(
-                config, 
-                input_dir=local_input_dir, 
-                output_dir=output_dir,
-                confidence_threshold=confidence_threshold
-            )
-            
-            processed_files.extend(local_processed)
-            unprocessed_files.extend(local_unprocessed)
-    
-    # Clean up temporary input directory
-    shutil.rmtree(local_input_dir, ignore_errors=True)
-    
+    try:
+        # Download blobs
+        for blob_name in blobs:
+            try:
+                # Download blob
+                local_path = os.path.join(local_input_dir, os.path.basename(blob_name))
+                if not storage_manager.download_blob(input_container, blob_name, local_path):
+                    logging.error(f"Failed to download blob: {blob_name}")
+                    unprocessed_files.append(blob_name)
+                    continue
+
+                # Determine file type
+                file_type = os.path.splitext(local_path)[1].lower()
+                
+                # Process only supported file types
+                if file_type not in ['.pdf', '.jpg', '.jpeg', '.png']:
+                    logging.warning(f"Unsupported file type: {blob_name}")
+                    unprocessed_files.append(blob_name)
+                    continue
+
+                # Convert to PDF if needed
+                pdf_path = convert_to_pdf(local_path)
+                if not pdf_path:
+                    logging.error(f"Failed to convert {blob_name} to PDF")
+                    unprocessed_files.append(blob_name)
+                    continue
+
+                # Open PDF
+                doc = fitz.open(pdf_path)
+                total_pages = len(doc)
+
+                # Track page classifications for this document
+                document_classified_pages = []
+                document_unclassified_pages = []
+
+                # Process each page
+                for page_num in range(total_pages):
+                    try:
+                        # Extract page image
+                        page_image = extract_page_image(pdf_path, page_num)
+                        
+                        # Classify page
+                        classification = classifier.classify_document(page_image, reference_dir)
+                        
+                        # Check classification confidence
+                        if (classification['confidence'] >= confidence_threshold 
+                            and classification['main_category'] != 'unknown'):
+                            document_classified_pages.append({
+                                'page': page_num,
+                                'category': classification['main_category'],
+                                'subcategory': classification['subcategory'],
+                                'confidence': classification['confidence']
+                            })
+                        else:
+                            document_unclassified_pages.append(page_num)
+
+                    except Exception as page_error:
+                        logging.error(f"Error processing page {page_num} in {blob_name}: {page_error}")
+                        document_unclassified_pages.append(page_num)
+
+                # Close original document
+                doc.close()
+
+                # Add to processed files if any pages were processed
+                if document_classified_pages or document_unclassified_pages:
+                    processed_files.append({
+                        'original_path': pdf_path,
+                        'original_blob': blob_name,
+                        'classified_pages': document_classified_pages,
+                        'unclassified_pages': document_unclassified_pages
+                    })
+
+            except Exception as doc_error:
+                logging.error(f"Error processing blob {blob_name}: {doc_error}")
+                unprocessed_files.append(blob_name)
+
+    finally:
+        # Always clean up temporary input directory
+        shutil.rmtree(local_input_dir, ignore_errors=True)
+
     return processed_files, unprocessed_files
 
 def process_documents(source='local', config_path='config.json', **kwargs):
@@ -391,8 +431,6 @@ def process_documents(source='local', config_path='config.json', **kwargs):
         return process_azure_documents(config, **kwargs)
     else:
         raise ValueError(f"Unsupported source: {source}")
-
-
 
 --------------------
 #help.pyp
@@ -670,19 +708,12 @@ class AzureStorageManager:
   -----
 
   main.py
-
 import os
 import argparse
 import logging
-import shutil
 import traceback
-from document_process import process_documents
-from helper import (
-    load_config, 
-    setup_logging, 
-    AzureStorageManager, 
-    ensure_container_exists
-)
+from document_process import process_local_documents, process_azure_documents
+from helper import load_config, setup_logging
 
 def parse_arguments():
     """
@@ -698,12 +729,7 @@ def parse_arguments():
     parser.add_argument(
         '--inputfolder', 
         required=True,
-        help='Input folder path (local directory or Azure Blob Storage container/folder)'
-    )
-    parser.add_argument(
-        '--output', 
-        default=None,
-        help='Path to output directory'
+        help='Input folder path'
     )
     parser.add_argument(
         '--config', 
@@ -715,11 +741,6 @@ def parse_arguments():
         type=float, 
         default=0.6, 
         help='Confidence threshold for classification'
-    )
-    parser.add_argument(
-        '--no-archive', 
-        action='store_true',
-        help='Disable archiving of processed files'
     )
     return parser.parse_args()
 
@@ -737,87 +758,20 @@ def main():
         # Setup logging
         setup_logging(config)
         
-        # Determine archiving setting
-        archive_enabled = config.get('archiving', {}).get('enabled', True)
-        if args.no_archive:
-            archive_enabled = False
-        
-        # Determine output directory
-        output_dir = args.output or config['paths']['output_dir']
-        os.makedirs(output_dir, exist_ok=True)
-        
-        # Process based on source
+        # Process documents based on source
         if args.source == 'local':
-            # Process local documents
-            processed_files, unprocessed_files = process_documents(
-                source='local',
-                config_path=args.config,
-                input_dir=args.inputfolder,
-                output_dir=output_dir,
+            processed_files, unprocessed_files = process_local_documents(
+                config,
+                input_folder=args.inputfolder,
                 confidence_threshold=args.confidence
             )
         
         elif args.source == 'azure':
-            # Initialize Azure Storage Manager
-            storage_manager = AzureStorageManager(config)
-            
-            # Parse input folder
-            input_parts = args.inputfolder.split('/')
-            if len(input_parts) < 2:
-                input_container = config['azure_storage']['input_container']
-                input_folder = input_parts[0]
-            else:
-                input_container = input_parts[0]
-                input_folder = '/'.join(input_parts[1:])
-            
-            # Output and archive containers from config
-            output_container = config['azure_storage']['output_container']
-            archive_container = config['azure_storage']['archive_container']
-            
-            # List blobs in input container/folder
-            blobs = storage_manager.list_blobs(input_container, prefix=input_folder)
-            
-            # Temporary local input directory
-            local_input_dir = os.path.join(output_dir, 'temp_input')
-            os.makedirs(local_input_dir, exist_ok=True)
-            
-            # Download blobs
-            for blob_name in blobs:
-                local_path = os.path.join(local_input_dir, os.path.basename(blob_name))
-                storage_manager.download_blob(input_container, blob_name, local_path)
-            
-            # Process documents locally
-            processed_files, unprocessed_files = process_documents(
-                source='local',
-                config_path=args.config,
-                input_dir=local_input_dir,
-                output_dir=output_dir,
+            processed_files, unprocessed_files = process_azure_documents(
+                config,
+                input_folder=args.inputfolder,
                 confidence_threshold=args.confidence
             )
-            
-            # Upload processed files to Azure output container
-            output_subdirs = ['classified', 'unclassified', 'source']
-            for subdir in output_subdirs:
-                subdir_path = os.path.join(output_dir, subdir)
-                if os.path.exists(subdir_path):
-                    for root, _, files in os.walk(subdir_path):
-                        for file in files:
-                            local_file_path = os.path.join(root, file)
-                            blob_name = os.path.join(subdir, os.path.relpath(local_file_path, subdir_path))
-                            storage_manager.upload_blob(output_container, blob_name, local_file_path)
-            
-            # Create archive if enabled
-            if archive_enabled:
-                archive_name = storage_manager.create_archive(
-                    processed_files + unprocessed_files, 
-                    []  # Empty list since files are combined
-                )
-            
-            # Clean up local temporary directory
-            shutil.rmtree(local_input_dir, ignore_errors=True)
-            
-            # Clean up input container
-            storage_manager.delete_multiple_blobs(blobs, input_container)
         
         logging.info("Document processing completed successfully")
     
