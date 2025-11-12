@@ -1,0 +1,639 @@
+{
+    "azure_openai": {
+        "api_key": "YOUR_AZURE_OPENAI_KEY",
+        "endpoint": "https://your-resource-name.openai.azure.com/",
+        "deployment_name": "your-gpt-4o-deployment-name",
+        "api_version": "2024-02-15-preview"
+    },
+    "azure_storage": {
+        "connection_string": "YOUR_AZURE_STORAGE_CONNECTION_STRING",
+        "input_container": "document-input",
+        "output_container": "document-output",
+        "reference_container": "document-reference"
+    },
+    "paths": {
+        "input_dir": "./input",
+        "output_dir": "./output",
+        "reference_dir": "./reference"
+    },
+    "categories": {
+        "medical": [
+            "insurance_claim", 
+            "prescription", 
+            "medical_report"
+        ],
+        "financial": [
+            "invoice", 
+            "bank_statement", 
+            "tax_document"
+        ],
+        "legal": [
+            "contract", 
+            "agreement", 
+            "legal_notice"
+        ]
+    },
+    "classification": {
+        "confidence_threshold": 0.6
+    },
+    "token_pricing": {
+        "gpt-4o": {
+            "input": {
+                "price_per_million": 2.50,
+                "description": "Input token pricing"
+            },
+            "output": {
+                "price_per_million": 10.00,
+                "description": "Output token pricing"
+            },
+            "cached_input": {
+                "price_per_million": 1.25,
+                "description": "Cached input token pricing"
+            }
+        }
+    }
+}
+
+
+-----------------------------
+
+
+  helper.py
+
+
+  import os
+import json
+import logging
+from datetime import datetime
+from openai import AzureOpenAI
+from azure.storage.blob import BlobServiceClient
+
+def load_config(config_path="config.json"):
+    """
+    Load configuration from JSON file
+    """
+    try:
+        with open(config_path, "r") as f:
+            cfg = json.load(f)
+        return cfg
+    except FileNotFoundError:
+        logging.error(f"Config file not found: {config_path}")
+        raise
+    except json.JSONDecodeError:
+        logging.error(f"Invalid JSON in config file: {config_path}")
+        raise
+
+def setup_logging(log_dir='logs'):
+    """
+    Configure logging with timestamped log file
+    """
+    # Ensure log directory exists
+    os.makedirs(log_dir, exist_ok=True)
+    
+    # Create timestamped log filename
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    log_file = os.path.join(log_dir, f'documentclassification_{timestamp}.log')
+    
+    # Configure logging
+    logging.basicConfig(
+        level=logging.INFO, 
+        format='%(asctime)s - %(levelname)s: %(message)s',
+        handlers=[
+            logging.FileHandler(log_file, mode='a'),
+            logging.StreamHandler()
+        ]
+    )
+    
+    logging.info(f"Log file created: {log_file}")
+    return log_file
+
+def calculate_azure_openai_cost(input_tokens, output_tokens, cfg, model='gpt-4o', use_cached=False):
+    """
+    Calculate the cost of Azure OpenAI API usage
+    """
+    try:
+        pricing = cfg['token_pricing'].get(model, cfg['token_pricing']['gpt-4o'])
+        
+        # Calculate input token cost
+        input_cost = (input_tokens / 1_000_000) * (
+            pricing['cached_input']['price_per_million'] if use_cached 
+            else pricing['input']['price_per_million']
+        )
+        
+        # Calculate output token cost
+        output_cost = (output_tokens / 1_000_000) * pricing['output']['price_per_million']
+        
+        # Total cost
+        total_cost = input_cost + output_cost
+        
+        return {
+            'model': model,
+            'input_tokens': input_tokens,
+            'output_tokens': output_tokens,
+            'input_cost': round(input_cost, 4),
+            'output_cost': round(output_cost, 4),
+            'total_cost': round(total_cost, 4),
+            'use_cached': use_cached
+        }
+    except Exception as e:
+        logging.error(f"Token cost calculation error: {e}")
+        return {
+            'model': model,
+            'input_tokens': input_tokens,
+            'output_tokens': output_tokens,
+            'input_cost': 0,
+            'output_cost': 0,
+            'total_cost': 0,
+            'error': str(e)
+        }
+
+def get_azure_client(cfg):
+    """
+    Initialize Azure OpenAI client 
+    """
+    try:
+        client = AzureOpenAI(
+            api_key=cfg["azure_openai"]["api_key"],
+            api_version=cfg["azure_openai"]["api_version"],
+            azure_endpoint=cfg["azure_openai"]["endpoint"]
+        )
+        return client, cfg["azure_openai"]["deployment_name"]
+    except Exception as e:
+        logging.critical(f"Azure client initialization error: {e}")
+        raise
+
+def download_azure_blobs(cfg, container_name, local_dir):
+    """
+    Download blobs from an Azure Storage container to local directory
+    """
+    try:
+        blob_service_client = BlobServiceClient.from_connection_string(
+            cfg['azure_storage']['connection_string']
+        )
+        container_client = blob_service_client.get_container_client(container_name)
+        
+        # Ensure local directory exists
+        os.makedirs(local_dir, exist_ok=True)
+        
+        # List and download blobs
+        downloaded_files = 0
+        for blob in container_client.list_blobs():
+            blob_client = container_client.get_blob_client(blob.name)
+            local_file_path = os.path.join(local_dir, blob.name)
+            
+            # Create subdirectories if needed
+            os.makedirs(os.path.dirname(local_file_path), exist_ok=True)
+            
+            # Download blob
+            with open(local_file_path, "wb") as download_file:
+                download_file.write(blob_client.download_blob().readall())
+            
+            downloaded_files += 1
+            logging.info(f"Downloaded: {blob.name}")
+        
+        logging.info(f"Total files downloaded: {downloaded_files}")
+        return downloaded_files
+    
+    except Exception as e:
+        logging.error(f"Azure Blob download error: {e}")
+        raise
+
+def upload_azure_blobs(cfg, local_dir, container_name):
+    """
+    Upload files from local directory to Azure Storage container
+    """
+    try:
+        blob_service_client = BlobServiceClient.from_connection_string(
+            cfg['azure_storage']['connection_string']
+        )
+        container_client = blob_service_client.get_container_client(container_name)
+        
+        # Walk through local directory
+        uploaded_files = 0
+        for root, _, files in os.walk(local_dir):
+            for file in files:
+                local_path = os.path.join(root, file)
+                
+                # Create blob path (preserve directory structure)
+                relative_path = os.path.relpath(local_path, local_dir)
+                blob_name = relative_path
+                
+                # Upload blob
+                blob_client = container_client.get_blob_client(blob_name)
+                with open(local_path, "rb") as data:
+                    blob_client.upload_blob(data, overwrite=True)
+                
+                uploaded_files += 1
+                logging.info(f"Uploaded: {blob_name}")
+        
+        logging.info(f"Total files uploaded: {uploaded_files}")
+        return uploaded_files
+    
+    except Exception as e:
+        logging.error(f"Azure Blob upload error: {e}")
+        raise
+
+
+-----
+
+  document.py
+
+  import os
+import io
+import json
+import base64
+import shutil
+import logging
+import traceback
+import fitz  # PyMuPDF
+from PIL import Image
+from datetime import datetime
+
+from helper import (
+    load_config, 
+    setup_logging,
+    get_azure_client, 
+    calculate_azure_openai_cost
+)
+
+def convert_to_pdf(input_file):
+    """
+    Convert various file types to PDF
+    """
+    try:
+        # Get file extension
+        _, ext = os.path.splitext(input_file)
+        ext = ext.lower()
+
+        # PDF files are already in the right format
+        if ext == '.pdf':
+            return input_file
+
+        # Image files conversion
+        if ext in ['.jpg', '.jpeg', '.png']:
+            img = Image.open(input_file)
+            pdf_path = input_file.replace(ext, '.pdf')
+            img.save(pdf_path, 'PDF', resolution=100.0)
+            return pdf_path
+
+        # For other file types like .doc, .docx, use PyMuPDF
+        try:
+            doc = fitz.open(input_file)
+            pdf_path = input_file.replace(ext, '.pdf')
+            doc.save(pdf_path)
+            doc.close()
+            return pdf_path
+        except Exception as conversion_error:
+            logging.error(f"Conversion error for {input_file}: {conversion_error}")
+            return None
+
+    except Exception as e:
+        logging.error(f"PDF conversion error for {input_file}: {e}")
+        return None
+
+def classify_page(page_bytes, client, deployment_name, cfg):
+    """
+    Classify a single page using Azure OpenAI
+    """
+    try:
+        # Preprocess image
+        base64_image = base64.b64encode(page_bytes).decode('utf-8')
+
+        # Prepare classification prompt
+        prompt = """
+        You are an advanced document classifier. 
+        Analyze the document page and classify it based on its content.
+        
+        Available Categories:
+        - Medical: insurance_claim, prescription, medical_report
+        - Financial: invoice, bank_statement, tax_document
+        - Legal: contract, agreement, legal_notice
+        
+        Provide your classification in JSON format:
+        {
+            "main_category": "exact main category or 'unknown'",
+            "subcategory": "exact subcategory or 'unknown'",
+            "confidence_score": 0.0-1.0,
+            "reasoning": "Explanation of classification decision"
+        }
+        """
+
+        # Make API call
+        response = client.chat.completions.create(
+            model=deployment_name,
+            messages=[
+                {"role": "system", "content": prompt},
+                {
+                    "role": "user", 
+                    "content": [
+                        {"type": "text", "text": "Classify this document page"},
+                        {"type": "image", "image_base64": base64_image}
+                    ]
+                }
+            ],
+            response_format={"type": "json_object"},
+            max_tokens=300
+        )
+
+        # Parse response
+        result = json.loads(response.choices[0].message.content)
+
+        # Extract classification details
+        main_category = result.get('main_category', 'unknown')
+        subcategory = result.get('subcategory', 'unknown')
+        confidence = float(result.get('confidence_score', 0.0))
+        reasoning = result.get('reasoning', 'No reasoning provided')
+
+        # Calculate token cost
+        token_cost = calculate_azure_openai_cost(
+            response.usage.prompt_tokens, 
+            response.usage.completion_tokens, 
+            cfg
+        )
+
+        return main_category, subcategory, confidence, reasoning, token_cost
+
+    except Exception as e:
+        logging.error(f"Page classification error: {e}")
+        return 'unknown', 'unknown', 0.0, str(e), None
+
+def process_documents(input_path, output_dir, config_path, confidence_threshold=0.6):
+    """
+    Process documents with detailed page-level classification
+    """
+    # Load configuration
+    cfg = load_config(config_path)
+    
+    # Setup logging
+    log_dir = os.path.join(output_dir, 'logs')
+    os.makedirs(log_dir, exist_ok=True)
+    
+    # Configure logging
+    setup_logging()
+
+    # Prepare output subdirectories
+    source_dir = os.path.join(output_dir, 'source')
+    classified_dir = os.path.join(output_dir, 'classified')
+    unclassified_dir = os.path.join(output_dir, 'unclassified')
+    
+    # Create directories
+    os.makedirs(source_dir, exist_ok=True)
+    os.makedirs(classified_dir, exist_ok=True)
+    os.makedirs(unclassified_dir, exist_ok=True)
+
+    # Convert input to PDF if needed
+    pdf_path = convert_to_pdf(input_path)
+    if not pdf_path:
+        logging.error(f"Failed to convert {input_path} to PDF")
+        return
+
+    # Copy source file
+    shutil.copy2(pdf_path, os.path.join(source_dir, os.path.basename(pdf_path)))
+
+    # Initialize Azure client
+    try:
+        client, deployment = get_azure_client(cfg)
+    except Exception as e:
+        logging.critical(f"Failed to initialize Azure client: {e}")
+        return
+
+    # Open document
+    doc = fitz.open(pdf_path)
+    total_pages = len(doc)
+
+    # Track total processing costs
+    total_token_cost = 0.0
+    total_input_tokens = 0
+    total_output_tokens = 0
+
+    # Process each page
+    page_classifications = []
+    for page_num in range(total_pages):
+        # Extract page image
+        page = doc[page_num]
+        page_image = page.get_pixmap(matrix=fitz.Matrix(300/72, 300/72))
+        page_bytes = page_image.tobytes()
+        
+        # Classify page
+        main_cat, sub_cat, confidence, reasoning, token_cost = classify_page(
+            page_bytes, client, deployment, cfg
+        )
+
+        # Track token costs
+        if token_cost:
+            total_token_cost += token_cost['total_cost']
+            total_input_tokens += token_cost['input_tokens']
+            total_output_tokens += token_cost['output_tokens']
+
+        # Prepare classification record
+        page_classifications.append({
+            'page_num': page_num,
+            'main_category': main_cat,
+            'subcategory': sub_cat,
+            'confidence': confidence,
+            'reasoning': reasoning
+        })
+
+    # Process classified and unclassified pages
+    base_filename = os.path.splitext(os.path.basename(pdf_path))[0]
+    
+    # Prepare classified pages
+    classified_pages = [
+        cls for cls in page_classifications 
+        if cls['confidence'] >= confidence_threshold and cls['main_category'] != 'unknown'
+    ]
+    
+    # Prepare unclassified pages
+    unclassified_pages = [
+        cls for cls in page_classifications 
+        if cls['confidence'] < confidence_threshold or cls['main_category'] == 'unknown'
+    ]
+
+    # Create classified PDFs
+    if classified_pages:
+        # Group by category and subcategory
+        category_groups = {}
+        for page in classified_pages:
+            key = (page['main_category'], page['subcategory'])
+            if key not in category_groups:
+                category_groups[key] = []
+            category_groups[key].append(page['page_num'])
+
+        # Create PDFs for each category group
+        for (main_cat, sub_cat), page_nums in category_groups.items():
+            # Convert page numbers to 1-based for filename
+            page_nums_str = '_'.join(str(p+1) for p in page_nums)
+            
+            # Create PDF
+            classified_doc = fitz.open()
+            for page_num in page_nums:
+                classified_doc.insert_pdf(doc, from_page=page_num, to_page=page_num)
+            
+            # Save classified PDF
+            output_filename = f"{base_filename}_classified_{page_nums_str}.pdf"
+            category_path = os.path.join(classified_dir, main_cat, sub_cat)
+            os.makedirs(category_path, exist_ok=True)
+            output_path = os.path.join(category_path, output_filename)
+            classified_doc.save(output_path)
+            classified_doc.close()
+
+    # Create unclassified PDFs
+    if unclassified_pages:
+        # Convert page numbers to 1-based for filename
+        page_nums_str = '_'.join(str(p['page_num']+1) for p in unclassified_pages)
+        
+        # Create PDF
+        unclassified_doc = fitz.open()
+        for page in unclassified_pages:
+            unclassified_doc.insert_pdf(doc, from_page=page['page_num'], to_page=page['page_num'])
+        
+        # Save unclassified PDF
+        output_filename = f"{base_filename}_unclassified_{page_nums_str}.pdf"
+        output_path = os.path.join(unclassified_dir, output_filename)
+        unclassified_doc.save(output_path)
+        unclassified_doc.close()
+
+    # Close original document
+    doc.close()
+
+    # Log processing summary
+    logging.info(f"Document processing complete: {input_path}")
+    logging.info(f"Total pages: {total_pages}")
+    logging.info(f"Classified pages: {len(classified_pages)}")
+    logging.info(f"Unclassified pages: {len(unclassified_pages)}")
+    logging.info(f"Total token cost: ${total_token_cost:.4f}")
+    logging.info(f"Total input tokens: {total_input_tokens}")
+    logging.info(f"Total output tokens: {total_output_tokens}")
+
+# Standalone script execution
+if __name__ == "__main__":
+    # Example usage
+    input_pdf = './input/claim.pdf'
+    output_dir = './output'
+    config_path = './config.json'
+    
+    # Ensure input and output directories exist
+    os.makedirs(output_dir, exist_ok=True)
+    os.makedirs('./input', exist_ok=True)
+    
+    # Process documents
+    process_documents(input_pdf, output_dir, config_path)
+
+
+
+-----
+  main.py
+
+
+  import os
+import argparse
+from document_process import process_documents
+from helper import download_azure_blobs, upload_azure_blobs, load_config
+
+def parse_arguments():
+    """
+    Parse command-line arguments for document processing
+    """
+    parser = argparse.ArgumentParser(description='Document Classification Pipeline')
+    parser.add_argument(
+        '--source', 
+        choices=['local', 'azure'], 
+        default='local',
+        help='Source of documents: local filesystem or Azure Blob Storage'
+    )
+    parser.add_argument(
+        '--inputfolder', 
+        default='./input',
+        help='Input folder path or Azure Blob Storage container name'
+    )
+    parser.add_argument(
+        '--output', 
+        default='./output', 
+        help='Path to output directory'
+    )
+    parser.add_argument(
+        '--config', 
+        default='config.json', 
+        help='Path to configuration file'
+    )
+    parser.add_argument(
+        '--confidence', 
+        type=float, 
+        default=0.6, 
+        help='Confidence threshold for classification'
+    )
+    return parser.parse_args()
+
+def main():
+    """
+    Main entry point for document processing
+    """
+    # Parse command-line arguments
+    args = parse_arguments()
+    
+    # Load configuration
+    cfg = load_config(args.config)
+    
+    # Ensure output directory exists
+    os.makedirs(args.output, exist_ok=True)
+    
+    # Process documents based on source
+    if args.source == 'local':
+        # Process documents from local input folder
+        input_folder = args.inputfolder
+        os.makedirs(input_folder, exist_ok=True)
+        
+        for filename in os.listdir(input_folder):
+            if filename.lower().endswith(('.pdf', '.doc', '.docx', '.jpg', '.jpeg', '.png')):
+                input_path = os.path.join(input_folder, filename)
+                print(f"Processing local document: {filename}")
+                process_documents(
+                    input_path, 
+                    args.output, 
+                    args.config, 
+                    confidence_threshold=args.confidence
+                )
+    
+    elif args.source == 'azure':
+        # Process documents from Azure Blob Storage
+        try:
+            # Download blobs from Azure input container
+            local_input_dir = cfg['paths']['input_dir']
+            os.makedirs(local_input_dir, exist_ok=True)
+            
+            # Use input container from config or command-line input folder
+            input_container = args.inputfolder or cfg['azure_storage']['input_container']
+            
+            # Download blobs from Azure
+            downloaded_files = download_azure_blobs(
+                cfg, 
+                input_container, 
+                local_input_dir
+            )
+            
+            # Process downloaded files
+            for filename in os.listdir(local_input_dir):
+                if filename.lower().endswith(('.pdf', '.doc', '.docx', '.jpg', '.jpeg', '.png')):
+                    input_path = os.path.join(local_input_dir, filename)
+                    print(f"Processing Azure document: {filename}")
+                    process_documents(
+                        input_path, 
+                        args.output, 
+                        args.config, 
+                        confidence_threshold=args.confidence
+                    )
+            
+            # Upload processed files to Azure output container
+            upload_azure_blobs(
+                cfg, 
+                cfg['paths']['output_dir'], 
+                cfg['azure_storage']['output_container']
+            )
+        
+        except Exception as e:
+            print(f"Error processing Azure Blob Storage documents: {e}")
+
+if __name__ == "__main__":
+    main()
+
+  
