@@ -1,299 +1,6 @@
-{
-    "azure_openai": {
-        "api_key": "YOUR_AZURE_OPENAI_KEY",
-        "endpoint": "https://your-resource-name.openai.azure.com/",
-        "deployment_name": "your-gpt-4o-deployment-name",
-        "api_version": "2024-02-15-preview"
-    },
-    "azure_storage": {
-        "connection_string": "YOUR_AZURE_STORAGE_CONNECTION_STRING",
-        "input_container": "document-input",
-        "output_container": "document-output",
-        "reference_container": "document-reference"
-    },
-    "paths": {
-        "input_dir": "./input",
-        "output_dir": "./output",
-        "reference_dir": "./reference"
-    },
-    "categories": {
-        "medical": [
-            "insurance_claim", 
-            "prescription", 
-            "medical_report"
-        ],
-        "financial": [
-            "invoice", 
-            "bank_statement", 
-            "tax_document"
-        ],
-        "legal": [
-            "contract", 
-            "agreement", 
-            "legal_notice"
-        ]
-    },
-    "classification": {
-        "confidence_threshold": 0.6
-    },
-    "token_pricing": {
-        "gpt-4o": {
-            "input": {
-                "price_per_million": 2.50,
-                "description": "Input token pricing"
-            },
-            "output": {
-                "price_per_million": 10.00,
-                "description": "Output token pricing"
-            },
-            "cached_input": {
-                "price_per_million": 1.25,
-                "description": "Cached input token pricing"
-            }
-        }
-    }
-}
-
-
------------------------------
-
-
-  helper.py
+#document.py
 
 import os
-import json
-import logging
-from datetime import datetime
-from openai import AzureOpenAI
-from azure.storage.blob import BlobServiceClient
-
-def load_config(config_path="config.json"):
-    """
-    Load configuration from JSON file
-    """
-    try:
-        with open(config_path, "r") as f:
-            cfg = json.load(f)
-        return cfg
-    except FileNotFoundError:
-        logging.error(f"Config file not found: {config_path}")
-        raise
-    except json.JSONDecodeError:
-        logging.error(f"Invalid JSON in config file: {config_path}")
-        raise
-
-def setup_logging(log_dir='logs'):
-    """
-    Configure logging with timestamped log file
-    """
-    # Ensure log directory exists
-    os.makedirs(log_dir, exist_ok=True)
-    
-    # Create timestamped log filename
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    log_file = os.path.join(log_dir, f'documentclassification_{timestamp}.log')
-    
-    # Configure logging
-    logging.basicConfig(
-        level=logging.INFO, 
-        format='%(asctime)s - %(levelname)s: %(message)s',
-        handlers=[
-            logging.FileHandler(log_file, mode='a'),
-            logging.StreamHandler()
-        ]
-    )
-    
-    logging.info(f"Log file created: {log_file}")
-    return log_file
-
-def calculate_azure_openai_cost(input_tokens, output_tokens, cfg, model='gpt-4o', use_cached=False):
-    """
-    Calculate the cost of Azure OpenAI API usage
-    """
-    try:
-        pricing = cfg['token_pricing'].get(model, cfg['token_pricing']['gpt-4o'])
-        
-        # Calculate input token cost
-        input_cost = (input_tokens / 1_000_000) * (
-            pricing['cached_input']['price_per_million'] if use_cached 
-            else pricing['input']['price_per_million']
-        )
-        
-        # Calculate output token cost
-        output_cost = (output_tokens / 1_000_000) * pricing['output']['price_per_million']
-        
-        # Total cost
-        total_cost = input_cost + output_cost
-        
-        return {
-            'model': model,
-            'input_tokens': input_tokens,
-            'output_tokens': output_tokens,
-            'input_cost': round(input_cost, 4),
-            'output_cost': round(output_cost, 4),
-            'total_cost': round(total_cost, 4),
-            'use_cached': use_cached
-        }
-    except Exception as e:
-        logging.error(f"Token cost calculation error: {e}")
-        return {
-            'model': model,
-            'input_tokens': input_tokens,
-            'output_tokens': output_tokens,
-            'input_cost': 0,
-            'output_cost': 0,
-            'total_cost': 0,
-            'error': str(e)
-        }
-
-def get_azure_client(cfg):
-    """
-    Initialize Azure OpenAI client 
-    """
-    try:
-        client = AzureOpenAI(
-            api_key=cfg["azure_openai"]["api_key"],
-            api_version=cfg["azure_openai"]["api_version"],
-            azure_endpoint=cfg["azure_openai"]["endpoint"]
-        )
-        return client, cfg["azure_openai"]["deployment_name"]
-    except Exception as e:
-        logging.critical(f"Azure client initialization error: {e}")
-        raise
-
-def prepare_directories(cfg):
-    """
-    Prepare necessary directories for processing
-    """
-    directories = [
-        cfg['paths']['input_dir'],
-        cfg['paths']['output_dir'],
-        cfg['paths']['reference_dir'],
-        os.path.join(cfg['paths']['output_dir'], 'source'),
-        os.path.join(cfg['paths']['output_dir'], 'classified'),
-        os.path.join(cfg['paths']['output_dir'], 'unclassified'),
-        os.path.join(cfg['paths']['output_dir'], 'logs')
-    ]
-    
-    for dir_path in directories:
-        os.makedirs(dir_path, exist_ok=True)
-
-def download_azure_blobs(cfg, container_name, local_dir):
-    """
-    Download blobs from an Azure Storage container to local directory
-    """
-    try:
-        blob_service_client = BlobServiceClient.from_connection_string(
-            cfg['azure_storage']['connection_string']
-        )
-        container_client = blob_service_client.get_container_client(container_name)
-        
-        # Ensure local directory exists
-        os.makedirs(local_dir, exist_ok=True)
-        
-        # List and download blobs
-        downloaded_files = 0
-        for blob in container_client.list_blobs():
-            blob_client = container_client.get_blob_client(blob.name)
-            local_file_path = os.path.join(local_dir, blob.name)
-            
-            # Create subdirectories if needed
-            os.makedirs(os.path.dirname(local_file_path), exist_ok=True)
-            
-            # Download blob
-            with open(local_file_path, "wb") as download_file:
-                download_file.write(blob_client.download_blob().readall())
-            
-            downloaded_files += 1
-            logging.info(f"Downloaded: {blob.name}")
-        
-        logging.info(f"Total files downloaded: {downloaded_files}")
-        return downloaded_files
-    
-    except Exception as e:
-        logging.error(f"Azure Blob download error: {e}")
-        raise
-
-def upload_azure_blobs(cfg, local_dir, container_name):
-    """
-    Upload files from local directory to Azure Storage container
-    """
-    try:
-        blob_service_client = BlobServiceClient.from_connection_string(
-            cfg['azure_storage']['connection_string']
-        )
-        container_client = blob_service_client.get_container_client(container_name)
-        
-        # Walk through local directory
-        uploaded_files = 0
-        for root, _, files in os.walk(local_dir):
-            for file in files:
-                local_path = os.path.join(root, file)
-                
-                # Create blob path (preserve directory structure)
-                relative_path = os.path.relpath(local_path, local_dir)
-                blob_name = relative_path
-                
-                # Upload blob
-                blob_client = container_client.get_blob_client(blob_name)
-                with open(local_path, "rb") as data:
-                    blob_client.upload_blob(data, overwrite=True)
-                
-                uploaded_files += 1
-                logging.info(f"Uploaded: {blob_name}")
-        
-        logging.info(f"Total files uploaded: {uploaded_files}")
-        return uploaded_files
-    
-    except Exception as e:
-        logging.error(f"Azure Blob upload error: {e}")
-        raise
-
-def validate_azure_containers(cfg):
-    """
-    Validate existence of Azure Blob Storage containers
-    """
-    try:
-        from azure.storage.blob import BlobServiceClient
-        
-        # Create blob service client
-        blob_service_client = BlobServiceClient.from_connection_string(
-            cfg['azure_storage']['connection_string']
-        )
-        
-        # Containers to check
-        containers_to_check = [
-            cfg['azure_storage']['input_container'],
-            cfg['azure_storage']['reference_container'],
-            cfg['azure_storage']['output_container']
-        ]
-        
-        # Check each container
-        for container_name in containers_to_check:
-            try:
-                container_client = blob_service_client.get_container_client(container_name)
-                
-                # Check if container exists
-                if not container_client.exists():
-                    logging.error(f"Container does not exist: {container_name}")
-                    raise ValueError(f"Container {container_name} does not exist")
-                
-                logging.info(f"Container verified: {container_name}")
-            
-            except Exception as container_error:
-                logging.error(f"Error accessing container {container_name}: {container_error}")
-                raise
-        
-        return True
-    
-    except Exception as e:
-        logging.critical(f"Azure container validation error: {e}")
-        raise
------
-
-  document.py
-
- import os
 import io
 import json
 import base64
@@ -306,11 +13,9 @@ from datetime import datetime
 
 from helper import (
     load_config, 
-    setup_logging,
-    get_azure_client, 
-    prepare_directories,
-    calculate_azure_openai_cost
+    setup_logging
 )
+from llm import DocumentClassifier
 
 def convert_to_pdf(input_file):
     """
@@ -328,8 +33,18 @@ def convert_to_pdf(input_file):
         # Image files conversion
         if ext in ['.jpg', '.jpeg', '.png']:
             img = Image.open(input_file)
+            
+            # Convert to RGB if needed
+            if img.mode != 'RGB':
+                img = img.convert('RGB')
+            
+            # Resize if very large
+            max_size = (2000, 2000)
+            img.thumbnail(max_size, Image.LANCZOS)
+            
             pdf_path = input_file.replace(ext, '.pdf')
             img.save(pdf_path, 'PDF', resolution=100.0)
+            
             return pdf_path
 
         # For other file types like .doc, .docx, use PyMuPDF
@@ -347,63 +62,6 @@ def convert_to_pdf(input_file):
         logging.error(f"PDF conversion error for {input_file}: {e}")
         return None
 
-def preprocess_image_for_classification(image_bytes):
-    """
-    Preprocess image to ensure compatibility with GPT-4o
-    """
-    try:
-        # Open image from bytes
-        img = Image.open(io.BytesIO(image_bytes))
-        
-        # Convert to RGB if needed
-        if img.mode != 'RGB':
-            img = img.convert('RGB')
-        
-        # Resize image
-        img = img.resize((800, 600), Image.LANCZOS)
-        
-        # Compress image
-        buffer = io.BytesIO()
-        img.save(buffer, format="PNG", optimize=True, quality=85)
-        
-        # Convert to base64
-        base64_image = base64.b64encode(buffer.getvalue()).decode('utf-8')
-        
-        return base64_image
-    
-    except Exception as e:
-        logging.error(f"Image preprocessing error: {e}")
-        return None
-
-def prepare_reference_prompt(cfg, reference_dir):
-    """
-    Generate a detailed prompt using reference document metadata
-    """
-    reference_details = {}
-    
-    for main_category in os.listdir(reference_dir):
-        main_path = os.path.join(reference_dir, main_category)
-        if not os.path.isdir(main_path):
-            continue
-        
-        reference_details[main_category] = {}
-        
-        for subcategory in os.listdir(main_path):
-            subcat_path = os.path.join(main_path, subcategory)
-            if not os.path.isdir(subcat_path):
-                continue
-            
-            # Count and list reference documents
-            reference_docs = [f for f in os.listdir(subcat_path) 
-                              if os.path.isfile(os.path.join(subcat_path, f))]
-            
-            reference_details[main_category][subcategory] = {
-                'document_count': len(reference_docs),
-                'document_types': list(set(os.path.splitext(doc)[1] for doc in reference_docs))
-            }
-    
-    return reference_details
-
 def extract_page_image(file_path, page_number):
     """
     Extract image for a specific page from various document types
@@ -419,7 +77,7 @@ def extract_page_image(file_path, page_number):
                 return _create_blank_image()
             
             page = doc.load_page(page_number)
-            pix = page.get_pixmap()
+            pix = page.get_pixmap(matrix=fitz.Matrix(300/72, 300/72))
             
             # Validate pixmap
             if not pix or pix.width <= 0 or pix.height <= 0:
@@ -457,153 +115,6 @@ def _create_blank_image():
     img.save(buf, format="PNG")
     return buf.getvalue()
 
-def classify_page(document_image, client, deployment_name, cfg):
-    """
-    Enhanced page-level classification with reference-based validation
-    """
-    try:
-        # Validate and preprocess image
-        base64_image = preprocess_image_for_classification(document_image)
-        
-        if not base64_image:
-            logging.error("Failed to preprocess image")
-            raise ValueError("Image preprocessing failed")
-
-        # Prepare reference details
-        reference_dir = cfg['paths']['reference_dir']
-        reference_details = prepare_reference_prompt(cfg, reference_dir)
-
-        # Prepare reference categories for prompt
-        categories = cfg['categories']
-        
-        # Create a comprehensive prompt for detailed classification
-        prompt = f"""
-        You are an advanced document classification AI with expertise in precise document categorization.
-
-        CLASSIFICATION OBJECTIVES:
-        - Carefully analyze the document page
-        - Identify the main document category
-        - Determine the specific subcategory
-        - Provide a confidence score
-        - Explain your reasoning
-
-        AVAILABLE DOCUMENT CATEGORIES:
-        {json.dumps(categories, indent=2)}
-
-        REFERENCE DOCUMENT INSIGHTS:
-        {json.dumps(reference_details, indent=2)}
-
-        CLASSIFICATION GUIDELINES:
-        1. Examine the document's visual structure
-        2. Match against reference document characteristics
-        3. Be rigorous in category assignment
-        4. Use context and visual cues for classification
-        5. If no clear match exists, return 'unknown'
-
-        RESPONSE FORMAT:
-        {{
-            "main_category": "Exact main category (medical/financial/legal) or 'unknown'",
-            "subcategory": "Exact subcategory or 'unknown'",
-            "confidence_score": 0.0-1.0,
-            "reasoning": "Detailed explanation of classification decision"
-        }}
-
-        CRITICAL EVALUATION CRITERIA:
-        - Assess document layout
-        - Analyze text and visual elements
-        - Compare against reference document structure
-        - Provide objective, data-driven classification
-        """
-
-        # Make API call with explicit error handling
-        try:
-            response = client.chat.completions.create(
-                model=deployment_name,
-                messages=[
-                    {"role": "system", "content": prompt},
-                    {
-                        "role": "user",
-                        "content": [
-                            {
-                                "type": "text",
-                                "text": "Classify this document page based on the provided guidelines."
-                            },
-                            {
-                                "type": "image",
-                                "image_base64": base64_image
-                            }
-                        ]
-                    }
-                ],
-                response_format={"type": "json_object"},
-                max_tokens=300  # Limit response length
-            )
-
-            # Token usage tracking
-            input_tokens = response.usage.prompt_tokens
-            output_tokens = response.usage.completion_tokens
-
-            # Calculate cost 
-            token_cost = calculate_azure_openai_cost(
-                input_tokens, 
-                output_tokens, 
-                cfg
-            )
-
-            # Extract and parse response
-            result = json.loads(response.choices[0].message.content)
-
-            # Extract classification details
-            main_category = result.get('main_category', 'unknown').lower()
-            subcategory = result.get('subcategory', 'unknown').lower()
-            confidence_score = float(result.get('confidence_score', 0.0))
-            reasoning = result.get('reasoning', 'No reasoning provided')
-
-            # Validate main category
-            if main_category not in categories:
-                main_category = 'unknown'
-                subcategory = 'unknown'
-                confidence_score = 0.0
-
-            # Validate subcategory
-            if main_category != 'unknown':
-                valid_subcategories = categories.get(main_category, [])
-                if subcategory not in valid_subcategories:
-                    subcategory = 'unknown'
-                    confidence_score = min(confidence_score, 0.3)
-
-            # Additional confidence adjustment based on reference documents
-            reference_document_count = reference_details.get(main_category, {}).get(subcategory, {}).get('document_count', 0)
-            if reference_document_count > 0:
-                confidence_score *= 1.2  # Boost confidence if reference documents exist
-            
-            # Cap confidence score
-            confidence_score = min(confidence_score, 1.0)
-
-            # Log detailed classification
-            logging.info(f"Classification Details:\n" + json.dumps({
-                'main_category': main_category,
-                'subcategory': subcategory,
-                'confidence_score': confidence_score,
-                'reasoning': reasoning,
-                'reference_document_count': reference_document_count
-            }, indent=2))
-
-            return main_category, subcategory, confidence_score, reasoning, token_cost
-
-        except Exception as api_error:
-            logging.error(f"API Classification Error: {api_error}")
-            logging.error(traceback.format_exc())
-            
-            return 'unknown', 'unknown', 0.0, f"Classification error: {str(api_error)}", None
-
-    except Exception as e:
-        logging.error(f"Page classification error: {e}")
-        logging.error(traceback.format_exc())
-        
-        return 'unknown', 'unknown', 0.0, f"Error in page classification: {str(e)}", None
-
-
 def process_documents(
     source='local', 
     config_path='config.json', 
@@ -612,53 +123,34 @@ def process_documents(
     confidence_threshold=0.6
 ):
     """
-    Comprehensive document processing pipeline with enhanced error handling
+    Comprehensive document processing pipeline
     """
     try:
-        # Ensure output directory exists
-        os.makedirs(output_dir, exist_ok=True)
+        # Load configuration
+        config = load_config(config_path)
         
-        # Create necessary subdirectories
+        # Setup logging
+        setup_logging(config)
+        
+        # Prepare output directories
         source_dir = os.path.join(output_dir, 'source')
         classified_dir = os.path.join(output_dir, 'classified')
         unclassified_dir = os.path.join(output_dir, 'unclassified')
         unprocessed_dir = os.path.join(output_dir, 'unprocessed')
-        logs_dir = os.path.join(output_dir, 'logs')
         
-        # Create all necessary directories
-        for directory in [source_dir, classified_dir, unclassified_dir, unprocessed_dir, logs_dir]:
+        # Create directories
+        for directory in [source_dir, classified_dir, unclassified_dir, unprocessed_dir]:
             os.makedirs(directory, exist_ok=True)
-
-        # Setup logging
-        log_file = os.path.join(logs_dir, f'documentclassification_{datetime.now().strftime("%Y%m%d_%H%M%S")}.log')
-        logging.basicConfig(
-            level=logging.INFO, 
-            format='%(asctime)s - %(levelname)s: %(message)s',
-            handlers=[
-                logging.FileHandler(log_file, mode='a'),
-                logging.StreamHandler()
-            ]
-        )
-        logging.info(f"Log file created: {log_file}")
         
-        # Load configuration
-        cfg = load_config(config_path)
+        # Initialize document classifier
+        classifier = DocumentClassifier(config)
         
-        # Initialize Azure client
-        client, deployment = get_azure_client(cfg)
+        # Reference directory
+        reference_dir = config['paths']['reference_dir']
         
-        # Processing statistics
-        stats = {
-            'total_documents': 0,
-            'total_pages': 0,
-            'classified_pages': 0,
-            'unclassified_pages': 0,
-            'total_token_cost': 0.0,
-            'total_input_tokens': 0,
-            'total_output_tokens': 0,
-            'processed_files': [],
-            'failed_files': []
-        }
+        # Track processed and unprocessed files
+        processed_files = []
+        unprocessed_files = []
 
         # Process each document
         for fname in os.listdir(input_dir):
@@ -678,7 +170,7 @@ def process_documents(
                     unprocessed_path = os.path.join(unprocessed_dir, fname)
                     shutil.copy2(fpath, unprocessed_path)
                     logging.warning(f"Unsupported file type, moved to unprocessed: {fname}")
-                    stats['failed_files'].append(fname)
+                    unprocessed_files.append(fpath)
                     continue
 
                 # Convert to PDF
@@ -692,13 +184,8 @@ def process_documents(
                 # Open PDF
                 doc = fitz.open(pdf_path)
                 total_pages = len(doc)
-                
-                # Update statistics
-                stats['total_documents'] += 1
-                stats['total_pages'] += total_pages
-                stats['processed_files'].append(fname)
 
-                # Classified and unclassified page tracking
+                # Track page classifications
                 classified_pages = []
                 unclassified_pages = []
 
@@ -709,28 +196,19 @@ def process_documents(
                         page_image = extract_page_image(pdf_path, page_num)
                         
                         # Classify page
-                        main_cat, sub_cat, confidence, reasoning, token_cost = classify_page(
-                            page_image, client, deployment, cfg
-                        )
-
-                        # Update token cost tracking
-                        if token_cost:
-                            stats['total_token_cost'] += token_cost['total_cost']
-                            stats['total_input_tokens'] += token_cost['input_tokens']
-                            stats['total_output_tokens'] += token_cost['output_tokens']
-
+                        classification = classifier.classify_document(page_image, reference_dir)
+                        
                         # Check classification confidence
-                        if confidence >= confidence_threshold and main_cat != 'unknown':
+                        if (classification['confidence'] >= confidence_threshold 
+                            and classification['main_category'] != 'unknown'):
                             classified_pages.append({
                                 'page': page_num,
-                                'main_category': main_cat,
-                                'subcategory': sub_cat,
-                                'confidence': confidence
+                                'category': classification['main_category'],
+                                'subcategory': classification['subcategory'],
+                                'confidence': classification['confidence']
                             })
-                            stats['classified_pages'] += 1
                         else:
                             unclassified_pages.append(page_num)
-                            stats['unclassified_pages'] += 1
 
                     except Exception as page_error:
                         logging.error(f"Error processing page {page_num} in {fname}: {page_error}")
@@ -742,15 +220,15 @@ def process_documents(
                 # Process classified pages
                 if classified_pages:
                     # Group by subcategory
-                    subcategory_pages = {}
-                    for page_info in classified_pages:
-                        key = (page_info['main_category'], page_info['subcategory'])
-                        if key not in subcategory_pages:
-                            subcategory_pages[key] = []
-                        subcategory_pages[key].append(page_info['page'])
+                    subcategory_groups = {}
+                    for page in classified_pages:
+                        key = (page['category'], page['subcategory'])
+                        if key not in subcategory_groups:
+                            subcategory_groups[key] = []
+                        subcategory_groups[key].append(page['page'])
 
                     # Create PDFs for each subcategory
-                    for (main_cat, sub_cat), pages in subcategory_pages.items():
+                    for (main_cat, sub_cat), pages in subcategory_groups.items():
                         # Convert page numbers to 1-based for filename
                         page_nums_str = '_'.join(str(p+1) for p in pages)
                         
@@ -762,12 +240,10 @@ def process_documents(
                         for page_num in pages:
                             classified_doc.insert_pdf(doc, from_page=page_num, to_page=page_num)
                         
-                        # Prepare output path
-                        category_path = os.path.join(classified_dir, main_cat, sub_cat)
-                        os.makedirs(category_path, exist_ok=True)
-                        
                         # Save classified PDF
                         output_filename = f"{os.path.splitext(fname)[0]}_classified_{page_nums_str}.pdf"
+                        category_path = os.path.join(classified_dir, main_cat, sub_cat)
+                        os.makedirs(category_path, exist_ok=True)
                         output_path = os.path.join(category_path, output_filename)
                         
                         classified_doc.save(output_path)
@@ -795,11 +271,8 @@ def process_documents(
                     unclassified_doc.close()
                     doc.close()
 
-                # Log processing results
-                logging.info(f"Document {fname} Processing Summary:")
-                logging.info(f"Total Pages: {total_pages}")
-                logging.info(f"Classified Pages: {len(classified_pages)}")
-                logging.info(f"Unclassified Pages: {len(unclassified_pages)}")
+                # Add to processed files
+                processed_files.append(pdf_path)
 
             except Exception as doc_error:
                 logging.error(f"Error processing document {fname}: {doc_error}")
@@ -813,38 +286,275 @@ def process_documents(
                 except Exception as move_error:
                     logging.error(f"Could not move unprocessed document {fname}: {move_error}")
                 
-                stats['failed_files'].append(fname)
+                unprocessed_files.append(fpath)
 
-        # Log overall processing statistics
-        logging.info("Processing Session Statistics:")
-        logging.info(json.dumps(stats, indent=2))
+        # Log processing summary
+        logging.info("Processing Summary:")
+        logging.info(f"Processed Files: {processed_files}")
+        logging.info(f"Unprocessed Files: {unprocessed_files}")
 
-        # Print summary
-        print("Document Processing Complete")
-        print(f"Total Documents: {stats['total_documents']}")
-        print(f"Total Pages: {stats['total_pages']}")
-        print(f"Classified Pages: {stats['classified_pages']}")
-        print(f"Unclassified Pages: {stats['unclassified_pages']}")
-        print(f"Total Token Cost: ${stats['total_token_cost']:.4f}")
-        print(f"Processed Files:", ', '.join(stats['processed_files']))
-        print(f"Failed Files:", ', '.join(stats['failed_files']) if stats['failed_files'] else "None")
+        return processed_files, unprocessed_files
 
     except Exception as critical_error:
         logging.critical(f"Critical processing error: {critical_error}")
         logging.critical(traceback.format_exc())
         print(f"Document Processing Failed: {critical_error}")
+        return [], []
+
 
 -----
-  main.py
+
+
+helper.py
+
+import os
+import io
+import json
+import logging
+import shutil
+import zipfile
+from datetime import datetime, timedelta
+from azure.storage.blob import BlobServiceClient
+
+def load_config(config_path='config.json'):
+    """
+    Load configuration from JSON file
+    """
+    try:
+        with open(config_path, 'r') as f:
+            return json.load(f)
+    except Exception as e:
+        logging.error(f"Error loading configuration: {e}")
+        raise
+
+def setup_logging(config):
+    """
+    Configure logging based on configuration
+    """
+    # Ensure output directory exists
+    output_dir = config['paths']['output_dir']
+    log_dir = os.path.join(output_dir, 'logs')
+    os.makedirs(log_dir, exist_ok=True)
+
+    # Create timestamped log filename
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    log_file = os.path.join(log_dir, f'document_classification_{timestamp}.log')
+
+    # Configure logging
+    logging.basicConfig(
+        level=getattr(logging, config['logging']['level'].upper()),
+        format='%(asctime)s - %(levelname)s: %(message)s',
+        handlers=[
+            logging.FileHandler(log_file, mode='a'),
+            logging.StreamHandler()
+        ]
+    )
+
+    # Log rotation and cleanup
+    _cleanup_old_logs(log_dir, config['logging'])
+
+    return log_file
+
+def _cleanup_old_logs(log_dir, log_config):
+    """
+    Clean up old log files based on configuration
+    """
+    try:
+        # Get all log files
+        log_files = [
+            os.path.join(log_dir, f) for f in os.listdir(log_dir) 
+            if f.startswith('document_classification_') and f.endswith('.log')
+        ]
+
+        # Sort logs by creation time
+        log_files.sort(key=os.path.getctime, reverse=True)
+
+        # Remove excess log files
+        if len(log_files) > log_config.get('max_log_files', 10):
+            for log_file in log_files[log_config.get('max_log_files', 10):]:
+                os.remove(log_file)
+
+        # Remove logs older than specified retention days
+        retention_days = log_config.get('log_retention_days', 30)
+        cutoff_date = datetime.now() - timedelta(days=retention_days)
+        
+        for log_file in log_files:
+            file_created = datetime.fromtimestamp(os.path.getctime(log_file))
+            if file_created < cutoff_date:
+                os.remove(log_file)
+
+    except Exception as e:
+        logging.warning(f"Error during log cleanup: {e}")
+
+class AzureStorageManager:
+    def __init__(self, config):
+        """
+        Initialize Azure Storage client
+        """
+        self.config = config
+        self.blob_service_client = BlobServiceClient.from_connection_string(
+            config['azure_storage']['connection_string']
+        )
+
+    def list_blobs(self, container_name):
+        """
+        List all blobs in a container
+        """
+        try:
+            container_client = self.blob_service_client.get_container_client(container_name)
+            return [blob.name for blob in container_client.list_blobs()]
+        except Exception as e:
+            logging.error(f"Error listing blobs in {container_name}: {e}")
+            return []
+
+    def download_blob(self, container_name, blob_name, local_path):
+        """
+        Download a blob to a local file
+        """
+        try:
+            blob_client = self.blob_service_client.get_blob_client(
+                container=container_name, 
+                blob=blob_name
+            )
+            with open(local_path, "wb") as file:
+                blob_data = blob_client.download_blob()
+                blob_data.readinto(file)
+            return True
+        except Exception as e:
+            logging.error(f"Error downloading {blob_name}: {e}")
+            return False
+
+    def upload_blob(self, container_name, blob_name, local_path):
+        """
+        Upload a local file to blob storage
+        """
+        try:
+            blob_client = self.blob_service_client.get_blob_client(
+                container=container_name, 
+                blob=blob_name
+            )
+            with open(local_path, "rb") as data:
+                blob_client.upload_blob(data, overwrite=True)
+            return True
+        except Exception as e:
+            logging.error(f"Error uploading {blob_name}: {e}")
+            return False
+
+    def prepare_reference_documents(self):
+        """
+        Download reference documents from Azure Blob Storage
+        """
+        try:
+            # Get reference container name
+            reference_container = self.config['azure_storage']['reference_container']
+            
+            # Create local reference directory
+            reference_dir = self.config['paths']['reference_dir']
+            os.makedirs(reference_dir, exist_ok=True)
+            
+            # List blobs in reference container
+            reference_blobs = self.list_blobs(reference_container)
+            
+            # Download and organize reference documents
+            for blob_name in reference_blobs:
+                # Determine category and subcategory from blob path
+                parts = blob_name.split('/')
+                
+                # Ensure we have at least main category and subcategory
+                if len(parts) < 2:
+                    logging.warning(f"Skipping blob {blob_name}: Incorrect path structure")
+                    continue
+                
+                main_category = parts[-2]
+                subcategory = parts[-1]
+                
+                # Create local category and subcategory directories
+                local_category_path = os.path.join(reference_dir, main_category)
+                local_subcategory_path = os.path.join(local_category_path, subcategory)
+                
+                os.makedirs(local_subcategory_path, exist_ok=True)
+                
+                # Download blob
+                local_file_path = os.path.join(local_subcategory_path, os.path.basename(blob_name))
+                
+                if self.download_blob(reference_container, blob_name, local_file_path):
+                    logging.info(f"Downloaded reference document: {blob_name}")
+                else:
+                    logging.warning(f"Failed to download reference document: {blob_name}")
+            
+            logging.info("Reference document preparation completed")
+            return True
+        
+        except Exception as e:
+            logging.error(f"Error preparing reference documents: {e}")
+            return False
+
+    def create_archive(self, processed_files, unprocessed_files):
+        """
+        Create a ZIP archive of processed and unprocessed files
+        """
+        try:
+            # Create a BytesIO object to store the ZIP
+            archive_buffer = io.BytesIO()
+            
+            with zipfile.ZipFile(archive_buffer, 'w', zipfile.ZIP_DEFLATED) as zipf:
+                # Add processed files
+                for file_path in processed_files:
+                    filename = os.path.basename(file_path)
+                    zipf.write(file_path, arcname=f"processed/{filename}")
+                
+                # Add unprocessed files
+                for file_path in unprocessed_files:
+                    filename = os.path.basename(file_path)
+                    zipf.write(file_path, arcname=f"unprocessed/{filename}")
+            
+            # Prepare archive name
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            archive_name = f"document_archive_{timestamp}.zip"
+            
+            # Upload archive to storage
+            archive_buffer.seek(0)
+            archive_container = self.config['azure_storage']['archive_container']
+            
+            blob_client = self.blob_service_client.get_blob_client(
+                container=archive_container, 
+                blob=archive_name
+            )
+            blob_client.upload_blob(archive_buffer.getvalue())
+            
+            return archive_name
+        
+        except Exception as e:
+            logging.error(f"Error creating archive: {e}")
+            return None
+
+    def delete_multiple_blobs(self, blob_names, container_name):
+        """
+        Delete multiple blobs from a container
+        """
+        try:
+            container_client = self.blob_service_client.get_container_client(container_name)
+            
+            for blob_name in blob_names:
+                blob_client = container_client.get_blob_client(blob_name)
+                blob_client.delete_blob()
+                logging.info(f"Deleted blob: {blob_name}")
+            
+            return True
+        except Exception as e:
+            logging.error(f"Error deleting blobs: {e}")
+            return False
+
+------
+
+main.py
 
 import os
 import argparse
+import logging
+import shutil
 from document_process import process_documents
-from helper import (
-    load_config, 
-    download_azure_blobs, 
-    upload_azure_blobs
-)
+from helper import load_config, setup_logging, AzureStorageManager
 
 def parse_arguments():
     """
@@ -858,7 +568,7 @@ def parse_arguments():
         help='Source of documents: local filesystem or Azure Blob Storage'
     )
     parser.add_argument(
-        '--inputfolder', 
+        '--input', 
         default='./input',
         help='Input folder path or Azure Blob Storage container name'
     )
@@ -878,76 +588,447 @@ def parse_arguments():
         default=0.6, 
         help='Confidence threshold for classification'
     )
+    parser.add_argument(
+        '--no-archive', 
+        action='store_true',
+        help='Disable archiving of processed files'
+    )
     return parser.parse_args()
+
 def main():
     """
     Main entry point for document processing
     """
-    # Parse command-line arguments
+    # Parse arguments
     args = parse_arguments()
     
-    # Load configuration
-    cfg = load_config(args.config)
-    
-    # Ensure output directory exists
-    os.makedirs(args.output, exist_ok=True)
-    
-    # Determine input source and process documents
     try:
+        # Load configuration
+        config = load_config(args.config)
+        
+        # Setup logging
+        setup_logging(config)
+        
+        # Determine archiving setting
+        archive_enabled = config.get('archiving', {}).get('enabled', True)
+        if args.no_archive:
+            archive_enabled = False
+        
+        # Prepare output directory
+        os.makedirs(args.output, exist_ok=True)
+        
+        # Process based on source
         if args.source == 'local':
-            # Process documents from local input folder
-            input_folder = args.inputfolder
-            os.makedirs(input_folder, exist_ok=True)
-            
-            # Process documents in the input folder
-            process_documents(
-                source='local', 
+            # Process local documents
+            processed_files, unprocessed_files = process_documents(
+                source='local',
                 config_path=args.config,
                 output_dir=args.output,
-                input_dir=input_folder,
+                input_dir=args.input,
                 confidence_threshold=args.confidence
             )
         
         elif args.source == 'azure':
-            # Validate Azure containers first
-            try:
-                validate_azure_containers(cfg)
-            except Exception as container_error:
-                logging.critical(f"Azure container validation failed: {container_error}")
-                print(f"Error: {container_error}")
-                return
+            # Initialize Azure Storage Manager
+            storage_manager = AzureStorageManager(config)
             
-            # Use input container from config or command-line input folder
-            input_container = args.inputfolder or cfg['azure_storage']['input_container']
+            # Prepare reference documents
+            storage_manager.prepare_reference_documents()
             
-            # Download blobs from Azure input container
-            local_input_dir = cfg['paths']['input_dir']
+            # Create local input directory
+            local_input_dir = config['paths']['input_dir']
             os.makedirs(local_input_dir, exist_ok=True)
             
-            # Download blobs from Azure
-            downloaded_files = download_azure_blobs(
-                cfg, 
-                input_container, 
-                local_input_dir
-            )
+            # Download blobs from input container
+            input_container = config['azure_storage']['input_container']
+            blobs = storage_manager.list_blobs(input_container)
             
-            # Process downloaded files
-            process_documents(
-                source='azure', 
+            # Download each blob
+            downloaded_files = []
+            for blob_name in blobs:
+                local_path = os.path.join(local_input_dir, os.path.basename(blob_name))
+                if storage_manager.download_blob(input_container, blob_name, local_path):
+                    downloaded_files.append(local_path)
+            
+            # Process downloaded documents
+            processed_files, unprocessed_files = process_documents(
+                source='azure',
                 config_path=args.config,
                 output_dir=args.output,
                 input_dir=local_input_dir,
                 confidence_threshold=args.confidence
             )
             
-            # Upload processed files to Azure output container
-            upload_azure_blobs(
-                cfg, 
-                cfg['paths']['output_dir'], 
-                cfg['azure_storage']['output_container']
-            )
+            # Archive if enabled
+            if archive_enabled:
+                # Create archive with processed and unprocessed files
+                archive_name = storage_manager.create_archive(
+                    processed_files, 
+                    unprocessed_files
+                )
+                
+                if archive_name:
+                    logging.info(f"Created archive: {archive_name}")
+                
+                # Optionally clean input container
+                if config.get('archiving', {}).get('clean_input_container', True):
+                    # Delete processed blobs
+                    processed_blob_names = [
+                        os.path.basename(f) for f in processed_files + unprocessed_files
+                    ]
+                    storage_manager.delete_multiple_blobs(processed_blob_names, input_container)
+        
+        logging.info("Document processing completed successfully")
     
     except Exception as e:
-        print(f"Error processing documents: {e}")
+        logging.critical(f"Critical error in document processing: {e}")
         import traceback
         traceback.print_exc()
+        raise
+
+if __name__ == "__main__":
+    main()
+
+
+------
+
+llm.py
+
+
+import os
+import json
+import logging
+import base64
+from openai import AzureOpenAI
+
+class DocumentClassifier:
+    def __init__(self, config):
+        """
+        Initialize Azure OpenAI client for document classification
+        """
+        self.config = config
+        try:
+            azure_cfg = config['azure_openai']
+            self.client = AzureOpenAI(
+                api_key=azure_cfg['api_key'],
+                api_version=azure_cfg['api_version'],
+                azure_endpoint=azure_cfg['endpoint']
+            )
+            
+            # Store configuration for API call
+            self.deployment = azure_cfg['deployment_name']
+            self.model_params = {
+                'max_tokens': azure_cfg.get('max_tokens', 300),
+                'temperature': azure_cfg.get('temperature', 0.2),
+                'top_p': azure_cfg.get('top_p', 0.95)
+            }
+        except Exception as e:
+            logging.error(f"Failed to initialize Azure OpenAI client: {e}")
+            raise
+
+    def classify_document(self, document_image, reference_dir):
+        """
+        Comprehensive document classification using references
+        """
+        try:
+            # Preprocess image
+            base64_image = self._preprocess_image(document_image)
+            
+            if not base64_image:
+                logging.error("Image preprocessing failed")
+                return self._default_classification()
+
+            # Prepare reference details
+            reference_details = self._prepare_reference_details(reference_dir)
+
+            # Get available categories from config
+            categories = self.config['categories']
+            
+            # Create comprehensive classification prompt
+            prompt = self._create_classification_prompt(
+                categories, 
+                reference_details
+            )
+
+            # Make API call
+            response = self.client.chat.completions.create(
+                model=self.deployment,
+                messages=[
+                    {"role": "system", "content": prompt},
+                    {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "text",
+                                "text": "Analyze and classify this document page using the comprehensive guidelines."
+                            },
+                            {
+                                "type": "image",
+                                "image_base64": base64_image
+                            }
+                        ]
+                    }
+                ],
+                response_format={"type": "json_object"},
+                **self.model_params
+            )
+
+            # Parse response
+            result = json.loads(response.choices[0].message.content)
+
+            # Validate and process classification
+            classification = self._process_classification(
+                result, 
+                categories, 
+                reference_details
+            )
+
+            # Log classification details
+            logging.info(f"Classification Result: {json.dumps(classification, indent=2)}")
+
+            return classification
+
+        except Exception as e:
+            logging.error(f"Document classification error: {e}")
+            return self._default_classification()
+
+    def _prepare_reference_details(self, reference_dir):
+        """
+        Generate detailed reference document metadata
+        """
+        reference_details = {}
+        
+        # Iterate through main categories
+        for main_category in os.listdir(reference_dir):
+            main_path = os.path.join(reference_dir, main_category)
+            if not os.path.isdir(main_path):
+                continue
+            
+            reference_details[main_category] = {}
+            
+            # Iterate through subcategories
+            for subcategory in os.listdir(main_path):
+                subcat_path = os.path.join(main_path, subcategory)
+                if not os.path.isdir(subcat_path):
+                    continue
+                
+                # Analyze reference documents
+                reference_docs = [
+                    f for f in os.listdir(subcat_path) 
+                    if os.path.isfile(os.path.join(subcat_path, f))
+                ]
+                
+                # Collect detailed metadata
+                reference_details[main_category][subcategory] = {
+                    'document_count': len(reference_docs),
+                    'document_types': list(set(os.path.splitext(doc)[1] for doc in reference_docs)),
+                    'document_names': reference_docs
+                }
+        
+        return reference_details
+
+    def _create_classification_prompt(self, categories, reference_details):
+        """
+        Create a detailed, context-rich classification prompt
+        """
+        return f"""
+        Advanced Document Classification AI System
+
+        COMPREHENSIVE CLASSIFICATION FRAMEWORK:
+        - Perform multi-dimensional document analysis
+        - Leverage extensive reference document insights
+        - Provide precise, confidence-driven categorization
+
+        REFERENCE DOCUMENT LANDSCAPE:
+        {json.dumps(reference_details, indent=2)}
+
+        CANONICAL DOCUMENT CATEGORIES:
+        {json.dumps(categories, indent=2)}
+
+        CLASSIFICATION PROTOCOL:
+        1. Visual Structural Analysis
+            - Examine document layout topology
+            - Identify characteristic visual markers
+            - Cross-reference with reference document patterns
+
+        2. Content Semantic Evaluation
+            - Decode implicit and explicit document signals
+            - Match against reference document semantic profiles
+            - Assess information density and structural coherence
+
+        3. Confidence Calibration
+            - Quantify matching precision
+            - Factor in reference document statistical insights
+            - Dynamically adjust confidence score
+
+        RESPONSE ARCHITECTURE:
+        {{
+            "main_category": "Primary document domain",
+            "subcategory": "Specialized document type",
+            "confidence_score": "Precision metric [0.0-1.0]",
+            "reasoning": "Comprehensive classification rationale"
+        }}
+
+        CRITICAL CLASSIFICATION CONSTRAINTS:
+        - Maintain taxonomic integrity
+        - Prioritize precision over broad categorization
+        - Provide transparent, data-driven reasoning
+        """
+
+    def _process_classification(self, result, categories, reference_details):
+        """
+        Process and validate classification result
+        """
+        # Extract classification components
+        main_category = result.get('main_category', 'unknown').lower()
+        subcategory = result.get('subcategory', 'unknown').lower()
+        confidence = float(result.get('confidence_score', 0.0))
+        reasoning = result.get('reasoning', 'No detailed reasoning')
+
+        # Validate main category
+        if main_category not in categories:
+            main_category = 'unknown'
+            subcategory = 'unknown'
+            confidence = 0.0
+
+        # Validate subcategory
+        if main_category != 'unknown':
+            valid_subcategories = categories.get(main_category, [])
+            if subcategory not in valid_subcategories:
+                subcategory = 'unknown'
+                confidence *= 0.5
+
+        # Reference document impact
+        reference_count = reference_details.get(main_category, {}).get(subcategory, {}).get('document_count', 0)
+        if reference_count > 0:
+            confidence *= 1.2  # Boost for strong reference matching
+
+        # Confidence capping
+        confidence = min(confidence, 1.0)
+
+        return {
+            'main_category': main_category,
+            'subcategory': subcategory,
+            'confidence': confidence,
+            'reasoning': reasoning,
+            'reference_document_count': reference_count
+        }
+
+    def _default_classification(self):
+        """
+        Provide a default classification when processing fails
+        """
+        return {
+            'main_category': 'unknown',
+            'subcategory': 'unknown',
+            'confidence': 0.0,
+            'reasoning': 'Classification process encountered an error',
+            'reference_document_count': 0
+        }
+
+    def _preprocess_image(self, document_image):
+        """
+        Preprocess document image for classification
+        """
+        try:
+            from PIL import Image
+            import io
+
+            # Open image from bytes
+            img = Image.open(io.BytesIO(document_image))
+            
+            # Convert to RGB if needed
+            if img.mode != 'RGB':
+                img = img.convert('RGB')
+            
+            # Resize image
+            img = img.resize((800, 600), Image.LANCZOS)
+            
+            # Compress image
+            buffer = io.BytesIO()
+            img.save(buffer, format="PNG", optimize=True, quality=85)
+            
+            # Convert to base64
+            return base64.b64encode(buffer.getvalue()).decode('utf-8')
+        
+        except Exception as e:
+            logging.error(f"Image preprocessing error: {e}")
+            return None
+
+
+-----
+config.json
+
+{
+    "azure_openai": {
+        "api_key": "YOUR_AZURE_OPENAI_KEY",
+        "endpoint": "https://your-resource-name.openai.azure.com/",
+        "deployment_name": "your-gpt-4o-deployment-name",
+        "api_version": "2024-02-15-preview",
+        "api_type": "azure",
+        "model_name": "gpt-4o",
+        "max_tokens": 300,
+        "temperature": 0.2,
+        "top_p": 0.95
+    },
+    "azure_storage": {
+        "connection_string": "YOUR_AZURE_STORAGE_CONNECTION_STRING",
+        "input_container": "documentclassificationinput",
+        "output_container": "documentclassificationoutput",
+        "reference_container": "documentclassificationreference",
+        "archive_container": "documentclassificationarchive"
+    },
+    "paths": {
+        "input_dir": "./input",
+        "output_dir": "./output",
+        "reference_dir": "./reference"
+    },
+    "categories": {
+        "medical": [
+            "insurance_claim", 
+            "prescription", 
+            "medical_report"
+        ],
+        "financial": [
+            "invoice", 
+            "bank_statement", 
+            "tax_document"
+        ],
+        "legal": [
+            "contract", 
+            "agreement", 
+            "legal_notice"
+        ]
+    },
+    "classification": {
+        "confidence_threshold": 0.6
+    },
+    "archiving": {
+        "enabled": true,
+        "clean_input_container": true,
+        "archive_name_format": "document_archive_{timestamp}.zip",
+        "processed_folder": "processed/",
+        "unprocessed_folder": "unprocessed/"
+    },
+    "logging": {
+        "level": "INFO",
+        "max_log_files": 10,
+        "log_retention_days": 30
+    },
+    "token_pricing": {
+        "gpt-4o": {
+            "input": {
+                "price_per_million": 2.50,
+                "description": "Input token pricing"
+            },
+            "output": {
+                "price_per_million": 10.00,
+                "description": "Output token pricing"
+            },
+            "cached_input": {
+                "price_per_million": 1.25,
+                "description": "Cached input token pricing"
+            }
+        }
+    }
+}
