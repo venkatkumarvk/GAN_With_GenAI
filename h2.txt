@@ -180,7 +180,7 @@ def process_local_documents(config, input_folder=None, confidence_threshold=0.6)
                 unprocessed_files.append(fpath)
                 continue
 
-            # Convert to PDF
+            # Convert to PDF if needed
             pdf_path = convert_to_pdf(fpath)
             if not pdf_path:
                 raise ValueError(f"Failed to convert {fname} to PDF")
@@ -236,14 +236,11 @@ def process_local_documents(config, input_folder=None, confidence_threshold=0.6)
 
                 # Create PDFs for each subcategory
                 for (main_cat, sub_cat), pages in subcategory_groups.items():
-                    # Convert page numbers to 1-based for filename
-                    page_nums_str = '_'.join(str(p+1) for p in pages)
-                    
                     # Open original PDF
                     doc = fitz.open(pdf_path)
                     classified_doc = fitz.open()
                     
-                    # Add classified pages
+                    # Add only classified pages to the new PDF
                     for page_num in pages:
                         classified_doc.insert_pdf(doc, from_page=page_num, to_page=page_num)
                     
@@ -251,12 +248,15 @@ def process_local_documents(config, input_folder=None, confidence_threshold=0.6)
                     base_name = os.path.splitext(fname)[0]
                     sanitized_base = sanitize_filename(base_name)
                     
+                    # Create page number string for classified pages
+                    classified_page_nums = '_'.join(str(p+1) for p in pages)
+                    
                     # Prepare output path
                     category_path = os.path.join(classified_dir, main_cat, sub_cat)
                     os.makedirs(category_path, exist_ok=True)
                     
                     # Create output filename
-                    output_filename = f"{sanitized_base}_classified_{page_nums_str}.pdf"
+                    output_filename = f"{sanitized_base}_page{classified_page_nums}.pdf"
                     output_path = os.path.join(category_path, output_filename)
                     
                     # Save PDF
@@ -266,9 +266,6 @@ def process_local_documents(config, input_folder=None, confidence_threshold=0.6)
 
             # Process unclassified pages
             if unclassified_pages:
-                # Convert page numbers to 1-based for filename
-                page_nums_str = '_'.join(str(p+1) for p in unclassified_pages)
-                
                 # Open original PDF
                 doc = fitz.open(pdf_path)
                 unclassified_doc = fitz.open()
@@ -281,8 +278,11 @@ def process_local_documents(config, input_folder=None, confidence_threshold=0.6)
                 base_name = os.path.splitext(fname)[0]
                 sanitized_base = sanitize_filename(base_name)
                 
+                # Create page number string for unclassified pages
+                unclassified_page_nums = '_'.join(str(p+1) for p in unclassified_pages)
+                
                 # Save unclassified PDF
-                output_filename = f"{sanitized_base}_unclassified_{page_nums_str}.pdf"
+                output_filename = f"{sanitized_base}_unclassified_pages{unclassified_page_nums}.pdf"
                 output_path = os.path.join(unclassified_dir, output_filename)
                 
                 unclassified_doc.save(output_path)
@@ -304,7 +304,6 @@ def process_local_documents(config, input_folder=None, confidence_threshold=0.6)
             unprocessed_files.append(fpath)
 
     return processed_files, unprocessed_files
-
 
 def process_azure_documents(config, input_folder, confidence_threshold=0.6, archive_enabled=True, clean_input_container=True):
     """
