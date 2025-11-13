@@ -1,3 +1,203 @@
+def process_local_documents(config, input_folder=None, confidence_threshold=0.6, processing_mode='general'):
+    """
+    Process documents from local filesystem
+    """
+    # Use paths from configuration for local source
+    input_dir = input_folder or config['paths']['input_dir']
+    output_dir = config['paths']['output_dir']
+    
+    # Create output directories
+    source_dir = os.path.join(output_dir, 'source')
+    classified_dir = os.path.join(output_dir, 'classified')
+    unclassified_dir = os.path.join(output_dir, 'unclassified')
+    unprocessed_dir = os.path.join(output_dir, 'unprocessed')
+    
+    # Create directories
+    for directory in [source_dir, classified_dir, unclassified_dir, unprocessed_dir]:
+        os.makedirs(directory, exist_ok=True)
+    
+    # Initialize document classifier with processing mode
+    classifier = DocumentClassifier(config, processing_mode=processing_mode)
+    
+    # Reference directory
+    reference_dir = config['paths']['reference_dir']
+    
+    # Track processed and unprocessed files
+    processed_files = []
+    unprocessed_files = []
+
+    # Process each document in local input directory
+    for fname in os.listdir(input_dir):
+        try:
+            fpath = os.path.join(input_dir, fname)
+            
+            # Skip directories and hidden files
+            if not os.path.isfile(fpath) or fname.startswith('.'):
+                continue
+
+            # Determine file type
+            file_type = os.path.splitext(fname)[1].lower()
+            
+            # Process only supported file types
+            if file_type not in ['.pdf', '.jpg', '.jpeg', '.png']:
+                # Move unprocessable files to unprocessed folder
+                unprocessed_path = os.path.join(unprocessed_dir, fname)
+                shutil.copy2(fpath, unprocessed_path)
+                logging.warning(f"Unsupported file type, moved to unprocessed: {fname}")
+                unprocessed_files.append(fpath)
+                continue
+
+            # Convert to PDF if needed
+            pdf_path = convert_to_pdf(fpath)
+            if not pdf_path:
+                raise ValueError(f"Failed to convert {fname} to PDF")
+
+            # Copy source PDF
+            shutil.copy2(pdf_path, os.path.join(source_dir, os.path.basename(pdf_path)))
+
+            # Open PDF
+            doc = fitz.open(pdf_path)
+            total_pages = len(doc)
+
+            # Track page classifications
+            classified_pages = []
+            unclassified_pages = []
+
+            # Process each page
+            for page_num in range(total_pages):
+                try:
+                    # Extract page image
+                    page_image = extract_page_image(pdf_path, page_num)
+                    
+                    # Classify page
+                    classification = classifier.classify_document(page_image, reference_dir)
+                    
+                    # Check classification confidence
+                    if (classification['confidence'] >= confidence_threshold 
+                        and classification['main_category'] != 'unknown'):
+                        classified_pages.append({
+                            'page': page_num,
+                            'category': classification['main_category'],
+                            'subcategory': classification['subcategory'],
+                            'confidence': classification['confidence']
+                        })
+                    else:
+                        unclassified_pages.append(page_num)
+
+                except Exception as page_error:
+                    logging.error(f"Error processing page {page_num} in {fname}: {page_error}")
+                    unclassified_pages.append(page_num)
+
+            # Close original document
+            doc.close()
+
+            # Process classified pages
+            if classified_pages:
+                # Group by subcategory
+                subcategory_groups = {}
+                for page in classified_pages:
+                    key = (page['category'], page['subcategory'])
+                    if key not in subcategory_groups:
+                        subcategory_groups[key] = []
+                    subcategory_groups[key].append(page['page'])
+
+                # Create PDFs for each subcategory
+                for (main_cat, sub_cat), pages in subcategory_groups.items():
+                    # Open original PDF
+                    doc = fitz.open(pdf_path)
+                    classified_doc = fitz.open()
+                    
+                    # Add only classified pages to the new PDF
+                    for page_num in pages:
+                        classified_doc.insert_pdf(doc, from_page=page_num, to_page=page_num)
+                    
+                    # Sanitize original filename
+                    base_name = os.path.splitext(fname)[0]
+                    sanitized_base = sanitize_filename(base_name)
+                    
+                    # Create page number string for classified pages
+                    classified_page_nums = '_'.join(str(p+1) for p in pages)
+                    
+                    # Prepare output path
+                    category_path = os.path.join(classified_dir, main_cat, sub_cat)
+                    os.makedirs(category_path, exist_ok=True)
+                    
+                    # Create output filename
+                    output_filename = f"{sanitized_base}_page{classified_page_nums}.pdf"
+                    output_path = os.path.join(category_path, output_filename)
+                    
+                    # Save PDF
+                    classified_doc.save(output_path)
+                    classified_doc.close()
+                    doc.close()
+
+            # Process unclassified pages
+            if unclassified_pages:
+                # Open original PDF
+                doc = fitz.open(pdf_path)
+                unclassified_doc = fitz.open()
+                
+                # Add unclassified pages
+                for page_num in unclassified_pages:
+                    unclassified_doc.insert_pdf(doc, from_page=page_num, to_page=page_num)
+                
+                # Sanitize original filename
+                base_name = os.path.splitext(fname)[0]
+                sanitized_base = sanitize_filename(base_name)
+                
+                # Create page number string for unclassified pages
+                unclassified_page_nums = '_'.join(str(p+1) for p in unclassified_pages)
+                
+                # Save unclassified PDF
+                output_filename = f"{sanitized_base}_unclassified_pages{unclassified_page_nums}.pdf"
+                output_path = os.path.join(unclassified_dir, output_filename)
+                
+                unclassified_doc.save(output_path)
+                unclassified_doc.close()
+                doc.close()
+
+        except Exception as doc_error:
+            logging.error(f"Error processing document {fname}: {doc_error}")
+            logging.error(traceback.format_exc())
+            
+            # Move source document to unprocessed folder
+            unprocessed_path = os.path.join(unprocessed_dir, fname)
+            try:
+                shutil.copy2(fpath, unprocessed_path)
+                logging.info(f"Moved unprocessed document to: {unprocessed_path}")
+            except Exception as move_error:
+                logging.error(f"Could not move unprocessed document {fname}: {move_error}")
+            
+            unprocessed_files.append(fpath)
+
+    return processed_files, unprocessed_files
+
+
+def process_documents(source='local', config_path='config.json', **kwargs):
+    """
+    Main document processing dispatcher
+    """
+    # Load configuration
+    config = load_config(config_path)
+    
+    # Determine processing method based on source
+    if source == 'local':
+        return process_local_documents(
+            config, 
+            processing_mode=kwargs.get('processing_mode', 'general'),
+            **kwargs
+        )
+    elif source == 'azure':
+        return process_azure_documents(config, **kwargs)
+    else:
+        raise ValueError(f"Unsupported source: {source}")
+
+
+
+
+
+
+
 #updated
 
 import os
