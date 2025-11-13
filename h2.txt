@@ -193,8 +193,8 @@ def process_local_documents(config, input_folder=None, confidence_threshold=0.6)
             total_pages = len(doc)
 
             # Track page classifications
-            classified_pages = []
-            unclassified_pages = []
+            document_classified_pages = []
+            document_unclassified_pages = []
 
             # Process each page
             for page_num in range(total_pages):
@@ -208,27 +208,27 @@ def process_local_documents(config, input_folder=None, confidence_threshold=0.6)
                     # Check classification confidence
                     if (classification['confidence'] >= confidence_threshold 
                         and classification['main_category'] != 'unknown'):
-                        classified_pages.append({
+                        document_classified_pages.append({
                             'page': page_num,
                             'category': classification['main_category'],
                             'subcategory': classification['subcategory'],
                             'confidence': classification['confidence']
                         })
                     else:
-                        unclassified_pages.append(page_num)
+                        document_unclassified_pages.append(page_num)
 
                 except Exception as page_error:
                     logging.error(f"Error processing page {page_num} in {fname}: {page_error}")
-                    unclassified_pages.append(page_num)
+                    document_unclassified_pages.append(page_num)
 
             # Close original document
             doc.close()
 
             # Process classified pages
-            if classified_pages:
+            if document_classified_pages:
                 # Group by subcategory
                 subcategory_groups = {}
-                for page in classified_pages:
+                for page in document_classified_pages:
                     key = (page['category'], page['subcategory'])
                     if key not in subcategory_groups:
                         subcategory_groups[key] = []
@@ -264,14 +264,22 @@ def process_local_documents(config, input_folder=None, confidence_threshold=0.6)
                     classified_doc.close()
                     doc.close()
 
+                    # Track processed file
+                    processed_files.append({
+                        'original_path': pdf_path,
+                        'classified_path': output_path,
+                        'classified_pages': document_classified_pages,
+                        'unclassified_pages': document_unclassified_pages
+                    })
+
             # Process unclassified pages
-            if unclassified_pages:
+            if document_unclassified_pages:
                 # Open original PDF
                 doc = fitz.open(pdf_path)
                 unclassified_doc = fitz.open()
                 
                 # Add unclassified pages
-                for page_num in unclassified_pages:
+                for page_num in document_unclassified_pages:
                     unclassified_doc.insert_pdf(doc, from_page=page_num, to_page=page_num)
                 
                 # Sanitize original filename
@@ -279,7 +287,7 @@ def process_local_documents(config, input_folder=None, confidence_threshold=0.6)
                 sanitized_base = sanitize_filename(base_name)
                 
                 # Create page number string for unclassified pages
-                unclassified_page_nums = '_'.join(str(p+1) for p in unclassified_pages)
+                unclassified_page_nums = '_'.join(str(p+1) for p in document_unclassified_pages)
                 
                 # Save unclassified PDF
                 output_filename = f"{sanitized_base}_unclassified_pages{unclassified_page_nums}.pdf"
@@ -288,6 +296,15 @@ def process_local_documents(config, input_folder=None, confidence_threshold=0.6)
                 unclassified_doc.save(output_path)
                 unclassified_doc.close()
                 doc.close()
+
+                # If no classified pages, track the file
+                if not document_classified_pages:
+                    processed_files.append({
+                        'original_path': pdf_path,
+                        'unclassified_path': output_path,
+                        'classified_pages': [],
+                        'unclassified_pages': document_unclassified_pages
+                    })
 
         except Exception as doc_error:
             logging.error(f"Error processing document {fname}: {doc_error}")
