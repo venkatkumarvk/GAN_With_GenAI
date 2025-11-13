@@ -1051,3 +1051,55 @@ def classify_document(self, document_image, reference_dir):
 
 
 ---
+
+
+def process_local_documents(config, input_folder=None, confidence_threshold=0.6):
+    # ... existing setup code ...
+
+    # Get batch size from configuration
+    batch_size = config.get('classification', {}).get('batch_size', 10)
+
+    # Process documents in batches
+    input_files = [f for f in os.listdir(input_dir) if os.path.isfile(os.path.join(input_dir, f)) and not f.startswith('.')]
+    
+    for i in range(0, len(input_files), batch_size):
+        batch_files = input_files[i:i+batch_size]
+        
+        for fname in batch_files:
+            try:
+                # Existing document processing code remains the same
+                ...
+
+    return processed_files, unprocessed_files
+
+
+-------
+
+
+def process_azure_documents(config, input_folder, confidence_threshold=0.6, archive_enabled=True, clean_input_container=True):
+    # ... existing setup code ...
+
+    # Get batch size from configuration
+    batch_size = config.get('classification', {}).get('batch_size', 10)
+
+    # List blobs in input container/folder
+    blobs = storage_manager.list_blobs(input_container, prefix=input_folder)
+    
+    # Process blobs in batches
+    for i in range(0, len(blobs), batch_size):
+        batch_blobs = blobs[i:i+batch_size]
+        
+        for blob_name in batch_blobs:
+            try:
+                # Existing blob processing code remains the same
+                ...
+
+    return processed_files, unprocessed_files
+
+-----
+{
+    "classification": {
+        "confidence_threshold": 0.6,
+        "batch_size": 10  // Number of documents to process in one batch
+    }
+}
