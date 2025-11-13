@@ -91,8 +91,9 @@ def process_local_documents(config, input_folder=None, confidence_threshold=0.6,
             # Close original document
             doc.close()
 
-            # Process classified pages
+            # Determine document processing status
             if classified_pages:
+                # Process classified pages
                 # Group by subcategory
                 subcategory_groups = {}
                 for page in classified_pages:
@@ -131,6 +132,15 @@ def process_local_documents(config, input_folder=None, confidence_threshold=0.6,
                     classified_doc.close()
                     doc.close()
 
+                    # Track processed file
+                    processed_files.append({
+                        'original_path': pdf_path,
+                        'processed_path': output_path,
+                        'main_category': main_cat,
+                        'subcategory': sub_cat,
+                        'classified_pages': pages
+                    })
+
             # Process unclassified pages
             if unclassified_pages:
                 # Open original PDF
@@ -156,6 +166,16 @@ def process_local_documents(config, input_folder=None, confidence_threshold=0.6,
                 unclassified_doc.close()
                 doc.close()
 
+                # If no classified pages, track the file as processed
+                if not classified_pages:
+                    processed_files.append({
+                        'original_path': pdf_path,
+                        'processed_path': output_path,
+                        'main_category': 'unknown',
+                        'subcategory': 'unknown',
+                        'unclassified_pages': unclassified_pages
+                    })
+
         except Exception as doc_error:
             logging.error(f"Error processing document {fname}: {doc_error}")
             logging.error(traceback.format_exc())
@@ -171,7 +191,6 @@ def process_local_documents(config, input_folder=None, confidence_threshold=0.6,
             unprocessed_files.append(fpath)
 
     return processed_files, unprocessed_files
-
 
 def process_documents(source='local', config_path='config.json', **kwargs):
     """
