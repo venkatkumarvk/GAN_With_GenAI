@@ -1103,3 +1103,104 @@ def process_azure_documents(config, input_folder, confidence_threshold=0.6, arch
         "batch_size": 10  // Number of documents to process in one batch
     }
 }
+
+
+-----
+
+def process_azure_documents(config, input_folder, confidence_threshold=0.6, archive_enabled=True, clean_input_container=True):
+    # ... existing processing code ...
+
+    # Archiving block
+    archive_path = None
+    if archive_enabled:
+        try:
+            # Create a BytesIO object to store the ZIP
+            archive_buffer = io.BytesIO()
+            
+            with zipfile.ZipFile(archive_buffer, 'w', zipfile.ZIP_DEFLATED) as zipf:
+                # Add processed files
+                for doc in processed_files:
+                    original_filename = os.path.basename(doc['original_path'])
+                    zipf.write(
+                        doc['original_path'], 
+                        arcname=f"processed/{original_filename}"
+                    )
+                
+                # Add unprocessed files (blob names)
+                for blob_name in unprocessed_files:
+                    zipf.writestr(
+                        f"unprocessed/{os.path.basename(blob_name)}", 
+                        f"Unprocessed blob: {blob_name}"
+                    )
+            
+            # Prepare archive name
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            archive_name = f"documentclassification_{timestamp}.zip"
+            
+            # Upload archive to storage
+            archive_buffer.seek(0)
+            blob_client = storage_manager.blob_service_client.get_blob_client(
+                container=archive_container, 
+                blob=archive_name
+            )
+            blob_client.upload_blob(archive_buffer.getvalue())
+            
+            # Construct full archive path
+            archive_path = f"https://{storage_manager.blob_service_client.account_name}.blob.core.windows.net/{archive_container}/{archive_name}"
+            
+            logging.info(f"Created archive: {archive_path}")
+        
+        except Exception as archive_error:
+            logging.error(f"Error creating archive: {archive_error}")
+
+    # Final logging
+    logging.info("\n--- Azure Processing Summary ---")
+    logging.info(f"Total Documents Processed: {total_documents}")
+    logging.info(f"Total Pages: {total_pages}")
+    logging.info(f"Source Files: {total_source_files}")
+    logging.info(f"Classified Pages: {total_classified_pages}")
+    logging.info(f"Unclassified Pages: {total_unclassified_pages}")
+    logging.info(f"Unprocessed Files: {total_unprocessed_files}")
+    logging.info(f"Total Token Cost: ${total_token_cost:.4f}")
+    
+    # Archiving status logging
+    if archive_enabled:
+        logging.info(f"Archive Location: {archive_path}")
+    else:
+        logging.info("No archive created")
+
+    # Print to terminal
+    print("\n--- Processing Statistics ---")
+    print(f"Total Documents Processed: {total_documents}")
+    print(f"Total Pages: {total_pages}")
+    print(f"Source Files: {total_source_files}")
+    print(f"Classified Pages: {total_classified_pages}")
+    print(f"Unclassified Pages: {total_unclassified_pages}")
+    print(f"Unprocessed Files: {total_unprocessed_files}")
+    print(f"Total Token Cost: ${total_token_cost:.4f}")
+    
+    # Archiving status terminal output
+    if archive_enabled:
+        print(f"Archive Location: {archive_path}")
+    else:
+        print("No archive created")
+
+    return processed_files, unprocessed_files
+```
+
+Key improvements:
+1. Detailed logging for both local and Azure processing
+2. Full archive path logged when archiving is enabled
+3. Clear indication when no archive is created
+4. Consistent logging between local and Azure processing
+5. Both logging and terminal output include archiving status
+
+Example log outputs:
+With archiving:
+```
+Created archive: https://mystorageaccount.blob.core.windows.net/documentclassificationarchive/documentclassification_20231115_123456.zip
+```
+
+Without archiving:
+```
+No archive created
