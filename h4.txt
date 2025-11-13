@@ -11,6 +11,84 @@ from openai import AzureOpenAI
 from PIL import Image
 import fitz  # PyMuPDF
 
+
+def prepare_reference_details(self, reference_dir):
+    """
+    Generate detailed reference document metadata
+    """
+    try:
+        reference_details = {}
+        
+        # Main categories from config
+        categories = self.config.get('categories', {})
+        
+        for main_category, subcategories in categories.items():
+            reference_details[main_category] = {}
+            
+            # Check if reference directory exists for main category
+            main_category_path = os.path.join(reference_dir, main_category)
+            if not os.path.isdir(main_category_path):
+                continue
+            
+            for subcategory in subcategories:
+                # Check subcategory path
+                subcategory_path = os.path.join(main_category_path, subcategory)
+                if not os.path.isdir(subcategory_path):
+                    continue
+                
+                # Collect reference document details
+                reference_details[main_category][subcategory] = {
+                    'document_count': len(os.listdir(subcategory_path)),
+                    'document_types': list(set(os.path.splitext(f)[1] for f in os.listdir(subcategory_path) if os.path.isfile(os.path.join(subcategory_path, f))))
+                }
+        
+        return reference_details
+    except Exception as e:
+        logging.error(f"Error preparing reference details: {e}")
+        return {}
+
+def _create_classification_prompt(self, reference_dir):
+    """
+    Create a comprehensive classification prompt
+    """
+    # Prepare reference details
+    reference_details = self.prepare_reference_details(reference_dir)
+    
+    return f"""
+    Advanced Document Classification AI System
+
+    CONTEXT:
+    - Carefully analyze the document page
+    - Identify precise document category
+    - Provide confident, data-driven classification
+
+    REFERENCE DOCUMENT ANALYSIS:
+    {json.dumps(reference_details, indent=2)}
+
+    AVAILABLE CATEGORIES:
+    {json.dumps(self.config.get('categories', {}), indent=2)}
+
+    CLASSIFICATION CRITERIA:
+    1. Examine visual document structure
+    2. Compare against reference documents
+    3. Match document characteristics precisely
+    4. Prioritize accuracy over breadth
+    5. Provide clear reasoning
+
+    CLASSIFICATION CONSTRAINTS:
+    - Main category must be: {', '.join(self.config.get('categories', {}).keys())}
+    - Subcategories must match reference document structure
+    - Confidence score reflects matching precision
+
+    RESPONSE FORMAT:
+    {{
+        "main_category": "Exact category from references",
+        "subcategory": "Precise subcategory",
+        "confidence_score": 0.0-1.0,
+        "reasoning": "Detailed classification explanation"
+    }}
+    """
+
 class DocumentClassifier:
     def __init__(self, config, processing_mode='general'):
         """
