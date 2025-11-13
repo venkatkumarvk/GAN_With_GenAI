@@ -1,3 +1,393 @@
+#updated
+
+import os
+import io
+import json
+import base64
+import logging
+import time
+from datetime import datetime
+from openai import AzureOpenAI
+from PIL import Image
+import fitz  # PyMuPDF
+
+class DocumentClassifier:
+    def __init__(self, config, processing_mode='general'):
+        """
+        Initialize Azure OpenAI client for document classification
+        
+        :param config: Configuration dictionary
+        :param processing_mode: 'general' or 'batch'
+        """
+        self.config = config
+        self.processing_mode = processing_mode
+        
+        try:
+            # Select configuration based on processing mode
+            if processing_mode == 'general':
+                azure_cfg = config['azure_openai']
+            elif processing_mode == 'batch':
+                azure_cfg = config['azure_openai_batch']
+            else:
+                raise ValueError(f"Invalid processing mode: {processing_mode}")
+            
+            # Initialize Azure OpenAI client
+            self.client = AzureOpenAI(
+                api_key=azure_cfg['api_key'],
+                api_version=azure_cfg['api_version'],
+                azure_endpoint=azure_cfg['endpoint']
+            )
+            
+            self.deployment_name = azure_cfg['deployment_name']
+            self.model_params = {
+                'max_tokens': azure_cfg.get('max_tokens', 300),
+                'temperature': azure_cfg.get('temperature', 0.2),
+                'top_p': azure_cfg.get('top_p', 0.95)
+            }
+        except Exception as e:
+            logging.error(f"Failed to initialize Azure OpenAI client: {e}")
+            raise
+
+    def preprocess_image(self, document_image):
+        """
+        Preprocess image to ensure compatibility with GPT-4o
+        """
+        try:
+            # Open image from bytes
+            img = Image.open(io.BytesIO(document_image))
+            
+            # Convert to RGB if needed
+            if img.mode != 'RGB':
+                img = img.convert('RGB')
+            
+            # Resize image
+            img = img.resize((800, 600), Image.LANCZOS)
+            
+            # Compress image
+            buffer = io.BytesIO()
+            img.save(buffer, format="PNG", optimize=True, quality=85)
+            
+            # Convert to base64
+            base64_image = base64.b64encode(buffer.getvalue()).decode('utf-8')
+            
+            return base64_image
+        
+        except Exception as e:
+            logging.error(f"Image preprocessing error: {e}")
+            return None
+
+    def prepare_reference_details(self, reference_dir):
+        """
+        Generate detailed reference document metadata
+        """
+        try:
+            reference_details = {}
+            for main_category in os.listdir(reference_dir):
+                main_path = os.path.join(reference_dir, main_category)
+                if not os.path.isdir(main_path):
+                    continue
+                
+                reference_details[main_category] = {}
+                
+                for subcategory in os.listdir(main_path):
+                    subcat_path = os.path.join(main_path, subcategory)
+                    if not os.path.isdir(subcat_path):
+                        continue
+                    
+                    reference_details[main_category][subcategory] = {
+                        'document_count': len(os.listdir(subcat_path)),
+                        'document_types': list(set(os.path.splitext(f)[1] for f in os.listdir(subcat_path)))
+                    }
+            
+            return reference_details
+        except Exception as e:
+            logging.error(f"Error preparing reference details: {e}")
+            return {}
+
+    def _create_classification_prompt(self, reference_dir):
+        """
+        Create a comprehensive classification prompt
+        """
+        # Prepare reference details
+        reference_details = self.prepare_reference_details(reference_dir)
+        
+        return f"""
+        Advanced Document Classification AI System V2.0
+
+        COMPREHENSIVE CLASSIFICATION FRAMEWORK:
+        - Perform multi-dimensional document analysis
+        - Leverage extensive reference document insights
+        - Provide precise, confidence-driven categorization
+
+        REFERENCE DOCUMENT LANDSCAPE:
+        {json.dumps(reference_details, indent=2)}
+
+        CANONICAL DOCUMENT CATEGORIES:
+        Analyze the document considering the following key categories and their potential subcategories.
+
+        CLASSIFICATION PROTOCOL:
+        1. Visual Structural Analysis
+            - Examine document layout topology
+            - Identify characteristic visual markers
+            - Cross-reference with reference document patterns
+
+        2. Content Semantic Evaluation
+            - Decode implicit and explicit document signals
+            - Match against reference document semantic profiles
+            - Assess information density and structural coherence
+
+        RESPONSE FORMAT:
+        {{
+            "main_category": "Primary document domain (medical/financial/legal)",
+            "subcategory": "Specialized document type",
+            "confidence_score": "Precision metric [0.0-1.0]",
+            "reasoning": "Comprehensive classification rationale"
+        }}
+
+        CRITICAL CLASSIFICATION CONSTRAINTS:
+        - Maintain taxonomic integrity
+        - Prioritize precision over broad categorization
+        - Provide transparent, data-driven reasoning
+        """
+
+    def classify_document(self, document_image, reference_dir):
+        """
+        Classify document using specified processing mode
+        
+        Supports:
+        - Multi-page PDF processing
+        - Single PDF processing
+        - Image processing
+        """
+        if self.processing_mode == 'general':
+            return self._classify_general(document_image, reference_dir)
+        elif self.processing_mode == 'batch':
+            return self._classify_batch_single(document_image, reference_dir)
+        else:
+            raise ValueError(f"Invalid processing mode: {self.processing_mode}")
+
+    def _classify_general(self, document_image, reference_dir):
+        """
+        General classification using synchronous API
+        """
+        try:
+            # Preprocess image
+            base64_image = self.preprocess_image(document_image)
+            
+            if not base64_image:
+                return self._default_classification()
+
+            response = self.client.chat.completions.create(
+                model=self.deployment_name,
+                messages=[
+                    {"role": "system", "content": self._create_classification_prompt(reference_dir)},
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "text", "text": "Classify this document page"},
+                            {"type": "image", "image_base64": base64_image}
+                        ]
+                    }
+                ],
+                response_format={"type": "json_object"},
+                **self.model_params
+            )
+
+            result = json.loads(response.choices[0].message.content)
+            
+            return {
+                'main_category': result.get('main_category', 'unknown').lower(),
+                'subcategory': result.get('subcategory', 'unknown').lower(),
+                'confidence': float(result.get('confidence_score', 0.0)),
+                'reasoning': result.get('reasoning', 'No reasoning'),
+                'token_usage': self._calculate_token_cost(response.usage)
+            }
+        except Exception as e:
+            logging.error(f"General classification error: {e}")
+            return self._default_classification()
+
+    def _classify_batch_single(self, document_image, reference_dir):
+        """
+        Batch classification for a single document
+        """
+        try:
+            # Preprocess image
+            base64_image = self.preprocess_image(document_image)
+            
+            if not base64_image:
+                return self._default_classification()
+
+            # Prepare batch processing for a single image
+            base64_strings = [base64_image]
+            prompts = ["Classify this document page"]
+            systemprompt = self._create_classification_prompt(reference_dir)
+
+            # Process batch
+            results = self.process_batch(base64_strings, prompts, systemprompt)
+
+            # Parse the first (and only) result
+            if results and results[0]:
+                try:
+                    result = json.loads(results[0])
+                    return {
+                        'main_category': result.get('main_category', 'unknown').lower(),
+                        'subcategory': result.get('subcategory', 'unknown').lower(),
+                        'confidence': float(result.get('confidence_score', 0.0)),
+                        'reasoning': result.get('reasoning', 'No reasoning'),
+                        'token_usage': None  # Token usage tracking for batch is different
+                    }
+                except json.JSONDecodeError:
+                    logging.error("Failed to parse batch classification result")
+                    return self._default_classification()
+            else:
+                return self._default_classification()
+        except Exception as e:
+            logging.error(f"Batch classification error: {e}")
+            return self._default_classification()
+
+    def process_batch(self, base64_strings, prompts, systemprompt=None):
+        """
+        Process images using the Batch API (asynchronous, efficient for large batches).
+        
+        Args:
+            base64_strings: List of base64 encoded images
+            prompts: List of user prompts (one per image)
+            systemprompt: System prompt (optional)
+        
+        Returns:
+            List of API responses (strings) in same order as input
+        """
+        logging.info(f"Processing {len(base64_strings)} images using Batch API")
+        
+        try:
+            # Step 1: Create batch requests
+            batch_requests = self._create_batch_requests(base64_strings, prompts, systemprompt)
+            
+            # Step 2: Upload batch file
+            batch_file_id = self._upload_batch_file(batch_requests)
+            if not batch_file_id:
+                logging.error("Failed to upload batch file")
+                return [None] * len(base64_strings)
+            
+            # Step 3: Create batch job
+            batch_id = self._create_batch_job(batch_file_id)
+            if not batch_id:
+                logging.error("Failed to create batch job")
+                return [None] * len(base64_strings)
+            
+            # Step 4: Wait for batch completion
+            batch_completed = self._wait_for_batch_completion(batch_id)
+            if not batch_completed:
+                logging.error("Batch processing failed or timed out")
+                return [None] * len(base64_strings)
+            
+            # Step 5: Retrieve batch results
+            results = self._retrieve_batch_results(batch_id, len(base64_strings))
+            
+            logging.info(f"Batch API processing complete: {len([r for r in results if r])}/{len(results)} successful")
+            return results
+            
+        except Exception as e:
+            logging.error(f"Error in batch processing: {str(e)}")
+            return [None] * len(base64_strings)
+
+    def _create_batch_requests(self, base64_strings, prompts, systemprompt=None):
+        """
+        Create batch request objects for Batch API.
+        """
+        batch_requests = []
+        
+        for i, (base64_string, user_prompt) in enumerate(zip(base64_strings, prompts)):
+            # Prepare messages
+            messages = []
+            
+            # Add system message if provided
+            if systemprompt:
+                messages.append({
+                    "role": "system",
+                    "content": systemprompt
+                })
+            
+            # Add user message with image
+            user_content = [
+                {
+                    "type": "text",
+                    "text": user_prompt
+                },
+                {
+                    "type": "image_url",
+                    "image_url": {
+                        "url": f"data:image/png;base64,{base64_string}"
+                    }
+                }
+            ]
+            
+            messages.append({
+                "role": "user",
+                "content": user_content
+            })
+            
+            # Create batch request item (JSONL format)
+            batch_request = {
+                "custom_id": f"request_{i}",
+                "method": "POST",
+                "url": "/chat/completions",
+                "body": {
+                    "model": self.deployment_name,
+                    "messages": messages,
+                    "max_tokens": 2000,
+                    "temperature": 0.1,
+                    "response_format": {"type": "json_object"}
+                }
+            }
+            
+            batch_requests.append(batch_request)
+        
+        logging.debug(f"Created {len(batch_requests)} batch requests")
+        return batch_requests
+
+    # Remaining batch processing methods (_upload_batch_file, _create_batch_job, 
+    # _wait_for_batch_completion, _retrieve_batch_results) are the same as in the 
+    # previous implementation I provided
+
+    def _default_classification(self):
+        """
+        Default classification when processing fails
+        """
+        return {
+            'main_category': 'unknown',
+            'subcategory': 'unknown',
+            'confidence': 0.0,
+            'reasoning': 'Classification failed',
+            'token_usage': None
+        }
+
+    def _calculate_token_cost(self, usage):
+        """
+        Calculate token usage cost
+        """
+        try:
+            pricing = self.config.get('token_pricing', {}).get('gpt-4o', {
+                'input': {'price_per_million': 2.50},
+                'output': {'price_per_million': 10.00}
+            })
+
+            input_cost = (usage.prompt_tokens / 1_000_000) * pricing['input'].get('price_per_million', 2.50)
+            output_cost = (usage.completion_tokens / 1_000_000) * pricing['output'].get('price_per_million', 10.00)
+            
+            return {
+                'input_tokens': usage.prompt_tokens,
+                'output_tokens': usage.completion_tokens,
+                'total_cost': round(input_cost + output_cost, 4)
+            }
+        except Exception as e:
+            logging.error(f"Token cost calculation error: {e}")
+            return None
+
+
+
+
+-----------
 import os
 import io
 import json
