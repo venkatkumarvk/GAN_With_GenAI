@@ -1,3 +1,164 @@
+
+import os
+import json
+import logging
+from datetime import datetime
+from logging.handlers import RotatingFileHandler
+
+class LoggerHelper:
+    @staticmethod
+    def _mask_sensitive_config(config):
+        """
+        Mask sensitive information in configuration
+        """
+        masked_config = config.copy()
+        
+        # List of keys to mask
+        sensitive_keys = [
+            'api_key', 
+            'connection_string', 
+            'endpoint', 
+            'client_secret', 
+            'password'
+        ]
+        
+        def mask_dict(d):
+            for key, value in list(d.items()):
+                if isinstance(value, dict):
+                    d[key] = mask_dict(value)
+                elif any(sens_key in key.lower() for sens_key in sensitive_keys):
+                    d[key] = '***MASKED***'
+            return d
+        
+        return mask_dict(masked_config)
+
+def setup_logging(config):
+    """
+    Set up comprehensive logging configuration based on the config
+    
+    :param config: Configuration dictionary
+    :return: Configured logger
+    """
+    # Create logs directory if it doesn't exist
+    log_dir = config.get('paths', {}).get('log_dir', 'logs')
+    os.makedirs(log_dir, exist_ok=True)
+
+    # Generate log filename with timestamp
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    
+    # Full log file
+    full_log_filename = f"document_processing_full_{timestamp}.log"
+    full_log_file = os.path.join(log_dir, full_log_filename)
+    
+    # Error log file
+    error_log_filename = f"document_processing_error_{timestamp}.log"
+    error_log_file = os.path.join(log_dir, error_log_filename)
+
+    # Create logger
+    logger = logging.getLogger('document_processor')
+    logger.setLevel(getattr(logging, config.get('logging', {}).get('level', 'INFO').upper()))
+
+    # Clear any existing handlers
+    logger.handlers.clear()
+
+    # Formatter with more detailed information
+    formatter = logging.Formatter(
+        '%(asctime)s | %(levelname)-8s | %(filename)s:%(lineno)d | %(funcName)s | %(message)s',
+        datefmt='%Y-%m-%d %H:%M:%S'
+    )
+
+    # Console Handler
+    console_handler = logging.StreamHandler()
+    console_handler.setLevel(logging.INFO)
+    console_handler.setFormatter(formatter)
+    logger.addHandler(console_handler)
+
+    # Full Log File Handler
+    full_file_handler = RotatingFileHandler(
+        full_log_file, 
+        maxBytes=50*1024*1024,  # 50 MB
+        backupCount=10
+    )
+    full_file_handler.setLevel(logging.INFO)
+    full_file_handler.setFormatter(formatter)
+    logger.addHandler(full_file_handler)
+
+    # Error Log File Handler
+    error_file_handler = RotatingFileHandler(
+        error_log_file, 
+        maxBytes=50*1024*1024,  # 50 MB
+        backupCount=10
+    )
+    error_file_handler.setLevel(logging.ERROR)
+    error_file_handler.setFormatter(formatter)
+    logger.addHandler(error_file_handler)
+
+    # Log initial configuration
+    logger.info("=" * 80)
+    logger.info("SYSTEM CONFIGURATION LOGGING INITIATED")
+    logger.info("=" * 80)
+    
+    logger.info(f"Full Log File: {full_log_file}")
+    logger.info(f"Error Log File: {error_log_file}")
+
+    # Log configuration with sensitive information masked
+    try:
+        # Mask sensitive information
+        masked_config = LoggerHelper._mask_sensitive_config(config)
+        
+        # Log configuration details
+        logger.info("Configuration Details:")
+        config_str = json.dumps(masked_config, indent=2)
+        for line in config_str.split('\n'):
+            logger.info(line)
+    except Exception as e:
+        logger.error(f"Error logging configuration: {e}")
+
+    logger.info("=" * 80)
+
+    return logger
+
+# Enhanced exception logging function
+def log_exception(logger, error, additional_context=None):
+    """
+    Log detailed exception information
+    
+    :param logger: Logger object
+    :param error: Exception object
+    :param additional_context: Optional additional context information
+    """
+    logger.error("=" * 80)
+    logger.error("EXCEPTION DETAILS")
+    logger.error("=" * 80)
+    
+    logger.error(f"Error Type: {type(error).__name__}")
+    logger.error(f"Error Message: {str(error)}")
+    
+    # Log traceback
+    import traceback
+    logger.error("Traceback:")
+    traceback_lines = traceback.format_exc().split('\n')
+    for line in traceback_lines:
+        if line.strip():
+            logger.error(line)
+    
+    # Log additional context if provided
+    if additional_context:
+        logger.error("Additional Context:")
+        if isinstance(additional_context, dict):
+            for key, value in additional_context.items():
+                logger.error(f"  {key}: {value}")
+        else:
+            logger.error(str(additional_context))
+    
+    logger.error("=" * 80)
+
+----
+
+
+
+#update
+
 import os
 import logging
 from datetime import datetime
