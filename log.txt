@@ -1,360 +1,13 @@
-
-import os
-import json
-import logging
-from datetime import datetime
-from logging.handlers import RotatingFileHandler
-
-class LoggerHelper:
-    @staticmethod
-    def _mask_sensitive_config(config):
-        """
-        Mask sensitive information in configuration
-        """
-        masked_config = config.copy()
-        
-        # List of keys to mask
-        sensitive_keys = [
-            'api_key', 
-            'connection_string', 
-            'endpoint', 
-            'client_secret', 
-            'password'
-        ]
-        
-        def mask_dict(d):
-            for key, value in list(d.items()):
-                if isinstance(value, dict):
-                    d[key] = mask_dict(value)
-                elif any(sens_key in key.lower() for sens_key in sensitive_keys):
-                    d[key] = '***MASKED***'
-            return d
-        
-        return mask_dict(masked_config)
-
-def setup_logging(config):
-    """
-    Set up comprehensive logging configuration based on the config
-    
-    :param config: Configuration dictionary
-    :return: Configured logger
-    """
-    # Create logs directory if it doesn't exist
-    log_dir = config.get('paths', {}).get('log_dir', 'logs')
-    os.makedirs(log_dir, exist_ok=True)
-
-    # Generate log filename with timestamp
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    
-    # Full log file
-    full_log_filename = f"document_processing_full_{timestamp}.log"
-    full_log_file = os.path.join(log_dir, full_log_filename)
-    
-    # Error log file
-    error_log_filename = f"document_processing_error_{timestamp}.log"
-    error_log_file = os.path.join(log_dir, error_log_filename)
-
-    # Create logger
-    logger = logging.getLogger('document_processor')
-    logger.setLevel(getattr(logging, config.get('logging', {}).get('level', 'INFO').upper()))
-
-    # Clear any existing handlers
-    logger.handlers.clear()
-
-    # Formatter with more detailed information
-    formatter = logging.Formatter(
-        '%(asctime)s | %(levelname)-8s | %(filename)s:%(lineno)d | %(funcName)s | %(message)s',
-        datefmt='%Y-%m-%d %H:%M:%S'
-    )
-
-    # Console Handler
-    console_handler = logging.StreamHandler()
-    console_handler.setLevel(logging.INFO)
-    console_handler.setFormatter(formatter)
-    logger.addHandler(console_handler)
-
-    # Full Log File Handler
-    full_file_handler = RotatingFileHandler(
-        full_log_file, 
-        maxBytes=50*1024*1024,  # 50 MB
-        backupCount=10
-    )
-    full_file_handler.setLevel(logging.INFO)
-    full_file_handler.setFormatter(formatter)
-    logger.addHandler(full_file_handler)
-
-    # Error Log File Handler
-    error_file_handler = RotatingFileHandler(
-        error_log_file, 
-        maxBytes=50*1024*1024,  # 50 MB
-        backupCount=10
-    )
-    error_file_handler.setLevel(logging.ERROR)
-    error_file_handler.setFormatter(formatter)
-    logger.addHandler(error_file_handler)
-
-    # Log initial configuration
-    logger.info("=" * 80)
-    logger.info("SYSTEM CONFIGURATION LOGGING INITIATED")
-    logger.info("=" * 80)
-    
-    logger.info(f"Full Log File: {full_log_file}")
-    logger.info(f"Error Log File: {error_log_file}")
-
-    # Log configuration with sensitive information masked
-    try:
-        # Mask sensitive information
-        masked_config = LoggerHelper._mask_sensitive_config(config)
-        
-        # Log configuration details
-        logger.info("Configuration Details:")
-        config_str = json.dumps(masked_config, indent=2)
-        for line in config_str.split('\n'):
-            logger.info(line)
-    except Exception as e:
-        logger.error(f"Error logging configuration: {e}")
-
-    logger.info("=" * 80)
-
-    return logger
-
-# Enhanced exception logging function
-def log_exception(logger, error, additional_context=None):
-    """
-    Log detailed exception information
-    
-    :param logger: Logger object
-    :param error: Exception object
-    :param additional_context: Optional additional context information
-    """
-    logger.error("=" * 80)
-    logger.error("EXCEPTION DETAILS")
-    logger.error("=" * 80)
-    
-    logger.error(f"Error Type: {type(error).__name__}")
-    logger.error(f"Error Message: {str(error)}")
-    
-    # Log traceback
-    import traceback
-    logger.error("Traceback:")
-    traceback_lines = traceback.format_exc().split('\n')
-    for line in traceback_lines:
-        if line.strip():
-            logger.error(line)
-    
-    # Log additional context if provided
-    if additional_context:
-        logger.error("Additional Context:")
-        if isinstance(additional_context, dict):
-            for key, value in additional_context.items():
-                logger.error(f"  {key}: {value}")
-        else:
-            logger.error(str(additional_context))
-    
-    logger.error("=" * 80)
-
-----
-
-
-
-#update
-
-import os
-import logging
-from datetime import datetime
-from logging.handlers import RotatingFileHandler
-import traceback
-import json
-
-class LoggerHelper:
-    def __init__(self, name="document_processor", log_dir="logs", log_level=logging.INFO):
-        """
-        Initialize logger with comprehensive logging capabilities
-        
-        :param name: Name of the logger
-        :param log_dir: Directory to store log files
-        :param log_level: Logging level
-        """
-        # Create logs directory if it doesn't exist
-        os.makedirs(log_dir, exist_ok=True)
-        
-        # Timestamp for log files
-        self.timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        
-        # Create main logger
-        self.logger = logging.getLogger(name)
-        self.logger.setLevel(log_level)
-        
-        # Clear existing handlers to prevent duplicate logs
-        self.logger.handlers.clear()
-        
-        # Console Handler with more detailed format
-        console_handler = logging.StreamHandler()
-        console_handler.setLevel(log_level)
-        console_formatter = logging.Formatter(
-            '%(asctime)s | %(levelname)-8s | %(filename)s:%(lineno)d | %(message)s',
-            datefmt='%Y-%m-%d %H:%M:%S'
-        )
-        console_handler.setFormatter(console_formatter)
-        self.logger.addHandler(console_handler)
-        
-        # Main Log File Handler (All Logs)
-        main_log_path = os.path.join(log_dir, f"{name}_{self.timestamp}_full.log")
-        file_handler = RotatingFileHandler(
-            main_log_path, 
-            maxBytes=50*1024*1024,  # 50 MB
-            backupCount=10
-        )
-        file_handler.setLevel(log_level)
-        file_formatter = logging.Formatter(
-            '%(asctime)s | %(levelname)-8s | %(filename)s:%(lineno)d | %(funcName)s | %(message)s',
-            datefmt='%Y-%m-%d %H:%M:%S'
-        )
-        file_handler.setFormatter(file_formatter)
-        self.logger.addHandler(file_handler)
-        
-        # Error Log File Handler
-        error_log_path = os.path.join(log_dir, f"{name}_{self.timestamp}_error.log")
-        error_handler = RotatingFileHandler(
-            error_log_path, 
-            maxBytes=50*1024*1024,  # 50 MB
-            backupCount=10
-        )
-        error_handler.setLevel(logging.ERROR)
-        error_handler.setFormatter(file_formatter)
-        self.logger.addHandler(error_handler)
-
-    def get_logger(self):
-        """
-        Return the configured logger
-        """
-        return self.logger
-
-    def log_section_header(self, message):
-        """
-        Log a section header for better readability
-        """
-        header = "=" * 80
-        self.logger.info(header)
-        self.logger.info(f">> {message}")
-        self.logger.info(header)
-
-    def log_separator(self):
-        """
-        Log a separator line
-        """
-        self.logger.info("-" * 80)
-
-    def log_configuration(self, config):
-        """
-        Log detailed configuration information
-        """
-        self.log_section_header("SYSTEM CONFIGURATION")
-        
-        # Safely convert config to JSON for logging
-        try:
-            # Mask sensitive information
-            masked_config = self._mask_sensitive_config(config)
-            config_str = json.dumps(masked_config, indent=2)
-            
-            # Log configuration
-            self.logger.info("Full Configuration:")
-            for line in config_str.split('\n'):
-                self.logger.info(line)
-        except Exception as e:
-            self.logger.error(f"Error logging configuration: {e}")
-        
-        self.log_separator()
-
-    def _mask_sensitive_config(self, config):
-        """
-        Mask sensitive information in configuration
-        """
-        masked_config = config.copy()
-        
-        # List of keys to mask
-        sensitive_keys = [
-            'api_key', 
-            'connection_string', 
-            'endpoint', 
-            'client_secret', 
-            'password'
-        ]
-        
-        def mask_dict(d):
-            for key, value in d.items():
-                if isinstance(value, dict):
-                    d[key] = mask_dict(value)
-                elif any(sens_key in key.lower() for sens_key in sensitive_keys):
-                    d[key] = '***MASKED***'
-            return d
-        
-        return mask_dict(masked_config)
-
-    def log_exception(self, error, additional_context=None):
-        """
-        Log detailed exception information
-        
-        :param error: Exception object
-        :param additional_context: Optional additional context information
-        """
-        self.logger.error("=" * 80)
-        self.logger.error("EXCEPTION DETAILS")
-        self.logger.error("=" * 80)
-        
-        self.logger.error(f"Error Type: {type(error).__name__}")
-        self.logger.error(f"Error Message: {str(error)}")
-        
-        # Log traceback
-        self.logger.error("Traceback:")
-        traceback_lines = traceback.format_exc().split('\n')
-        for line in traceback_lines:
-            if line.strip():
-                self.logger.error(line)
-        
-        # Log additional context if provided
-        if additional_context:
-            self.logger.error("Additional Context:")
-            if isinstance(additional_context, dict):
-                for key, value in additional_context.items():
-                    self.logger.error(f"  {key}: {value}")
-            else:
-                self.logger.error(str(additional_context))
-        
-        self.logger.error("=" * 80)
-
-def setup_logger(config, log_level=logging.INFO, doc_type=None):
-    """
-    Set up and configure a logger
-    
-    :param config: Configuration dictionary
-    :param log_level: Logging level (default: INFO)
-    :param doc_type: Document type being processed (optional)
-    :return: Configured logger
-    """
-    # Initialize LoggerHelper
-    helper = LoggerHelper(
-        name="document_processor",
-        log_dir="logs",
-        log_level=log_level
-    )
-    
-    # Log configuration details
-    helper.log_configuration(config)
-    
-    # Get and return logger
-    return helper.get_logger()
-
-
 import os
 import logging
 from datetime import datetime
 
-def setup_logging(config):
+def setup_logging(config, doc_type=None):
     """
     Set up logging configuration based on the config
     
     :param config: Configuration dictionary
+    :param doc_type: Optional document type for specific logging
     """
     # Create logs directory if it doesn't exist
     log_dir = config.get('paths', {}).get('log_dir', 'logs')
@@ -377,9 +30,80 @@ def setup_logging(config):
         ]
     )
 
-    # Log initial configuration
+    # Get logger
     logger = logging.getLogger()
+    
+    # Log initial configuration
     logger.info("Logging initialized")
     logger.info(f"Log file created: {log_file}")
+
+    # Log system configuration details
+    logger.info("=" * 50)
+    logger.info("SYSTEM CONFIGURATION")
+    logger.info("=" * 50)
+
+    # Azure OpenAI configuration
+    logger.info("Azure OpenAI Configuration:")
+    try:
+        openai_config = config.get('azure_openai', {})
+        logger.info(f"  API Version: {openai_config.get('api_version', 'Not specified')}")
+        logger.info(f"  Endpoint: {openai_config.get('endpoint', 'Not specified')}")
+        logger.info(f"  Deployment Name: {openai_config.get('deployment_name', 'Not specified')}")
+    except Exception as e:
+        logger.error(f"Error logging Azure OpenAI configuration: {e}")
+
+    # Processing configuration
+    logger.info("\nProcessing Configuration:")
+    try:
+        processing_config = config.get('classification', {})
+        logger.info(f"  Confidence Threshold: {processing_config.get('confidence_threshold', 'Not specified')}%")
+        logger.info(f"  Batch Size: {processing_config.get('batch_size', 'Not specified')}")
+    except Exception as e:
+        logger.error(f"Error logging processing configuration: {e}")
+
+    # Storage configuration
+    logger.info("\nStorage Configuration:")
+    try:
+        storage_config = config.get('azure_storage', {})
+        logger.info(f"  Input Container: {storage_config.get('input_container', 'Not specified')}")
+        logger.info(f"  Output Container: {storage_config.get('output_container', 'Not specified')}")
+    except Exception as e:
+        logger.error(f"Error logging storage configuration: {e}")
+
+    # Categories configuration
+    logger.info("\nDocument Categories:")
+    try:
+        categories = config.get('categories', {})
+        for main_category, subcategories in categories.items():
+            logger.info(f"  {main_category.upper()}: {', '.join(subcategories)}")
+    except Exception as e:
+        logger.error(f"Error logging categories: {e}")
+
+    # Batch processing configuration
+    logger.info("\nBatch Processing Configuration:")
+    try:
+        batch_config = config.get('batch_config', {})
+        logger.info(f"  Input Container: {batch_config.get('input_container', 'Not specified')}")
+        logger.info(f"  Output Container: {batch_config.get('output_container', 'Not specified')}")
+        logger.info(f"  Polling Interval: {batch_config.get('polling_interval', 'Not specified')} seconds")
+    except Exception as e:
+        logger.error(f"Error logging batch processing configuration: {e}")
+
+    # Document type specific configuration
+    if doc_type:
+        logger.info("\nDocument Type Specific Configuration:")
+        logger.info(f"  Current Document Type: {doc_type}")
+
+    # Key Vault configuration
+    logger.info("\nAzure Key Vault Configuration:")
+    try:
+        keyvault_config = config.get('azure_keyvault', {})
+        logger.info(f"  Vault URL: {keyvault_config.get('vault_url', 'Not specified')}")
+    except Exception as e:
+        logger.error(f"Error logging Key Vault configuration: {e}")
+
+    logger.info("\n" + "=" * 50)
+    logger.info("CONFIGURATION LOGGING COMPLETE")
+    logger.info("=" * 50)
 
     return logger
