@@ -20,73 +20,78 @@ class LoggerHelper:
         # Create timestamp
         self.timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         
+        # Configure root logger to capture logs from all modules
+        logging.basicConfig(
+            level=log_level,
+            format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+            datefmt='%Y-%m-%d %H:%M:%S',
+            handlers=[]  # We'll add handlers manually
+        )
+        
         # Create logger
         self.logger = logging.getLogger(name)
         self.logger.setLevel(log_level)
         
         # Clear any existing handlers
-        self.logger.handlers.clear()
+        for handler in self.logger.handlers[:]:
+            self.logger.removeHandler(handler)
+
+    def setup_logging(self, config):
+        """
+        Setup comprehensive logging for the entire application
         
-        # Formatter
-        self.formatter = logging.Formatter(
+        :param config: Configuration dictionary
+        """
+        # Create log filename
+        log_filename = f"document_processing_{self.timestamp}.log"
+        log_path = self.log_dir / log_filename
+
+        # Create file handler
+        file_handler = logging.FileHandler(log_path)
+        file_handler.setLevel(logging.INFO)
+        formatter = logging.Formatter(
             '%(asctime)s - %(name)s - %(levelname)s - %(message)s',
             datefmt='%Y-%m-%d %H:%M:%S'
         )
+        file_handler.setFormatter(formatter)
 
-    def add_console_handler(self, level=logging.INFO):
-        """
-        Add console handler for logging
-        
-        :param level: Logging level for console output
-        """
+        # Create console handler
         console_handler = logging.StreamHandler()
-        console_handler.setLevel(level)
-        console_handler.setFormatter(self.formatter)
-        self.logger.addHandler(console_handler)
+        console_handler.setLevel(logging.INFO)
+        console_handler.setFormatter(formatter)
 
-    def add_rotating_file_handler(self, filename=None, max_bytes=10*1024*1024, backup_count=5):
-        """
-        Add rotating file handler for general logging
-        
-        :param filename: Log filename
-        :param max_bytes: Maximum log file size
-        :param backup_count: Number of backup log files
-        """
-        if not filename:
-            filename = f"document_processing_{self.timestamp}.log"
-        
-        log_path = self.log_dir / filename
-        file_handler = logging.handlers.RotatingFileHandler(
-            log_path,
-            maxBytes=max_bytes,
-            backupCount=backup_count
-        )
-        file_handler.setLevel(logging.INFO)
-        file_handler.setFormatter(self.formatter)
-        self.logger.addHandler(file_handler)
+        # Add handlers to root logger to capture logs from all modules
+        root_logger = logging.getLogger()
+        root_logger.addHandler(file_handler)
+        root_logger.addHandler(console_handler)
 
-    def add_error_file_handler(self, filename=None):
-        """
-        Add file handler specifically for error logs
+        # Log configuration details
+        self.log_section_header("Starting Document Processing")
         
-        :param filename: Error log filename
-        """
-        if not filename:
-            filename = f"document_processing_errors_{self.timestamp}.log"
+        # Log key configuration details
+        try:
+            # Azure OpenAI configuration
+            self.logger.info("Azure OpenAI Configuration:")
+            openai_config = config.get('azure_openai', {})
+            self.logger.info(f"  Endpoint: {openai_config.get('endpoint', 'Not configured')}")
+            self.logger.info(f"  Deployment: {openai_config.get('deployment_name', 'Not configured')}")
+            self.logger.info(f"  API Version: {openai_config.get('api_version', 'Not configured')}")
+            
+            # Classification configuration
+            classification_config = config.get('classification', {})
+            self.logger.info("Classification Configuration:")
+            self.logger.info(f"  Confidence Threshold: {classification_config.get('confidence_threshold', 'Not set')}")
+            self.logger.info(f"  Batch Size: {classification_config.get('batch_size', 'Not set')}")
+            
+            # Storage configuration
+            storage_config = config.get('azure_storage', {})
+            self.logger.info("Storage Configuration:")
+            self.logger.info(f"  Input Container: {storage_config.get('input_container', 'Not set')}")
+            self.logger.info(f"  Output Container: {storage_config.get('output_container', 'Not set')}")
+        except Exception as e:
+            self.logger.error(f"Error logging configuration details: {e}")
         
-        error_log_path = self.log_dir / filename
-        error_handler = logging.FileHandler(error_log_path)
-        error_handler.setLevel(logging.ERROR)
-        error_handler.setFormatter(self.formatter)
-        self.logger.addHandler(error_handler)
-
-    def get_logger(self):
-        """
-        Return the configured logger
-        
-        :return: Configured logger
-        """
-        return self.logger
+        self.log_section_header("Processing Started")
 
     def log_section_header(self, title):
         """
@@ -99,24 +104,14 @@ class LoggerHelper:
         self.logger.info(title.center(50))
         self.logger.info(separator)
 
-    def log_separator(self):
-        """
-        Log a separator line
-        """
-        self.logger.info("=" * 50)
-
-def setup_logger(config, log_level=logging.INFO, doc_type=None):
+def setup_logger(config, log_level=logging.INFO):
     """
     Set up and configure a logger with comprehensive logging
     
     :param config: Configuration dictionary
     :param log_level: Logging level
-    :param doc_type: Document type being processed
     :return: Configured logger
     """
-    # Create timestamp for log file
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    
     # Initialize logger helper
     helper = LoggerHelper(
         name="document_processor",
@@ -124,49 +119,30 @@ def setup_logger(config, log_level=logging.INFO, doc_type=None):
         log_level=log_level
     )
     
-    # Add console handler
-    helper.add_console_handler(level=log_level)
+    # Setup logging
+    helper.setup_logging(config)
     
-    # Add rotating file handler
-    log_filename = f"document_processing_{timestamp}.log"
-    helper.add_rotating_file_handler(
-        filename=log_filename,
-        max_bytes=10*1024*1024,
-        backup_count=5
-    )
+    return helper.logger
+
+
+
+-----
+
+from logger_helper import setup_logger
+
+
+----
+def main():
+    # Parse arguments
+    args = parse_arguments()
     
-    # Add error-only file handler
-    helper.add_error_file_handler()
-    
-    # Get logger
-    logger = helper.get_logger()
-    
-    # Log configuration details
-    helper.log_section_header("Starting Document Processing")
-    
-    # Log key configuration details
     try:
-        # Azure OpenAI configuration
-        logger.info("Azure OpenAI Configuration:")
-        openai_config = config.get('azure_openai', {})
-        logger.info(f"  Endpoint: {openai_config.get('endpoint', 'Not configured')}")
-        logger.info(f"  Deployment: {openai_config.get('deployment_name', 'Not configured')}")
-        logger.info(f"  API Version: {openai_config.get('api_version', 'Not configured')}")
+        # Load configuration
+        config = load_config(args.config)
         
-        # Classification configuration
-        classification_config = config.get('classification', {})
-        logger.info("Classification Configuration:")
-        logger.info(f"  Confidence Threshold: {classification_config.get('confidence_threshold', 'Not set')}")
-        logger.info(f"  Batch Size: {classification_config.get('batch_size', 'Not set')}")
+        # Setup logging
+        logger = setup_logger(config)
         
-        # Storage configuration
-        storage_config = config.get('azure_storage', {})
-        logger.info("Storage Configuration:")
-        logger.info(f"  Input Container: {storage_config.get('input_container', 'Not set')}")
-        logger.info(f"  Output Container: {storage_config.get('output_container', 'Not set')}")
-    except Exception as e:
-        logger.error(f"Error logging configuration details: {e}")
-    
-    helper.log_separator()
-    
-    return logger
+        # Rest of the main function remains the same
+        ...
+from logger_helper import setup_logger
