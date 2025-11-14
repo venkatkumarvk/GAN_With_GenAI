@@ -2,117 +2,171 @@ import os
 import logging
 import logging.handlers
 from datetime import datetime
+from pathlib import Path
 
-def setup_logging(config):
+class LoggerHelper:
+    def __init__(self, name="document_processor", log_dir="logs", log_level=logging.INFO):
+        """
+        Initialize logger with comprehensive logging capabilities
+        
+        :param name: Name of the logger
+        :param log_dir: Directory to store log files
+        :param log_level: Logging level
+        """
+        # Create logs directory if it doesn't exist
+        self.log_dir = Path(log_dir)
+        self.log_dir.mkdir(parents=True, exist_ok=True)
+        
+        # Create timestamp
+        self.timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        
+        # Create logger
+        self.logger = logging.getLogger(name)
+        self.logger.setLevel(log_level)
+        
+        # Clear any existing handlers
+        self.logger.handlers.clear()
+        
+        # Formatter
+        self.formatter = logging.Formatter(
+            '%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+            datefmt='%Y-%m-%d %H:%M:%S'
+        )
+
+    def add_console_handler(self, level=logging.INFO):
+        """
+        Add console handler for logging
+        
+        :param level: Logging level for console output
+        """
+        console_handler = logging.StreamHandler()
+        console_handler.setLevel(level)
+        console_handler.setFormatter(self.formatter)
+        self.logger.addHandler(console_handler)
+
+    def add_rotating_file_handler(self, filename=None, max_bytes=10*1024*1024, backup_count=5):
+        """
+        Add rotating file handler for general logging
+        
+        :param filename: Log filename
+        :param max_bytes: Maximum log file size
+        :param backup_count: Number of backup log files
+        """
+        if not filename:
+            filename = f"document_processing_{self.timestamp}.log"
+        
+        log_path = self.log_dir / filename
+        file_handler = logging.handlers.RotatingFileHandler(
+            log_path,
+            maxBytes=max_bytes,
+            backupCount=backup_count
+        )
+        file_handler.setLevel(logging.INFO)
+        file_handler.setFormatter(self.formatter)
+        self.logger.addHandler(file_handler)
+
+    def add_error_file_handler(self, filename=None):
+        """
+        Add file handler specifically for error logs
+        
+        :param filename: Error log filename
+        """
+        if not filename:
+            filename = f"document_processing_errors_{self.timestamp}.log"
+        
+        error_log_path = self.log_dir / filename
+        error_handler = logging.FileHandler(error_log_path)
+        error_handler.setLevel(logging.ERROR)
+        error_handler.setFormatter(self.formatter)
+        self.logger.addHandler(error_handler)
+
+    def get_logger(self):
+        """
+        Return the configured logger
+        
+        :return: Configured logger
+        """
+        return self.logger
+
+    def log_section_header(self, title):
+        """
+        Log a section header for better readability
+        
+        :param title: Section title
+        """
+        separator = "=" * 50
+        self.logger.info(separator)
+        self.logger.info(title.center(50))
+        self.logger.info(separator)
+
+    def log_separator(self):
+        """
+        Log a separator line
+        """
+        self.logger.info("=" * 50)
+
+def setup_logger(config, log_level=logging.INFO, doc_type=None):
     """
-    Set up logging configuration based on the config
+    Set up and configure a logger with comprehensive logging
     
     :param config: Configuration dictionary
-    """
-    # Ensure log directory exists
-    log_dir = config.get('paths', {}).get('log_dir', 'logs')
-    os.makedirs(log_dir, exist_ok=True)
-
-    # Create log filename with timestamp
-    timestamp = datetime.now().strftime("%Y%m%d")
-    log_filename = os.path.join(log_dir, f"document_classification_{timestamp}.log")
-
-    # Logging configuration
-    log_level = config.get('logging', {}).get('level', 'INFO')
-    log_format = config.get('logging', {}).get('format', 
-        '%(asctime)s - %(name)s - %(levelname)s - %(message)s')
-
-    # Convert log level string to logging constant
-    log_level_map = {
-        'DEBUG': logging.DEBUG,
-        'INFO': logging.INFO,
-        'WARNING': logging.WARNING,
-        'ERROR': logging.ERROR,
-        'CRITICAL': logging.CRITICAL
-    }
-    numeric_level = log_level_map.get(log_level.upper(), logging.INFO)
-
-    # Configure root logger
-    logging.basicConfig(
-        level=numeric_level,
-        format=log_format,
-        handlers=[
-            # File handler
-            logging.FileHandler(log_filename, encoding='utf-8'),
-            # Console handler
-            logging.StreamHandler()
-        ]
-    )
-
-    # Rotate log files
-    file_handler = logging.handlers.RotatingFileHandler(
-        log_filename, 
-        maxBytes=10*1024*1024,  # 10 MB
-        backupCount=5,
-        encoding='utf-8'
-    )
-    file_handler.setFormatter(logging.Formatter(log_format))
-
-    # Add rotate handler to root logger
-    logging.getLogger().addHandler(file_handler)
-
-    # Optionally, set logging for specific libraries
-    logging.getLogger('azure').setLevel(logging.WARNING)
-    logging.getLogger('openai').setLevel(logging.WARNING)
-
-    return logging.getLogger(__name__)
-
-def get_logger(name=None):
-    """
-    Get a logger with optional name
-    
-    :param name: Name of the logger
+    :param log_level: Logging level
+    :param doc_type: Document type being processed
     :return: Configured logger
     """
-    return logging.getLogger(name or __name__)
-
-
-
------
-{
-    "paths": {
-        "log_dir": "/path/to/logs"
-    },
-    "logging": {
-        "level": "INFO",
-        "format": "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
-    }
-}
-
-----
-
-
-import json
-import logging
-from azure_keyvault import load_config_with_keyvault
-from logging_config import setup_logging
-
-def load_config(config_path):
-    """
-    Load configuration file with Azure Key Vault support
+    # Create timestamp for log file
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     
-    :param config_path: Path to the configuration file
-    :return: Processed configuration dictionary
-    """
+    # Initialize logger helper
+    helper = LoggerHelper(
+        name="document_processor",
+        log_dir=config.get('paths', {}).get('log_dir', 'logs'),
+        log_level=log_level
+    )
+    
+    # Add console handler
+    helper.add_console_handler(level=log_level)
+    
+    # Add rotating file handler
+    log_filename = f"document_processing_{timestamp}.log"
+    helper.add_rotating_file_handler(
+        filename=log_filename,
+        max_bytes=10*1024*1024,
+        backup_count=5
+    )
+    
+    # Add error-only file handler
+    helper.add_error_file_handler()
+    
+    # Get logger
+    logger = helper.get_logger()
+    
+    # Log configuration details
+    helper.log_section_header("Starting Document Processing")
+    
+    # Log key configuration details
     try:
-        # Load configuration with Key Vault resolution
-        config = load_config_with_keyvault(config_path)
+        # Azure OpenAI configuration
+        logger.info("Azure OpenAI Configuration:")
+        openai_config = config.get('azure_openai', {})
+        logger.info(f"  Endpoint: {openai_config.get('endpoint', 'Not configured')}")
+        logger.info(f"  Deployment: {openai_config.get('deployment_name', 'Not configured')}")
+        logger.info(f"  API Version: {openai_config.get('api_version', 'Not configured')}")
         
-        # Setup logging based on config
-        setup_logging(config)
+        # Classification configuration
+        classification_config = config.get('classification', {})
+        logger.info("Classification Configuration:")
+        logger.info(f"  Confidence Threshold: {classification_config.get('confidence_threshold', 'Not set')}")
+        logger.info(f"  Batch Size: {classification_config.get('batch_size', 'Not set')}")
         
-        return config
+        # Storage configuration
+        storage_config = config.get('azure_storage', {})
+        logger.info("Storage Configuration:")
+        logger.info(f"  Input Container: {storage_config.get('input_container', 'Not set')}")
+        logger.info(f"  Output Container: {storage_config.get('output_container', 'Not set')}")
     except Exception as e:
-        # Fallback logging if main logging setup fails
-        logging.basicConfig(
-            level=logging.INFO,
-            format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-        )
-        logger = logging.getLogger(__name__)
-        logger.error(f"Failed to load configuration: {e}")
-        raise
+        logger.error(f"Error logging configuration details: {e}")
+    
+    helper.log_separator()
+    
+    return logger
