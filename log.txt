@@ -183,3 +183,42 @@ def setup_logger(config, log_level=logging.INFO, doc_type=None):
     
     # Get and return logger
     return helper.get_logger()
+
+
+import os
+import logging
+from datetime import datetime
+
+def setup_logging(config):
+    """
+    Set up logging configuration based on the config
+    
+    :param config: Configuration dictionary
+    """
+    # Create logs directory if it doesn't exist
+    log_dir = config.get('paths', {}).get('log_dir', 'logs')
+    os.makedirs(log_dir, exist_ok=True)
+
+    # Generate log filename with timestamp
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    log_filename = f"document_processing_{timestamp}.log"
+    log_file = os.path.join(log_dir, log_filename)
+
+    # Configure logging
+    logging.basicConfig(
+        level=getattr(logging, config.get('logging', {}).get('level', 'INFO').upper()),
+        format='%(asctime)s - %(levelname)s: %(filename)s:%(lineno)d - %(message)s',
+        handlers=[
+            # File handler to save all logs
+            logging.FileHandler(log_file, mode='a'),
+            # Console handler to display logs in terminal
+            logging.StreamHandler()
+        ]
+    )
+
+    # Log initial configuration
+    logger = logging.getLogger()
+    logger.info("Logging initialized")
+    logger.info(f"Log file created: {log_file}")
+
+    return logger
