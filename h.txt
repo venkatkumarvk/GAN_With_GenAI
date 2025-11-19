@@ -365,7 +365,6 @@ def process_local_documents(config, input_folder=None, confidence_threshold=0.6,
 }
 
 -----
-
 def process_azure_documents(config, input_folder, confidence_threshold=0.6, 
                              archive_enabled=True, 
                              clean_input_container=True, 
