@@ -1,4 +1,51 @@
+import os
+import pyodbc
+import logging
+from datetime import datetime
+
 class SQLLogger:
+    def __init__(self, config):
+        """
+        Initialize SQL Logger
+        
+        :param config: Configuration dictionary
+        """
+        # Setup logging
+        self.logger = logging.getLogger(__name__)
+        
+        # Configuration
+        self.config = config
+        self.sql_config = config.get('sql_server', {})
+        self.logging_db = config.get('logging_db', {})
+        
+        # Check if SQL logging is enabled
+        self.enabled = self.logging_db.get('enabled', False)
+        self.table_name = self.logging_db.get('table_name', 'dbo.XLogDocumentClassification')
+        
+        # Connection string
+        self.connection_string = self.sql_config.get('connection_string')
+        
+        # Validate configuration
+        if not self.enabled:
+            self.logger.warning("SQL Logging is disabled")
+        
+        if not self.connection_string:
+            self.logger.error("No SQL connection string provided")
+
+    def _get_connection(self):
+        """
+        Establish database connection
+        
+        :return: Database connection
+        """
+        try:
+            # Establish connection
+            conn = pyodbc.connect(self.connection_string)
+            return conn
+        except Exception as e:
+            self.logger.error(f"SQL Connection Error: {e}")
+            raise
+
     def log_document_processing(self, document_info):
         """
         Log document processing details to SQL database
@@ -6,6 +53,10 @@ class SQLLogger:
         :param document_info: Dictionary containing document processing details
         :return: Unique DocumentProcessor_Key
         """
+        # Check if logging is enabled
+        if not self.enabled:
+            return None
+
         try:
             # Establish connection
             conn = self._get_connection()
@@ -59,6 +110,9 @@ class SQLLogger:
             cursor.execute("SELECT @@IDENTITY AS DocumentProcessor_Key")
             document_key = cursor.fetchone()[0]
             
+            # Log successful insertion
+            self.logger.info(f"Logged document processing: {document_key} - {document_info.get('filename')}")
+            
             cursor.close()
             conn.close()
             
@@ -66,6 +120,8 @@ class SQLLogger:
         
         except Exception as e:
             self.logger.error(f"SQL Logging Error: {e}")
+            # Log detailed error information
+            self.logger.error(f"Document Info: {document_info}")
             return None
 
     def update_document_processing(self, document_key, status_update):
@@ -74,10 +130,13 @@ class SQLLogger:
         
         :param document_key: Key of the document log to update
         :param status_update: Dictionary with status update information
+        :return: Boolean indicating success of update
         """
+        # Check if logging is enabled and document key is valid
         if not self.enabled or not document_key:
+            self.logger.warning("SQL logging disabled or invalid document key")
             return False
-        
+
         try:
             # Establish connection
             conn = self._get_connection()
@@ -114,6 +173,9 @@ class SQLLogger:
             cursor.execute(sql, values)
             conn.commit()
             
+            # Log successful update
+            self.logger.info(f"Updated document processing log: {document_key}")
+            
             cursor.close()
             conn.close()
             
@@ -121,10 +183,23 @@ class SQLLogger:
         
         except Exception as e:
             self.logger.error(f"SQL Update Error: {e}")
+            # Log detailed error information
+            self.logger.error(f"Document Key: {document_key}")
+            self.logger.error(f"Status Update: {status_update}")
             return False
 
-
-
+def initialize_sql_logger(config):
+    """
+    Initialize and return SQL Logger
+    
+    :param config: Configuration dictionary
+    :return: Initialized SQLLogger instance
+    """
+    try:
+        return SQLLogger(config)
+    except Exception as e:
+        logging.error(f"Failed to initialize SQL Logger: {e}")
+        return None
 -----
 def process_local_documents(config, input_folder=None, confidence_threshold=0.6, processing_mode='general'):
     # Initialize SQL Logger
