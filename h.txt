@@ -1,3 +1,277 @@
+def process_azure_documents(config, input_folder, confidence_threshold=0.6, 
+                             archive_enabled=True, 
+                             clean_input_container=True, 
+                             processing_mode='general'):
+    # Initialize Azure Storage Manager
+    storage_manager = AzureStorageManager(config)
+    
+    # Initialize SQL Logger
+    sql_logger = initialize_sql_logger(config)
+    
+    # Initialize document classifier
+    classifier = DocumentClassifier(config, processing_mode=processing_mode)
+    
+    # Get container configurations
+    input_container = config['azure_storage']['input_container']
+    output_container = config['azure_storage']['output_container']
+    archive_container = config['azure_storage'].get('archive_container', 'document-archives')
+    reference_container = config['azure_storage'].get('reference_container', 'reference-documents')
+    
+    # Prepare output paths with None handling
+    output_paths = {
+        'source': 'source',
+        'classified': 'classified',
+        'unclassified': 'unclassified',
+        'unprocessed': 'unprocessed'
+    }
+    
+    # Validate and create output paths if they don't exist
+    for path_type, path_name in output_paths.items():
+        full_path = f"{output_container}/{path_name}"
+        try:
+            # Check if container exists, if not, set to None
+            if not storage_manager.container_exists(output_container):
+                output_paths[path_type] = None
+            else:
+                # Ensure the "folder" exists
+                storage_manager.create_container_folder_if_not_exists(output_container, path_name)
+                output_paths[path_type] = full_path
+        except Exception as e:
+            logging.warning(f"Could not validate {path_type} path: {e}")
+            output_paths[path_type] = None
+    
+    # List blobs in input container/folder
+    blobs = storage_manager.list_blobs(input_container, prefix=input_folder)
+    
+    # Track processed files
+    processed_files = []
+    unprocessed_files = []
+
+    # Process each blob
+    for blob_name in blobs:
+        # Initialize document key to None
+        document_key = None
+        
+        try:
+            # Prepare initial document logging info
+            document_info = {
+                'source': 'azure',
+                'api_type': processing_mode,
+                'filename': os.path.basename(blob_name),
+                'source_file_path': f"{input_container}/{blob_name}",
+                'reference_file_path': f"{reference_container}/reference_documents" if reference_container else None,
+                'status': 'BEGIN',
+                'status_desc': 'Azure Blob Processing Started'
+            }
+            
+            # Log document processing start
+            document_key = sql_logger.log_document_processing(document_info)
+            
+            # Update status to processing
+            sql_logger.update_document_processing(document_key, {
+                'status': 'Processing',
+                'status_desc': 'Downloading and processing blob'
+            })
+
+            # Generate unique local temporary filename
+            local_filename = f"{uuid.uuid4()}_{os.path.basename(blob_name)}"
+            local_path = os.path.join(tempfile.gettempdir(), local_filename)
+
+            # Download blob to local temporary directory
+            if not storage_manager.download_blob(input_container, blob_name, local_path):
+                # Update status for download failure
+                unprocessed_path = (output_paths['unprocessed'] + f"/{local_filename}_error.txt") if output_paths['unprocessed'] else None
+                
+                sql_logger.update_document_processing(document_key, {
+                    'status': 'Error',
+                    'status_desc': 'Failed to download blob',
+                    'output_file_path_unprocessed': unprocessed_path
+                })
+                unprocessed_files.append(blob_name)
+                continue
+
+            # Prepare source path
+            source_path = (output_paths['source'] + f"/{local_filename}") if output_paths['source'] else None
+
+            # Upload source document to output container if path exists
+            if source_path:
+                with open(local_path, 'rb') as source_file:
+                    storage_manager.upload_blob(output_container, source_path, source_file)
+
+            # Initialize output paths
+            classified_path = None
+            unclassified_path = None
+            unprocessed_path = None
+            archive_path = None
+
+            # Process document
+            try:
+                # Open PDF
+                doc = fitz.open(local_path)
+                total_pages = len(doc)
+
+                # Track classified and unclassified pages
+                classified_pages = []
+                unclassified_pages = []
+
+                # Process each page
+                for page_num in range(total_pages):
+                    try:
+                        # Extract page image
+                        page_image = extract_page_image(local_path, page_num)
+                        
+                        # Classify page
+                        reference_path = f"{reference_container}/reference_documents" if reference_container else None
+                        classification = classifier.classify_document(page_image, reference_path)
+                        
+                        # Check classification confidence
+                        if (classification['confidence'] >= confidence_threshold 
+                            and classification['main_category'] != 'unknown'):
+                            classified_pages.append(page_num)
+                        else:
+                            unclassified_pages.append(page_num)
+                    
+                    except Exception as page_error:
+                        logging.error(f"Error processing page {page_num} in {blob_name}: {page_error}")
+                        unclassified_pages.append(page_num)
+
+                # Close original document
+                doc.close()
+
+                # Create classified PDF if any classified pages
+                if classified_pages and output_paths['classified']:
+                    # Determine category and subcategory from first classified page
+                    first_classified_page = classified_pages[0]
+                    page_image = extract_page_image(local_path, first_classified_page)
+                    classification = classifier.classify_document(page_image, reference_path)
+                    
+                    # Prepare classified output path
+                    classified_filename = f"{local_filename}_classified.pdf"
+                    classified_path = f"{output_paths['classified']}/{classification['main_category']}/{classification['subcategory']}/{classified_filename}"
+                    
+                    # Create PDF with classified pages
+                    doc = fitz.open(local_path)
+                    classified_doc = fitz.open()
+                    for page_num in classified_pages:
+                        classified_doc.insert_pdf(doc, from_page=page_num, to_page=page_num)
+                    
+                    # Save classified PDF to a temporary file
+                    temp_classified_path = os.path.join(tempfile.gettempdir(), classified_filename)
+                    classified_doc.save(temp_classified_path)
+                    classified_doc.close()
+                    doc.close()
+
+                    # Upload classified PDF to Azure Blob Storage
+                    with open(temp_classified_path, 'rb') as classified_file:
+                        storage_manager.upload_blob(output_container, classified_path, classified_file)
+                    
+                    # Remove temporary file
+                    os.remove(temp_classified_path)
+
+                # Create unclassified PDF if any unclassified pages
+                if unclassified_pages and output_paths['unclassified']:
+                    unclassified_filename = f"{local_filename}_unclassified.pdf"
+                    unclassified_path = f"{output_paths['unclassified']}/{unclassified_filename}"
+                    
+                    # Create PDF with unclassified pages
+                    doc = fitz.open(local_path)
+                    unclassified_doc = fitz.open()
+                    for page_num in unclassified_pages:
+                        unclassified_doc.insert_pdf(doc, from_page=page_num, to_page=page_num)
+                    
+                    # Save unclassified PDF to a temporary file
+                    temp_unclassified_path = os.path.join(tempfile.gettempdir(), unclassified_filename)
+                    unclassified_doc.save(temp_unclassified_path)
+                    unclassified_doc.close()
+                    doc.close()
+
+                    # Upload unclassified PDF to Azure Blob Storage
+                    with open(temp_unclassified_path, 'rb') as unclassified_file:
+                        storage_manager.upload_blob(output_container, unclassified_path, unclassified_file)
+                    
+                    # Remove temporary file
+                    os.remove(temp_unclassified_path)
+
+            except Exception as processing_error:
+                # Prepare unprocessed path
+                if output_paths['unprocessed']:
+                    unprocessed_filename = f"{local_filename}_error.txt"
+                    unprocessed_path = f"{output_paths['unprocessed']}/{unprocessed_filename}"
+                    
+                    # Upload error details to Azure Blob Storage
+                    error_content = str(processing_error).encode('utf-8')
+                    storage_manager.upload_blob(
+                        output_container, 
+                        unprocessed_path, 
+                        io.BytesIO(error_content)
+                    )
+                
+                # Raise the error to be caught by outer exception handler
+                raise
+
+            # Create archive if enabled
+            if archive_enabled and archive_container:
+                # Create a zip archive in memory
+                archive_filename = f"archive_{local_filename}.zip"
+                archive_path = f"{archive_container}/{archive_filename}"
+                
+                with io.BytesIO() as archive_buffer:
+                    with zipfile.ZipFile(archive_buffer, 'w', zipfile.ZIP_DEFLATED) as zipf:
+                        zipf.write(local_path, arcname=os.path.basename(local_path))
+                    
+                    # Reset buffer position
+                    archive_buffer.seek(0)
+                    
+                    # Upload archive to Azure Blob Storage
+                    storage_manager.upload_blob(archive_container, archive_path, archive_buffer)
+
+            # Update SQL log with processing results
+            sql_logger.update_document_processing(document_key, {
+                'status': 'Completed',
+                'status_desc': 'Document processed successfully',
+                'output_file_path_classified': classified_path,
+                'output_file_path_unclassified': unclassified_path,
+                'output_file_path_unprocessed': unprocessed_path,
+                'archive_file_path': archive_path
+            })
+            
+            # Clean up input container if specified
+            if clean_input_container:
+                storage_manager.delete_blob(input_container, blob_name)
+            
+            # Track processed file
+            processed_files.append({
+                'original_path': f"{input_container}/{blob_name}",
+                'source_path': source_path,
+                'classified_path': classified_path,
+                'unclassified_path': unclassified_path,
+                'archive_path': archive_path
+            })
+
+        except Exception as doc_error:
+            # Log processing error
+            error_desc = str(doc_error)
+            
+            # Update SQL log with error status
+            if document_key:
+                sql_logger.update_document_processing(document_key, {
+                    'status': 'Error',
+                    'status_desc': error_desc,
+                    'output_file_path_unprocessed': unprocessed_path
+                })
+            
+            # Log the error
+            logging.error(f"Error processing document {blob_name}: {doc_error}")
+            
+            # Add to unprocessed files
+            unprocessed_files.append(blob_name)
+
+    return processed_files, unprocessed_files
+
+---
+
+
+
 import os
 import pyodbc
 import logging
