@@ -389,134 +389,163 @@ def process_azure_documents(config, input_folder, confidence_threshold=0.6,
 
     # Process each blob
     for blob_name in blobs:
+        # Initialize document key to None
+        document_key = None
+        
         try:
-            # Download blob to local temporary directory
-            local_path = os.path.join(local_input_dir, os.path.basename(blob_name))
-            if not storage_manager.download_blob(input_container, blob_name, local_path):
-                # Log download failure
-                document_info = {
-                    'source': 'azure',
-                    'api_type': processing_mode,
-                    'filename': os.path.basename(blob_name),
-                    'source_file_path': f"azure://{input_container}/{blob_name}",
-                    'status': 'Error',
-                    'status_desc': 'Failed to download blob'
-                }
-                sql_logger.log_document_processing(document_info)
-                unprocessed_files.append(blob_name)
-                continue
-
-            # Open PDF to get total pages
-            doc = fitz.open(local_path)
-            total_pages = len(doc)
-            
-            # Prepare initial document info
+            # Prepare initial document logging info
             document_info = {
                 'source': 'azure',
                 'api_type': processing_mode,
                 'filename': os.path.basename(blob_name),
                 'source_file_path': f"azure://{input_container}/{blob_name}",
                 'reference_file_path': config['paths']['reference_dir'],
-                'total_pages': total_pages,
-                'classified_pages': 0,
-                'unclassified_pages': total_pages,
                 'status': 'BEGIN',
-                'status_desc': 'Document Processing Started',
-                'classification_details': []
+                'status_desc': 'Azure Blob Processing Started'
             }
             
-            # Log document and get key
+            # Log document processing start
             document_key = sql_logger.log_document_processing(document_info)
             
-            # Classification details
-            classified_pages = []
-            unclassified_pages = []
-            classification_details = []
-            
-            # Process each page
-            for page_num in range(total_pages):
-                try:
-                    # Extract page image
-                    page_image = extract_page_image(local_path, page_num)
-                    
-                    # Classify page
-                    classification = classifier.classify_document(page_image, config['paths']['reference_dir'])
-                    
-                    # Check classification confidence
-                    if (classification['confidence'] >= confidence_threshold 
-                        and classification['main_category'] != 'unknown'):
-                        classified_pages.append(page_num)
-                        classification_details.append({
-                            'page_number': page_num + 1,
-                            'main_category': classification['main_category'],
-                            'subcategory': classification['subcategory'],
-                            'confidence': classification['confidence']
-                        })
-                    else:
-                        unclassified_pages.append(page_num)
-                
-                except Exception as page_error:
-                    logging.error(f"Error processing page {page_num} in {blob_name}: {page_error}")
-                    unclassified_pages.append(page_num)
-            
+            # Update status to processing
+            sql_logger.update_document_processing(document_key, {
+                'status': 'Processing',
+                'status_desc': 'Downloading and processing blob'
+            })
+
+            # Download blob to local temporary directory
+            local_path = os.path.join(local_input_dir, os.path.basename(blob_name))
+            if not storage_manager.download_blob(input_container, blob_name, local_path):
+                # Update status for download failure
+                sql_logger.update_document_processing(document_key, {
+                    'status': 'Error',
+                    'status_desc': 'Failed to download blob',
+                    'output_file_path_unprocessed': local_path
+                })
+                unprocessed_files.append(blob_name)
+                continue
+
             # Prepare output paths
-            source_path = os.path.join(config['paths']['output_dir'], 'source', os.path.basename(local_path))
+            source_dir = os.path.join(config['paths']['output_dir'], 'source')
+            classified_dir = os.path.join(config['paths']['output_dir'], 'classified')
+            unclassified_dir = os.path.join(config['paths']['output_dir'], 'unclassified')
+            unprocessed_dir = os.path.join(config['paths']['output_dir'], 'unprocessed')
+            
+            # Ensure output directories exist
+            for directory in [source_dir, classified_dir, unclassified_dir, unprocessed_dir]:
+                os.makedirs(directory, exist_ok=True)
+
+            # Copy source document
+            source_path = os.path.join(source_dir, os.path.basename(local_path))
+            shutil.copy2(local_path, source_path)
+
+            # Initialize output paths
             classified_path = None
             unclassified_path = None
+            unprocessed_path = None
             archive_path = None
-            
-            # Create classified PDF if any classified pages
-            if classified_pages:
-                classified_path = os.path.join(
-                    config['paths']['output_dir'], 
-                    'classified', 
-                    classification_details[0]['main_category'],
-                    classification_details[0]['subcategory'],
-                    f"{os.path.splitext(os.path.basename(blob_name))[0]}_classified.pdf"
+
+            # Process document
+            try:
+                # Open PDF
+                doc = fitz.open(local_path)
+                total_pages = len(doc)
+
+                # Track classified and unclassified pages
+                classified_pages = []
+                unclassified_pages = []
+
+                # Process each page
+                for page_num in range(total_pages):
+                    try:
+                        # Extract page image
+                        page_image = extract_page_image(local_path, page_num)
+                        
+                        # Classify page
+                        classification = classifier.classify_document(page_image, config['paths']['reference_dir'])
+                        
+                        # Check classification confidence
+                        if (classification['confidence'] >= confidence_threshold 
+                            and classification['main_category'] != 'unknown'):
+                            classified_pages.append(page_num)
+                        else:
+                            unclassified_pages.append(page_num)
+                    
+                    except Exception as page_error:
+                        logging.error(f"Error processing page {page_num} in {blob_name}: {page_error}")
+                        unclassified_pages.append(page_num)
+
+                # Close original document
+                doc.close()
+
+                # Create classified PDF if any classified pages
+                if classified_pages:
+                    # Determine category and subcategory from first classified page
+                    first_classified_page = classified_pages[0]
+                    page_image = extract_page_image(local_path, first_classified_page)
+                    classification = classifier.classify_document(page_image, config['paths']['reference_dir'])
+                    
+                    # Prepare classified output path
+                    classified_path = os.path.join(
+                        classified_dir, 
+                        classification['main_category'],
+                        classification['subcategory'],
+                        f"{os.path.splitext(os.path.basename(blob_name))[0]}_classified.pdf"
+                    )
+                    
+                    # Ensure category directory exists
+                    os.makedirs(os.path.dirname(classified_path), exist_ok=True)
+                    
+                    # Create PDF with classified pages
+                    doc = fitz.open(local_path)
+                    classified_doc = fitz.open()
+                    for page_num in classified_pages:
+                        classified_doc.insert_pdf(doc, from_page=page_num, to_page=page_num)
+                    classified_doc.save(classified_path)
+                    classified_doc.close()
+                    doc.close()
+
+                # Create unclassified PDF if any unclassified pages
+                if unclassified_pages:
+                    unclassified_path = os.path.join(
+                        unclassified_dir,
+                        f"{os.path.splitext(os.path.basename(blob_name))[0]}_unclassified.pdf"
+                    )
+                    
+                    # Create PDF with unclassified pages
+                    doc = fitz.open(local_path)
+                    unclassified_doc = fitz.open()
+                    for page_num in unclassified_pages:
+                        unclassified_doc.insert_pdf(doc, from_page=page_num, to_page=page_num)
+                    unclassified_doc.save(unclassified_path)
+                    unclassified_doc.close()
+                    doc.close()
+
+            except Exception as processing_error:
+                # Create unprocessed path
+                unprocessed_path = os.path.join(
+                    unprocessed_dir,
+                    f"{os.path.splitext(os.path.basename(blob_name))[0]}_error.txt"
                 )
-                os.makedirs(os.path.dirname(classified_path), exist_ok=True)
                 
-                # Create PDF with classified pages
-                classified_doc = fitz.open()
-                for page_num in classified_pages:
-                    classified_doc.insert_pdf(doc, from_page=page_num, to_page=page_num)
-                classified_doc.save(classified_path)
-                classified_doc.close()
-            
-            # Create unclassified PDF if any unclassified pages
-            if unclassified_pages:
-                unclassified_path = os.path.join(
-                    config['paths']['output_dir'], 
-                    'unclassified',
-                    f"{os.path.splitext(os.path.basename(blob_name))[0]}_unclassified.pdf"
-                )
+                # Write error details
+                with open(unprocessed_path, 'w') as error_file:
+                    error_file.write(str(processing_error))
                 
-                # Create PDF with unclassified pages
-                unclassified_doc = fitz.open()
-                for page_num in unclassified_pages:
-                    unclassified_doc.insert_pdf(doc, from_page=page_num, to_page=page_num)
-                unclassified_doc.save(unclassified_path)
-                unclassified_doc.close()
-            
-            # Close original document
-            doc.close()
-            
-            # Copy source document
-            shutil.copy2(local_path, source_path)
-            
+                # Raise the error to be caught by outer exception handler
+                raise
+
             # Create archive if enabled
             if archive_enabled:
                 archive_path = create_archive([local_path])
-            
-            # Update SQL log with classification results
+
+            # Update SQL log with processing results
             sql_logger.update_document_processing(document_key, {
                 'status': 'Completed',
                 'status_desc': 'Document processed successfully',
-                'classified_pages': len(classified_pages),
-                'unclassified_pages': len(unclassified_pages),
-                'classification_details': classification_details,
                 'output_file_path_classified': classified_path,
                 'output_file_path_unclassified': unclassified_path,
+                'output_file_path_unprocessed': unprocessed_path,
                 'archive_file_path': archive_path
             })
             
@@ -532,17 +561,23 @@ def process_azure_documents(config, input_folder, confidence_threshold=0.6,
                 'unclassified_path': unclassified_path,
                 'archive_path': archive_path
             })
-        
+
         except Exception as doc_error:
+            # Log processing error
+            error_desc = str(doc_error)
+            
+            # Update SQL log with error status
+            if document_key:
+                sql_logger.update_document_processing(document_key, {
+                    'status': 'Error',
+                    'status_desc': error_desc,
+                    'output_file_path_unprocessed': unprocessed_path
+                })
+            
+            # Log the error
             logging.error(f"Error processing document {blob_name}: {doc_error}")
             
-            # Log processing error
-            sql_logger.update_document_processing(document_key, {
-                'status': 'Error',
-                'status_desc': str(doc_error)
-            })
-            
+            # Add to unprocessed files
             unprocessed_files.append(blob_name)
 
     return processed_files, unprocessed_files
-
