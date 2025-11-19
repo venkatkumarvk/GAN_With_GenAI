@@ -1,5 +1,20 @@
-DocumentProcessor_Key,
-Source, 
+class SQLLogger:
+    def log_document_processing(self, document_info):
+        """
+        Log document processing details to SQL database
+        
+        :param document_info: Dictionary containing document processing details
+        :return: Unique DocumentProcessor_Key
+        """
+        try:
+            # Establish connection
+            conn = self._get_connection()
+            cursor = conn.cursor()
+            
+            # Insert new row
+            sql = f"""
+            INSERT INTO {self.table_name} (
+                Source, 
                 APIType, 
                 FileName, 
                 SourceFilePath, 
@@ -7,9 +22,452 @@ Source,
                 OutputFilePathClassified,
                 OutputFilePathUnClassified,
                 OutputFilePathUnProcessed,
+                ArchiveFilePath,
                 Status, 
                 StatusDesc, 
                 CREATED_ON, 
                 CREATED_BY,
                 UPDATED_ON,
                 UPDATED_BY
+            ) VALUES (
+                ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, GETDATE(), ?, GETDATE(), ?
+            )
+            """
+            
+            # Prepare values
+            values = [
+                document_info.get('source', 'Unknown'),
+                document_info.get('api_type', 'Unknown'),
+                document_info.get('filename', ''),
+                document_info.get('source_file_path', ''),
+                document_info.get('reference_file_path', ''),
+                document_info.get('output_file_path_classified', ''),
+                document_info.get('output_file_path_unclassified', ''),
+                document_info.get('output_file_path_unprocessed', ''),
+                document_info.get('archive_file_path', ''),
+                document_info.get('status', 'BEGIN'),
+                document_info.get('status_desc', 'Document Processing Started'),
+                document_info.get('created_by', 'SystemUser'),
+                document_info.get('updated_by', 'SystemUser')
+            ]
+            
+            # Execute SQL
+            cursor.execute(sql, values)
+            conn.commit()
+            
+            # Get the last inserted ID
+            cursor.execute("SELECT @@IDENTITY AS DocumentProcessor_Key")
+            document_key = cursor.fetchone()[0]
+            
+            cursor.close()
+            conn.close()
+            
+            return document_key
+        
+        except Exception as e:
+            self.logger.error(f"SQL Logging Error: {e}")
+            return None
+
+    def update_document_processing(self, document_key, status_update):
+        """
+        Update existing document processing log
+        
+        :param document_key: Key of the document log to update
+        :param status_update: Dictionary with status update information
+        """
+        if not self.enabled or not document_key:
+            return False
+        
+        try:
+            # Establish connection
+            conn = self._get_connection()
+            cursor = conn.cursor()
+            
+            # Prepare SQL update statement
+            sql = f"""
+            UPDATE {self.table_name}
+            SET 
+                Status = ?,
+                StatusDesc = ?,
+                OutputFilePathClassified = COALESCE(?, OutputFilePathClassified),
+                OutputFilePathUnClassified = COALESCE(?, OutputFilePathUnClassified),
+                OutputFilePathUnProcessed = COALESCE(?, OutputFilePathUnProcessed),
+                ArchiveFilePath = COALESCE(?, ArchiveFilePath),
+                UPDATED_ON = GETDATE(),
+                UPDATED_BY = ?
+            WHERE DocumentProcessor_Key = ?
+            """
+            
+            # Prepare values
+            values = [
+                status_update.get('status', 'Processing'),
+                status_update.get('status_desc', 'Ongoing Processing'),
+                status_update.get('output_file_path_classified'),
+                status_update.get('output_file_path_unclassified'),
+                status_update.get('output_file_path_unprocessed'),
+                status_update.get('archive_file_path'),
+                status_update.get('updated_by', 'SystemUser'),
+                document_key
+            ]
+            
+            # Execute SQL
+            cursor.execute(sql, values)
+            conn.commit()
+            
+            cursor.close()
+            conn.close()
+            
+            return True
+        
+        except Exception as e:
+            self.logger.error(f"SQL Update Error: {e}")
+            return False
+
+
+
+-----
+def process_local_documents(config, input_folder=None, confidence_threshold=0.6, processing_mode='general'):
+    # Initialize SQL Logger
+    sql_logger = initialize_sql_logger(config)
+    
+    # Process each document
+    for fname in os.listdir(input_dir):
+        try:
+            # Prepare initial document info
+            document_info = {
+                'source': 'local',
+                'api_type': processing_mode,
+                'filename': fname,
+                'source_file_path': fpath,
+                'reference_file_path': reference_dir,
+                'status': 'BEGIN',
+                'status_desc': 'Document Processing Started'
+            }
+            
+            # Log document and get key
+            document_key = sql_logger.log_document_processing(document_info)
+            
+            # Existing processing logic
+            # ... (your existing document processing code)
+            
+            # Prepare output paths
+            classified_path = os.path.join(
+                config['paths']['output_dir'], 
+                'classified', 
+                f"{os.path.splitext(fname)[0]}_classified.pdf"
+            )
+            
+            unclassified_path = os.path.join(
+                config['paths']['output_dir'], 
+                'unclassified',
+                f"{os.path.splitext(fname)[0]}_unclassified.pdf"
+            )
+            
+            unprocessed_path = os.path.join(
+                config['paths']['output_dir'], 
+                'unprocessed',
+                f"{os.path.splitext(fname)[0]}_error.txt"
+            )
+            
+            archive_path = create_archive([fpath])
+            
+            # Update SQL log with processing results
+            sql_logger.update_document_processing(document_key, {
+                'status': 'Completed',
+                'status_desc': 'Document processed successfully',
+                'output_file_path_classified': classified_path,
+                'output_file_path_unclassified': unclassified_path,
+                'output_file_path_unprocessed': unprocessed_path,
+                'archive_file_path': archive_path
+            })
+        
+        except Exception as e:
+            # Update status to error
+            sql_logger.update_document_processing(document_key, {
+                'status': 'Error',
+                'status_desc': str(e),
+                'output_file_path_unprocessed': unprocessed_path
+            })
+
+
+-----
+
+{
+    "paths": {
+        "input_dir": "/path/to/input/documents",
+        "output_dir": "/path/to/output/documents",
+        "reference_dir": "/path/to/reference/documents",
+        "log_dir": "/path/to/logs"
+    },
+    "logging": {
+        "level": "INFO",
+        "format": "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+    },
+    "categories": {
+        "medical": [
+            "insurance_claim",
+            "prescription", 
+            "medical_report", 
+            "patient_record",
+            "lab_result"
+        ],
+        "financial": [
+            "invoice", 
+            "bank_statement", 
+            "tax_document",
+            "receipt",
+            "financial_report"
+        ],
+        "legal": [
+            "contract", 
+            "agreement", 
+            "legal_notice",
+            "court_document",
+            "affidavit"
+        ],
+        "hr": [
+            "resume",
+            "offer_letter",
+            "employment_contract",
+            "performance_review"
+        ]
+    },
+    "azure_openai": {
+        "api_key": "@azurekeyvault(Openaiapikeygeneral)",
+        "endpoint": "https://your-resource-name.openai.azure.com/",
+        "deployment_name": "your-gpt-4o-general-deployment",
+        "api_version": "2024-02-15-preview",
+        "api_type": "azure",
+        "max_tokens": 300,
+        "temperature": 0.2,
+        "top_p": 0.95
+    },
+    "azure_openai_batch": {
+        "api_key": "@azurekeyvault(Openaiapikeygeneral)",
+        "endpoint": "https://your-resource-name.openai.azure.com/",
+        "deployment_name": "your-gpt-4o-batch-deployment",
+        "api_version": "2024-02-15-preview",
+        "api_type": "azure",
+        "max_tokens": 300,
+        "temperature": 0.2,
+        "top_p": 0.95
+    },
+    "azure_storage": {
+        "connection_string": "@azurekeyvault(AzureStorageConnectionString)",
+        "input_container": "input-documents",
+        "output_container": "processed-documents",
+        "archive_container": "document-archives"
+    },
+    "azure_keyvault": {
+        "vault_url": "https://your-keyvault-name.vault.azure.net/"
+    },
+    "classification": {
+        "confidence_threshold": 0.6,
+        "batch_size": 10
+    },
+    "sql_server": {
+        "connection_string": "Driver={ODBC Driver 17 for SQL Server};Server=your-server;Database=your-database;UID=your-username;PWD=your-password;"
+    },
+    "logging_db": {
+        "enabled": true,
+        "table_name": "dbo.XLogDocumentClassification"
+    },
+    "token_pricing": {
+        "gpt-4o": {
+            "input": {
+                "price_per_million": 2.50
+            },
+            "output": {
+                "price_per_million": 10.00
+            }
+        }
+    },
+    "batch_config": {
+        "input_container": "batch-input",
+        "output_container": "batch-output",
+        "polling_interval": 60
+    }
+}
+
+-----
+
+def process_azure_documents(config, input_folder, confidence_threshold=0.6, 
+                             archive_enabled=True, 
+                             clean_input_container=True, 
+                             processing_mode='general'):
+    # Initialize SQL Logger
+    sql_logger = initialize_sql_logger(config)
+    
+    # Initialize Azure storage manager
+    storage_manager = AzureStorageManager(config)
+    
+    # Initialize document classifier
+    classifier = DocumentClassifier(config, processing_mode=processing_mode)
+    
+    # List blobs in input container/folder
+    input_container = config['azure_storage']['input_container']
+    blobs = storage_manager.list_blobs(input_container, prefix=input_folder)
+    
+    # Track processed files
+    processed_files = []
+    unprocessed_files = []
+
+    # Process each blob
+    for blob_name in blobs:
+        try:
+            # Download blob to local temporary directory
+            local_path = os.path.join(local_input_dir, os.path.basename(blob_name))
+            if not storage_manager.download_blob(input_container, blob_name, local_path):
+                # Log download failure
+                document_info = {
+                    'source': 'azure',
+                    'api_type': processing_mode,
+                    'filename': os.path.basename(blob_name),
+                    'source_file_path': f"azure://{input_container}/{blob_name}",
+                    'status': 'Error',
+                    'status_desc': 'Failed to download blob'
+                }
+                sql_logger.log_document_processing(document_info)
+                unprocessed_files.append(blob_name)
+                continue
+
+            # Open PDF to get total pages
+            doc = fitz.open(local_path)
+            total_pages = len(doc)
+            
+            # Prepare initial document info
+            document_info = {
+                'source': 'azure',
+                'api_type': processing_mode,
+                'filename': os.path.basename(blob_name),
+                'source_file_path': f"azure://{input_container}/{blob_name}",
+                'reference_file_path': config['paths']['reference_dir'],
+                'total_pages': total_pages,
+                'classified_pages': 0,
+                'unclassified_pages': total_pages,
+                'status': 'BEGIN',
+                'status_desc': 'Document Processing Started',
+                'classification_details': []
+            }
+            
+            # Log document and get key
+            document_key = sql_logger.log_document_processing(document_info)
+            
+            # Classification details
+            classified_pages = []
+            unclassified_pages = []
+            classification_details = []
+            
+            # Process each page
+            for page_num in range(total_pages):
+                try:
+                    # Extract page image
+                    page_image = extract_page_image(local_path, page_num)
+                    
+                    # Classify page
+                    classification = classifier.classify_document(page_image, config['paths']['reference_dir'])
+                    
+                    # Check classification confidence
+                    if (classification['confidence'] >= confidence_threshold 
+                        and classification['main_category'] != 'unknown'):
+                        classified_pages.append(page_num)
+                        classification_details.append({
+                            'page_number': page_num + 1,
+                            'main_category': classification['main_category'],
+                            'subcategory': classification['subcategory'],
+                            'confidence': classification['confidence']
+                        })
+                    else:
+                        unclassified_pages.append(page_num)
+                
+                except Exception as page_error:
+                    logging.error(f"Error processing page {page_num} in {blob_name}: {page_error}")
+                    unclassified_pages.append(page_num)
+            
+            # Prepare output paths
+            source_path = os.path.join(config['paths']['output_dir'], 'source', os.path.basename(local_path))
+            classified_path = None
+            unclassified_path = None
+            archive_path = None
+            
+            # Create classified PDF if any classified pages
+            if classified_pages:
+                classified_path = os.path.join(
+                    config['paths']['output_dir'], 
+                    'classified', 
+                    classification_details[0]['main_category'],
+                    classification_details[0]['subcategory'],
+                    f"{os.path.splitext(os.path.basename(blob_name))[0]}_classified.pdf"
+                )
+                os.makedirs(os.path.dirname(classified_path), exist_ok=True)
+                
+                # Create PDF with classified pages
+                classified_doc = fitz.open()
+                for page_num in classified_pages:
+                    classified_doc.insert_pdf(doc, from_page=page_num, to_page=page_num)
+                classified_doc.save(classified_path)
+                classified_doc.close()
+            
+            # Create unclassified PDF if any unclassified pages
+            if unclassified_pages:
+                unclassified_path = os.path.join(
+                    config['paths']['output_dir'], 
+                    'unclassified',
+                    f"{os.path.splitext(os.path.basename(blob_name))[0]}_unclassified.pdf"
+                )
+                
+                # Create PDF with unclassified pages
+                unclassified_doc = fitz.open()
+                for page_num in unclassified_pages:
+                    unclassified_doc.insert_pdf(doc, from_page=page_num, to_page=page_num)
+                unclassified_doc.save(unclassified_path)
+                unclassified_doc.close()
+            
+            # Close original document
+            doc.close()
+            
+            # Copy source document
+            shutil.copy2(local_path, source_path)
+            
+            # Create archive if enabled
+            if archive_enabled:
+                archive_path = create_archive([local_path])
+            
+            # Update SQL log with classification results
+            sql_logger.update_document_processing(document_key, {
+                'status': 'Completed',
+                'status_desc': 'Document processed successfully',
+                'classified_pages': len(classified_pages),
+                'unclassified_pages': len(unclassified_pages),
+                'classification_details': classification_details,
+                'output_file_path_classified': classified_path,
+                'output_file_path_unclassified': unclassified_path,
+                'archive_file_path': archive_path
+            })
+            
+            # Clean up input container if specified
+            if clean_input_container:
+                storage_manager.delete_blob(input_container, blob_name)
+            
+            # Track processed file
+            processed_files.append({
+                'original_path': local_path,
+                'source_path': source_path,
+                'classified_path': classified_path,
+                'unclassified_path': unclassified_path,
+                'archive_path': archive_path
+            })
+        
+        except Exception as doc_error:
+            logging.error(f"Error processing document {blob_name}: {doc_error}")
+            
+            # Log processing error
+            sql_logger.update_document_processing(document_key, {
+                'status': 'Error',
+                'status_desc': str(doc_error)
+            })
+            
+            unprocessed_files.append(blob_name)
+
+    return processed_files, unprocessed_files
+
