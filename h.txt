@@ -580,3 +580,95 @@ def process_azure_documents(config, input_folder, confidence_threshold=0.6,
             unprocessed_files.append(blob_name)
 
     return processed_files, unprocessed_files
+
+
+
+----
+update
+
+def process_azure_documents(config, input_folder, confidence_threshold=0.6, 
+                             archive_enabled=True, 
+                             clean_input_container=True, 
+                             processing_mode='general'):
+    # Initialize Azure Storage Manager
+    storage_manager = AzureStorageManager(config)
+    
+    # Initialize SQL Logger
+    sql_logger = initialize_sql_logger(config)
+    
+    # Initialize document classifier
+    classifier = DocumentClassifier(config, processing_mode=processing_mode)
+    
+    # Get container configurations
+    input_container = config['azure_storage']['input_container']
+    output_container = config['azure_storage']['output_container']
+    archive_container = config['azure_storage'].get('archive_container', 'document-archives')
+    reference_container = config['azure_storage'].get('reference_container', 'reference-documents')
+    
+    # Ensure output container folders exist
+    output_folders = ['source', 'classified', 'unclassified', 'unprocessed']
+    
+    # Create folders in output container if they don't exist
+    for folder in output_folders:
+        try:
+            # Create a placeholder file to ensure folder exists in Azure Blob Storage
+            placeholder_blob_name = f"{folder}/.placeholder"
+            placeholder_content = b"This is a placeholder to create the folder structure."
+            
+            # Check if placeholder exists, if not, create it
+            try:
+                storage_manager.get_blob_client(output_container, placeholder_blob_name)
+            except Exception:
+                # Blob doesn't exist, so upload placeholder
+                storage_manager.upload_blob(
+                    output_container, 
+                    placeholder_blob_name, 
+                    io.BytesIO(placeholder_content)
+                )
+        except Exception as folder_error:
+            logging.error(f"Error creating folder {folder} in output container: {folder_error}")
+    
+    # List blobs in input container/folder
+    blobs = storage_manager.list_blobs(input_container, prefix=input_folder)
+    
+    # Track processed files
+    processed_files = []
+    unprocessed_files = []
+
+    # Process each blob
+    for blob_name in blobs:
+        # Rest of the existing implementation remains the same
+        # ... (previous implementation)
+
+        # Example modification for classified path creation
+        if classified_pages:
+            # Ensure category and subcategory folders exist
+            main_category = classification['main_category']
+            subcategory = classification['subcategory']
+            
+            # Create category folder placeholders
+            try:
+                category_placeholder = f"classified/{main_category}/.placeholder"
+                subcategory_placeholder = f"classified/{main_category}/{subcategory}/.placeholder"
+                
+                # Create category folder placeholder
+                storage_manager.upload_blob(
+                    output_container, 
+                    category_placeholder, 
+                    io.BytesIO(b"Category folder placeholder")
+                )
+                
+                # Create subcategory folder placeholder
+                storage_manager.upload_blob(
+                    output_container, 
+                    subcategory_placeholder, 
+                    io.BytesIO(b"Subcategory folder placeholder")
+                )
+            except Exception as folder_error:
+                logging.error(f"Error creating category folders: {folder_error}")
+            
+            # Prepare classified output path
+            classified_filename = f"{local_filename}_classified.pdf"
+            classified_path = f"classified/{main_category}/{subcategory}/{classified_filename}"
+
+    # Rest of the implementation remains the same
