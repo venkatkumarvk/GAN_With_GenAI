@@ -1,3 +1,516 @@
+Perfect! I can see your `process_batch` code. Let me provide the **complete corrected version** for both `process_general` and `process_batch` with OCR support.
+
+---
+
+## **COMPLETE CORRECTED llm.py FILE**
+
+Replace your entire methods with these:
+
+---
+
+### **METHOD 1: process_general (CORRECTED)**
+
+```python
+def process_general(self, image_base64_strings, prompts, systemprompt=None, ocr_texts=None):
+    """
+    Process images using the general (non-batch) API.
+    
+    Parameters:
+    - image_base64_strings: List of base64-encoded image strings
+    - prompts: List of corresponding prompts
+    - systemprompt: System prompt (optional)
+    - ocr_texts: List of OCR extracted text (optional, one per image)
+    
+    Returns:
+    - List of API responses
+    """
+    results = []
+    
+    self.logger.info(f"Processing {len(image_base64_strings)} images using General API")
+    if ocr_texts:
+        self.logger.info(f"OCR text provided for {len([t for t in ocr_texts if t])} images")
+    
+    for i, (base64_img, prompt) in enumerate(zip(image_base64_strings, prompts)):
+        try:
+            self.logger.debug(f"Processing image {i+1}/{len(image_base64_strings)}")
+            
+            # Check if OCR text is available for this image
+            has_ocr = ocr_texts and i < len(ocr_texts) and ocr_texts[i]
+            
+            if has_ocr:
+                # OCR MODE: system prompt, OCR text, prompt, image all in user content
+                self.logger.debug(f"Using OCR mode for image {i+1}")
+                
+                ocr_text = ocr_texts[i]
+                
+                response = self.openai_client.chat.completions.create(
+                    model=self.deployment_name_openai,
+                    messages=[
+                        {
+                            "role": "user",
+                            "content": [
+                                {
+                                    "type": "text",
+                                    "text": systemprompt if systemprompt else ""
+                                },
+                                {
+                                    "type": "text",
+                                    "text": ocr_text
+                                },
+                                {
+                                    "type": "text",
+                                    "text": prompt
+                                },
+                                {
+                                    "type": "image_url",
+                                    "image_url": {
+                                        "url": f"data:image/png;base64,{base64_img}"
+                                    }
+                                }
+                            ]
+                        }
+                    ],
+                    max_tokens=2000,
+                    temperature=0.5,
+                    response_format={"type": "json_object"}
+                )
+            
+            else:
+                # NORMAL MODE: separate system message + user message with image
+                self.logger.debug(f"Using standard mode for image {i+1}")
+                
+                messages = []
+                
+                # Add system message if provided
+                if systemprompt:
+                    messages.append({
+                        "role": "system",
+                        "content": systemprompt
+                    })
+                
+                # Add user message with image
+                messages.append({
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": prompt
+                        },
+                        {
+                            "type": "image_url",
+                            "image_url": {
+                                "url": f"data:image/png;base64,{base64_img}"
+                            }
+                        }
+                    ]
+                })
+                
+                response = self.openai_client.chat.completions.create(
+                    model=self.deployment_name_openai,
+                    messages=messages,
+                    max_tokens=2000,
+                    temperature=0.5,
+                    response_format={"type": "json_object"}
+                )
+            
+            # Track token usage
+            self.track_tokens(response)
+            
+            if hasattr(response, 'choices') and len(response.choices) > 0:
+                content = response.choices[0].message.content
+                results.append(json.dumps({
+                    "custom_id": f"request-{i+1}",
+                    "response": {
+                        "body": {
+                            "choices": [
+                                {
+                                    "message": {
+                                        "content": content
+                                    }
+                                }
+                            ]
+                        }
+                    }
+                }))
+            else:
+                results.append(json.dumps({
+                    "custom_id": f"request-{i+1}",
+                    "error": "No response content"
+                }))
+        
+        except Exception as e:
+            print(f"Error processing image {i+1}: {str(e)}")
+            results.append(json.dumps({
+                "custom_id": f"request-{i+1}",
+                "error": str(e)
+            }))
+    
+    self.logger.info(f"General API processing complete: {len([r for r in results if 'error' not in r])}/{len(results)} successful")
+    
+    return results
+```
+
+---
+
+### **METHOD 2: process_batch (CORRECTED)**
+
+```python
+def process_batch(self, image_base64_strings, prompts, systemprompt=None, ocr_texts=None):
+    """
+    Process images in a batch using the Azure OpenAI batch API.
+    Tracks token usage.
+    
+    Parameters:
+    - image_base64_strings: List of base64-encoded image strings
+    - prompts: List of corresponding prompts
+    - systemprompt: System prompt (optional)
+    - ocr_texts: List of OCR extracted text (optional, one per image)
+    
+    Returns:
+    - List of API responses
+    """
+    self.logger.info(f"Processing {len(image_base64_strings)} images using Batch API")
+    if ocr_texts:
+        self.logger.info(f"OCR text provided for {len([t for t in ocr_texts if t])} images")
+    
+    tmp_jsonl_path = None
+    
+    try:
+        # Prepare the JSONL batch file
+        jsonl_file = self.prepare_batch_jsonl(image_base64_strings, prompts, systemprompt, ocr_texts)
+        
+        # Create a temporary file for the JSONL content
+        with tempfile.NamedTemporaryFile(suffix='.jsonl', delete=False) as tmp_jsonl:
+            tmp_jsonl.write(jsonl_file.getvalue())
+            tmp_jsonl_path = tmp_jsonl.name
+        
+        # Upload with explicit file open
+        print("Uploading batch file to Azure...")
+        with open(tmp_jsonl_path, 'rb') as f:
+            file = self.client.files.create(
+                file=f,
+                purpose="batch"
+            )
+        
+        # We can delete the temp file immediately after upload
+        if tmp_jsonl_path:
+            os.unlink(tmp_jsonl_path)
+            tmp_jsonl_path = None
+        
+        file_id = file.id
+        print(f"File uploaded (ID: {file_id}). Creating batch job...")
+        
+        # Submit batch job
+        batch_response = self.client.batches.create(
+            input_file_id=file_id,
+            endpoint="/chat/completions",
+            completion_window="24h"
+        )
+        
+        batch_id = batch_response.id
+        print(f"Batch job created (ID: {batch_id}). Waiting for processing...")
+        
+        # Track batch job status
+        status = "validating"
+        start_time = time.time()
+        
+        while status not in ("completed", "failed", "cancelled"):
+            time.sleep(30)
+            
+            # Check for timeout
+            if time.time() - start_time > self.timeout:
+                print(f"Timeout after {self.timeout} seconds. Cancelling batch job.")
+                try:
+                    self.client.batch.batches.cancel(batch_id)
+                except:
+                    pass
+                raise TimeoutError(f"Batch processing timed out after {self.timeout} seconds")
+            
+            batch_response = self.client.batches.retrieve(batch_id)
+            status = batch_response.status
+            status_message = f"{datetime.now()} Batch Id: {batch_id}, Status: {status}"
+            print(status_message)
+        
+        # Track token usage if available
+        if hasattr(batch_response, "usage") and batch_response.usage:
+            self.track_tokens(batch_response.usage)
+        
+        # Retrieve results
+        output_file_id = batch_response.output_file_id
+        
+        if not output_file_id:
+            output_file_id = batch_response.error_file_id
+            if not output_file_id:
+                print("No output or error file was produced by the batch job.")
+                raise Exception("No output file was produced")
+        
+        print("Batch completed. Retrieving results...")
+        file_response = self.client.files.content(output_file_id)
+        raw_responses = file_response.text.strip().split('\n')
+        mprint(raw_responses)
+        
+        # Try to estimate token usage from responses if not available from API
+        for raw_response in raw_responses:
+            try:
+                json_response = json.loads(raw_response)
+                if "response" in json_response and "body" in json_response["response"]:
+                    content = json_response["response"]["body"]
+                    
+                    if isinstance(content, str):
+                        content = json.loads(content)
+                    
+                    self.track_tokens()
+            
+            except:
+                print("pass")
+                pass
+        
+        # Rough estimation = 3.051/25
+        if self.total_input_tokens == 0 and self.total_output_tokens == 0:
+            # Rough estimation for prompts (1 token ≈ 4 chars for English text)
+            for prompt in prompts:
+                self.total_input_tokens += len(prompt) // 4
+            
+            self.total_input_tokens += 500
+            
+            for raw_response in raw_responses:
+                if len(raw_response) > 0:
+                    self.total_output_tokens += len(raw_response) // 4
+        
+        return raw_responses
+    
+    except Exception as e:
+        print(f"Error during batch processing: {str(e)}")
+        raise
+    
+    finally:
+        # Ensure temporary file is deleted if it exists
+        if tmp_jsonl_path and os.path.exists(tmp_jsonl_path):
+            try:
+                os.unlink(tmp_jsonl_path)
+            except:
+                pass
+```
+
+---
+
+### **METHOD 3: prepare_batch_jsonl (CORRECTED - NEW METHOD)**
+
+```python
+def prepare_batch_jsonl(self, image_base64_strings, prompts, systemprompt=None, ocr_texts=None):
+    """
+    Parameters:
+    - image_base64_strings: List of base64-encoded image strings
+    - prompts: List of corresponding prompts
+    - systemprompt: System prompt (optional)
+    - ocr_texts: List of OCR extracted text (optional, one per image)
+    
+    Returns:
+    - BytesIO object containing the JSONL content
+    """
+    jsonl_file = BytesIO()
+    
+    for i, (base64_img, prompt) in enumerate(zip(image_base64_strings, prompts)):
+        
+        # Check if OCR text is available for this request
+        has_ocr = ocr_texts and i < len(ocr_texts) and ocr_texts[i]
+        
+        if has_ocr:
+            # OCR MODE: system prompt, OCR text, prompt, image in user content
+            self.logger.debug(f"Using OCR mode for batch request {i+1}")
+            
+            ocr_text = ocr_texts[i]
+            
+            # Create the request object with proper data URL format
+            request = {
+                "custom_id": f"request-{i+1}",
+                "method": "POST",
+                "url": "/chat/completions",
+                "body": {
+                    "model": self.deployment_name,
+                    "messages": [
+                        {
+                            "role": "user",
+                            "content": [
+                                {
+                                    "type": "text",
+                                    "text": systemprompt if systemprompt else ""
+                                },
+                                {
+                                    "type": "text",
+                                    "text": ocr_text
+                                },
+                                {
+                                    "type": "text",
+                                    "text": prompt
+                                },
+                                {
+                                    "type": "image_url",
+                                    "image_url": {
+                                        "url": f"data:image/png;base64,{base64_img}"
+                                    }
+                                }
+                            ]
+                        }
+                    ],
+                    "max_tokens": 2000,
+                    "temperature": 0.7,
+                    "response_format": {"type": "json_object"}
+                }
+            }
+        
+        else:
+            # NORMAL MODE: separate system and user messages
+            self.logger.debug(f"Using standard mode for batch request {i+1}")
+            
+            # From prompt import prompt, System_message
+            Content = systemprompt
+            
+            # Create the request object with proper data URL format
+            request = {
+                "custom_id": f"request-{i+1}",
+                "method": "POST",
+                "url": "/chat/completions",
+                "body": {
+                    "model": self.deployment_name,
+                    "messages": [
+                        {
+                            "role": "system",
+                            "content": Content
+                        },
+                        {
+                            "role": "user",
+                            "content": [
+                                {
+                                    "type": "text",
+                                    "text": prompt
+                                },
+                                {
+                                    "type": "image_url",
+                                    "image_url": {
+                                        "url": f"data:image/png;base64,{base64_img}"
+                                    }
+                                }
+                            ]
+                        }
+                    ],
+                    "max_tokens": 2000,
+                    "temperature": 0.7,
+                    "response_format": {"type": "json_object"}
+                }
+            }
+        
+        # Add each line to the file
+        jsonl_file.write((json.dumps(request) + "\n").encode('utf-8'))
+    
+    # Move back to the beginning
+    jsonl_file.seek(0)
+    return jsonl_file
+```
+
+---
+
+## **SUMMARY OF KEY CHANGES:**
+
+### **Both Methods Now:**
+
+1. ✅ **Accept `ocr_texts=None` parameter**
+2. ✅ **Check if OCR available**: `has_ocr = ocr_texts and i < len(ocr_texts) and ocr_texts[i]`
+3. ✅ **OCR Mode**: All content in single user message (system, OCR, prompt, image)
+4. ✅ **Normal Mode**: Separate system + user messages
+5. ✅ **Logging**: Shows which mode is used per image/request
+
+---
+
+## **Message Structure:**
+
+### **With OCR (`has_ocr = True`):**
+```python
+messages = [
+    {
+        "role": "user",
+        "content": [
+            {"type": "text", "text": systemprompt},  # System prompt
+            {"type": "text", "text": ocr_text},      # OCR text
+            {"type": "text", "text": prompt},        # User prompt
+            {"type": "image_url", "image_url": {...}} # Image
+        ]
+    }
+]
+```
+
+### **Without OCR (`has_ocr = False`):**
+```python
+messages = [
+    {"role": "system", "content": systemprompt},
+    {
+        "role": "user",
+        "content": [
+            {"type": "text", "text": prompt},
+            {"type": "image_url", "image_url": {...}}
+        ]
+    }
+]
+```
+
+---
+
+## **Testing:**
+
+```python
+# With OCR
+ocr_texts = [
+    "Claim Number: 12345\nPatient: John",
+    "Service Date: 2024-01-15\nProvider: ABC"
+]
+
+results = client.process_general(
+    image_base64_strings=[img1, img2],
+    prompts=["Extract claim data"] * 2,
+    systemprompt="You are a medical expert",
+    ocr_texts=ocr_texts  # Pass OCR texts
+)
+
+# Without OCR
+results = client.process_general(
+    image_base64_strings=[img1, img2],
+    prompts=["Extract invoice data"] * 2,
+    systemprompt="You are an invoice expert",
+    ocr_texts=None  # No OCR
+)
+```
+
+---
+
+## **Expected Logs:**
+
+### **With OCR:**
+```
+INFO: Processing 2 images using General API
+INFO: OCR text provided for 2 images
+DEBUG: Processing image 1/2
+DEBUG: Using OCR mode for image 1  ✅
+DEBUG: Processing image 2/2
+DEBUG: Using OCR mode for image 2  ✅
+```
+
+### **Without OCR:**
+```
+INFO: Processing 2 images using General API
+DEBUG: Processing image 1/2
+DEBUG: Using standard mode for image 1  ✅
+DEBUG: Processing image 2/2
+DEBUG: Using standard mode for image 2  ✅
+```
+
+---
+
+**That's it!** Both `process_general` and `process_batch` now correctly handle OCR text with the exact message structure you showed in your images! 🎯
+
+Just replace these 3 methods in your `llm.py` file and it will work perfectly with OCR!
+
+
+
 **Here are ALL blocks you need to change to add OCR functionality - complete list with exact locations!**
 
 ---
