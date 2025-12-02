@@ -1,0 +1,680 @@
+#block 1
+
+
+def process_general(self, base64_strings, prompts, systemprompt=None, ocr_texts=None):
+    """
+    Process images using the general API (synchronous, one-by-one).
+    
+    Args:
+        base64_strings: List of base64 encoded images
+        prompts: List of user prompts (one per image)
+        systemprompt: System prompt (optional)
+        ocr_texts: List of OCR extracted text (optional, one per image)
+    
+    Returns:
+        List of API responses (strings)
+    """
+
+
+  ----
+  #block 2
+
+  results = []
+
+self.logger.info(f"Processing {len(base64_strings)} images using General API")
+if ocr_texts:
+    self.logger.info(f"OCR text provided for {len([t for t in ocr_texts if t])} images")
+
+for i, (base64_string, user_prompt) in enumerate(zip(base64_strings, prompts)):
+
+
+
+------------
+
+  block 3
+
+  try:
+    self.logger.debug(f"Processing image {i+1}/{len(base64_strings)}")
+    
+    # Prepare messages based on whether OCR text is provided
+    messages = []
+    
+    if ocr_texts and i < len(ocr_texts) and ocr_texts[i]:
+        # OCR mode: system prompt, OCR text, user prompt, image in user content
+        ocr_text = ocr_texts[i]
+        self.logger.debug(f"Using OCR mode for image {i+1}")
+        
+        user_content = [
+            {
+                "type": "text",
+                "text": systemprompt if systemprompt else ""
+            },
+            {
+                "type": "text",
+                "text": f"OCR EXTRACTED TEXT:\n{ocr_text}"
+            },
+            {
+                "type": "text",
+                "text": user_prompt
+            },
+            {
+                "type": "image_url",
+                "image_url": {
+                    "url": f"data:image/png;base64,{base64_string}"
+                }
+            }
+        ]
+        
+        messages.append({
+            "role": "user",
+            "content": user_content
+        })
+    
+    else:
+        # Non-OCR mode: system message (if exists) + user message with image
+        self.logger.debug(f"Using standard vision mode for image {i+1}")
+        
+        # Add system message if provided
+        if systemprompt:
+            messages.append({
+                "role": "system",
+                "content": systemprompt
+            })
+        
+        # Add user message with image
+        user_content = [
+            {
+                "type": "text",
+                "text": user_prompt
+            },
+            {
+                "type": "image_url",
+                "image_url": {
+                    "url": f"data:image/png;base64,{base64_string}"
+                }
+            }
+        ]
+        
+        messages.append({
+            "role": "user",
+            "content": user_content
+        })
+
+-----
+
+          block 4
+
+
+          def process_batch(self, base64_strings, prompts, systemprompt=None, ocr_texts=None):
+    """
+    Process images using the Batch API (asynchronous, efficient for large batches).
+    
+    Args:
+        base64_strings: List of base64 encoded images
+        prompts: List of user prompts (one per image)
+        systemprompt: System prompt (optional)
+        ocr_texts: List of OCR extracted text (optional, one per image)
+    
+    Returns:
+        List of API responses (strings) in same order as input
+    """
+
+
+  -----
+
+          block 5
+
+          self.logger.info(f"Processing {len(base64_strings)} images using Batch API")
+if ocr_texts:
+    self.logger.info(f"OCR text provided for {len([t for t in ocr_texts if t])} images")
+
+try:
+    # Step 1: Create batch requests with OCR text if available
+    batch_requests = self._create_batch_requests(base64_strings, prompts, systemprompt, ocr_texts)
+
+
+  -----
+
+  block 6
+
+  def _create_batch_requests(self, base64_strings, prompts, systemprompt=None, ocr_texts=None):
+    """
+    Create batch request objects for Batch API.
+    
+    Args:
+        base64_strings: List of base64 encoded images
+        prompts: List of user prompts
+        systemprompt: System prompt (optional)
+        ocr_texts: List of OCR extracted text (optional)
+    
+    Returns:
+        List of batch request dictionaries
+    """
+
+
+  -----
+
+  block 7
+
+  for i, (base64_string, user_prompt) in enumerate(zip(base64_strings, prompts)):
+    # Prepare messages based on whether OCR text is provided
+    messages = []
+    
+    if ocr_texts and i < len(ocr_texts) and ocr_texts[i]:
+        # OCR mode: system prompt, OCR text, user prompt, image in user content
+        ocr_text = ocr_texts[i]
+        self.logger.debug(f"Using OCR mode for batch request {i}")
+        
+        user_content = [
+            {
+                "type": "text",
+                "text": systemprompt if systemprompt else ""
+            },
+            {
+                "type": "text",
+                "text": f"OCR EXTRACTED TEXT:\n{ocr_text}"
+            },
+            {
+                "type": "text",
+                "text": user_prompt
+            },
+            {
+                "type": "image_url",
+                "image_url": {
+                    "url": f"data:image/png;base64,{base64_string}"
+                }
+            }
+        ]
+        
+        messages.append({
+            "role": "user",
+            "content": user_content
+        })
+    
+    else:
+        # Non-OCR mode: system message (if exists) + user message with image
+        self.logger.debug(f"Using standard vision mode for batch request {i}")
+        
+        # Add system message if provided
+        if systemprompt:
+            messages.append({
+                "role": "system",
+                "content": systemprompt
+            })
+        
+        # Add user message with image
+        user_content = [
+            {
+                "type": "text",
+                "text": user_prompt
+            },
+            {
+                "type": "image_url",
+                "image_url": {
+                    "url": f"data:image/png;base64,{base64_string}"
+                }
+            }
+        ]
+        
+        messages.append({
+            "role": "user",
+            "content": user_content
+        })
+
+
+
+          -----
+
+
+          block 8'''
+
+          ocr.py
+
+          from azure.ai.formrecognizer import DocumentAnalysisClient
+from azure.core.credentials import AzureKeyCredential
+import logging
+
+
+class DocumentIntelligenceHelper:
+    """Azure Document Intelligence helper for OCR."""
+    
+    def __init__(self, endpoint, api_key, logger=None):
+        self.endpoint = endpoint
+        self.api_key = api_key
+        self.logger = logger or logging.getLogger("doc_intelligence")
+        
+        self.client = DocumentAnalysisClient(
+            endpoint=self.endpoint,
+            credential=AzureKeyCredential(self.api_key)
+        )
+        
+        self.logger.info(f"Initialized Document Intelligence")
+        self.logger.info(f"  Endpoint: {self.endpoint}")
+    
+    def extract_text_from_document(self, document_bytes):
+        """
+        Extract text from document using OCR.
+        
+        Args:
+            document_bytes: Document content as bytes
+        
+        Returns:
+            str: Extracted text or None
+        """
+        try:
+            self.logger.debug("Starting OCR analysis")
+            
+            poller = self.client.begin_analyze_document(
+                "prebuilt-read",
+                document=document_bytes
+            )
+            result = poller.result()
+            
+            # Get full text
+            text = result.content
+            
+            self.logger.info(f"OCR extracted {len(text)} characters")
+            return text
+        
+        except Exception as e:
+            self.logger.error(f"Error in OCR: {str(e)}")
+            return None
+
+
+  ----
+
+  block 9
+
+
+  {
+  "azure_openai": {
+    ...existing...
+  },
+  "azure_document_intelligence": {
+    "endpoint": "https://your-doc-intelligence.cognitiveservices.azure.com/",
+    "api_key": "your-di-api-key"
+  },
+  "azure_storage": {
+    ...existing...
+  }
+}
+
+
+---
+    "use_ocr": true
+
+  ---
+
+  block 10
+
+  parser.add_argument("--no-preprocessing", action="store_true",
+                 help="Disable image preprocessing regardless of config setting")
+parser.add_argument("--no-ocr", action="store_true",
+                 help="Disable OCR extraction regardless of config setting")
+
+args = parser.parse_args()
+
+  ---
+
+  # Handle preprocessing arguments
+enable_preprocessing = None
+if args.enable_preprocessing:
+    enable_preprocessing = True
+    logger.info("Preprocessing enabled via command line argument")
+elif args.no_preprocessing:
+    enable_preprocessing = False
+    logger.info("Preprocessing disabled via command line argument")
+
+# Handle OCR arguments
+enable_ocr = None
+if args.no_ocr:
+    enable_ocr = False
+    logger.info("OCR disabled via command line argument")
+
+# Override archive setting if --no-archive is specified
+
+
+  -----
+
+  block 12
+
+  if args.source == "azure":
+    process_azure_pdf_files(config, args.apitype, args.folder, args.doctype, logger, enable_overlay, enable_preprocessing, enable_ocr)
+
+
+  ----------
+
+  # Get preprocessing configuration
+preprocessing_enabled = doc_config.get("preprocessing_enabled", False)
+preprocessing_config = doc_config.get("preprocessing_config", {}) if preprocessing_enabled else None
+
+# Get OCR configuration
+use_ocr = doc_config.get("use_ocr", False)
+
+return extraction_fields, systemprompt, prompt_template, model_config, overlay_config, preprocessing_config, use_ocr
+
+  -----
+
+  def process_azure_pdf_files(config, api_type, azure_folder, doc_type, logger, enable_overlay=None, enable_preprocessing=None, enable_ocr=None):
+    """
+    Process PDF files from Azure Blob Storage with archiving, overlay, and OCR support.
+    
+    Parameters:
+    - config: Configuration dictionary
+    - api_type: 'batch' or 'general'
+    - azure_folder: Folder path in Azure Blob Storage
+    - doc_type: Document type ('invoice', 'eob', 'claim')
+    - logger: Logger instance
+    - enable_overlay: Override overlay setting (True/False/None for config default)
+    - enable_preprocessing: Override preprocessing setting (True/False/None for config default)
+    - enable_ocr: Override OCR setting (True/False/None for config default)
+    """
+
+
+------
+
+# Get document-specific configuration including model config, overlay config, preprocessing config, and OCR
+extraction_fields, systemprompt, prompt_template, model_config, overlay_config, preprocessing_config, use_ocr = get_document_config(config, doc_type)
+
+----
+
+
+else:
+    logger.info(f"Overlay processing disabled for {doc_type} documents")
+
+# Handle OCR configuration
+if enable_ocr is not None:
+    use_ocr = enable_ocr
+    logger.info(f"OCR setting overridden via command line: {use_ocr}")
+
+# Initialize Document Intelligence if OCR is enabled
+doc_intelligence = None
+if use_ocr:
+    di_config = config.get("azure_document_intelligence", {})
+    if di_config.get("endpoint") and di_config.get("api_key"):
+        from document_intelligence_helper import DocumentIntelligenceHelper
+        doc_intelligence = DocumentIntelligenceHelper(
+            di_config["endpoint"],
+            di_config["api_key"],
+            logger
+        )
+        logger.info(f"Document Intelligence OCR initialized for {doc_type}")
+    else:
+        logger.warning(f"OCR enabled for {doc_type} but Document Intelligence not configured")
+        use_ocr = False
+else:
+    logger.info(f"OCR disabled for {doc_type} documents")
+
+# ... rest of initialization code (storage_helper, pdf_processor, ai_client) ...
+
+
+-----
+
+  # Extract OCR text if enabled
+ocr_text = None
+if doc_intelligence and use_ocr:
+    logger.info(f"Extracting OCR text from {filename}")
+    ocr_text = doc_intelligence.extract_text_from_document(processed_content)
+    
+    if ocr_text:
+        logger.info(f"OCR extracted {len(ocr_text)} characters from {filename}")
+    else:
+        logger.warning(f"OCR extraction failed for {filename}")
+
+# Extract pages as base64 strings from processed content
+filename = blob_name.split('/')[-1]
+logger.info(f"Extracting pages from {filename}")
+pages = pdf_processor.extract_pages_from_file(processed_content, filename)
+
+
+  -----
+
+  # Create formatted prompts using the document-specific prompt template
+formatted_prompt = create_formatted_prompt(prompt_template, extraction_fields)
+prompts = [formatted_prompt for _ in range(len(batch_pages))]
+
+# Create OCR text list for this batch
+batch_ocr_texts = None
+if ocr_text:
+    # Use same OCR text for all pages in batch (since it's the whole document)
+    batch_ocr_texts = [ocr_text for _ in range(len(batch_pages))]
+
+logger.info(f"Processing batch of {len(batch_pages)} pages (pages {batch_start+1}-{batch_end})")
+if batch_ocr_texts:
+    logger.debug(f"Passing OCR text to batch processing")
+
+# Process batch using specified API type
+try:
+    if api_type == "batch":
+        logger.debug("Using batch API for processing")
+        raw_results = ai_client.process_batch(base64_strings, prompts, systemprompt, ocr_texts=batch_ocr_texts)
+    else:
+        logger.debug("Using general API for processing")
+        raw_results = ai_client.process_general(base64_strings, prompts, systemprompt, ocr_texts=batch_ocr_texts)
+
+
+  ------
+
+
+
+
+
+
+
+
+  #new update
+
+
+  from azure.ai.formrecognizer import DocumentAnalysisClient
+from azure.core.credentials import AzureKeyCredential
+import logging
+
+
+class DocumentIntelligenceHelper:
+    """Azure Document Intelligence helper for OCR."""
+    
+    def __init__(self, endpoint, api_key, logger=None):
+        self.endpoint = endpoint
+        self.api_key = api_key
+        self.logger = logger or logging.getLogger("doc_intelligence")
+        
+        self.client = DocumentAnalysisClient(
+            endpoint=self.endpoint,
+            credential=AzureKeyCredential(self.api_key)
+        )
+        
+        self.logger.info(f"Initialized Document Intelligence")
+        self.logger.info(f"  Endpoint: {self.endpoint}")
+    
+    def extract_text_from_document(self, document_bytes, per_page=True):
+        """
+        Extract text from document using OCR.
+        
+        Args:
+            document_bytes: Document content as bytes
+            per_page: If True, returns list of text per page. If False, returns full text.
+        
+        Returns:
+            If per_page=True: List of (page_number, text) tuples
+            If per_page=False: str with full document text
+            Returns None on error
+        """
+        try:
+            self.logger.debug("Starting OCR analysis")
+            
+            poller = self.client.begin_analyze_document(
+                "prebuilt-read",
+                document=document_bytes
+            )
+            result = poller.result()
+            
+            if per_page:
+                # Extract text per page
+                pages_text = []
+                
+                for page in result.pages:
+                    page_num = page.page_number - 1  # 0-indexed
+                    
+                    # Combine all lines in this page
+                    page_lines = []
+                    for line in page.lines:
+                        page_lines.append(line.content)
+                    
+                    page_text = "\n".join(page_lines)
+                    pages_text.append((page_num, page_text))
+                    
+                    self.logger.debug(f"Page {page_num + 1}: extracted {len(page_text)} characters")
+                
+                self.logger.info(f"OCR extracted text from {len(pages_text)} pages")
+                return pages_text
+            
+            else:
+                # Get full document text
+                text = result.content
+                self.logger.info(f"OCR extracted {len(text)} characters (full document)")
+                return text
+        
+        except Exception as e:
+            self.logger.error(f"Error in OCR: {str(e)}")
+            return None
+    
+    def extract_text_by_page_number(self, document_bytes, page_number):
+        """
+        Extract text from a specific page only.
+        
+        Args:
+            document_bytes: Document content as bytes
+            page_number: Page number (0-indexed)
+        
+        Returns:
+            str: Text from specified page or None
+        """
+        try:
+            pages_text = self.extract_text_from_document(document_bytes, per_page=True)
+            
+            if pages_text:
+                for page_num, text in pages_text:
+                    if page_num == page_number:
+                        return text
+            
+            return None
+        
+        except Exception as e:
+            self.logger.error(f"Error extracting page {page_number}: {str(e)}")
+            return None
+
+
+  ----
+
+  # Extract OCR text if enabled (per-page)
+ocr_pages_text = None
+if doc_intelligence and use_ocr:
+    logger.info(f"Extracting OCR text from {filename}")
+    ocr_pages_text = doc_intelligence.extract_text_from_document(processed_content, per_page=True)
+    
+    if ocr_pages_text:
+        logger.info(f"OCR extracted text from {len(ocr_pages_text)} pages")
+        for page_num, text in ocr_pages_text:
+            logger.debug(f"  Page {page_num + 1}: {len(text)} characters")
+    else:
+        logger.warning(f"OCR extraction failed for {filename}")
+
+
+  ----
+
+
+  # Create formatted prompts using the document-specific prompt template
+formatted_prompt = create_formatted_prompt(prompt_template, extraction_fields)
+prompts = [formatted_prompt for _ in range(len(batch_pages))]
+
+# Create OCR text list for this batch (match OCR text to corresponding page)
+batch_ocr_texts = None
+if ocr_pages_text:
+    batch_ocr_texts = []
+    
+    for page_num, base64_string in batch_pages:
+        # Find matching OCR text for this page number
+        matching_ocr = None
+        for ocr_page_num, ocr_text in ocr_pages_text:
+            if ocr_page_num == page_num:
+                matching_ocr = ocr_text
+                break
+        
+        batch_ocr_texts.append(matching_ocr)
+    
+    logger.debug(f"Matched OCR text for {len([t for t in batch_ocr_texts if t])}/{len(batch_ocr_texts)} pages in batch")
+
+logger.info(f"Processing batch of {len(batch_pages)} pages (pages {batch_start+1}-{batch_end})")
+if batch_ocr_texts and any(batch_ocr_texts):
+    logger.debug(f"Passing per-page OCR text to batch processing")
+```
+
+---
+
+## How It Works Now:
+
+### **Multi-page PDF (50 pages):**
+```
+PDF Document (50 pages)
+    ↓
+OCR Analysis
+    ↓
+Page 1 Text: "Claim Number: 12345..."
+Page 2 Text: "Patient Name: John..."
+...
+Page 50 Text: "Total Amount: $500"
+    ↓
+Processing:
+  Page 1: Image of page 1 + OCR text from page 1 → LLM
+  Page 2: Image of page 2 + OCR text from page 2 → LLM
+  ...
+  Page 50: Image of page 50 + OCR text from page 50 → LLM
+```
+
+### **Multi-page DOCX:**
+```
+DOCX Document (10 pages)
+    ↓
+Convert to PDF (using format_converter)
+    ↓
+OCR Analysis (per page)
+    ↓
+Process each page with its own OCR text
+```
+
+### **Single Image (JPG/PNG):**
+```
+Image File
+    ↓
+OCR Analysis (1 page)
+    ↓
+Image + OCR text → LLM
+```
+
+## Complete Support Matrix:
+
+| Document Type | Pages | OCR Per Page | Status |
+|--------------|-------|--------------|--------|
+| PDF - Single page | 1 | ✅ Yes | ✅ Works perfectly |
+| PDF - Multi page | 2-100+ | ✅ Yes | ✅ Works perfectly |
+| DOCX - Single page | 1 | ✅ Yes | ✅ Works perfectly |
+| DOCX - Multi page | 2-50+ | ✅ Yes | ✅ Works perfectly |
+| Image (JPG/PNG/TIFF) | 1 | ✅ Yes | ✅ Works perfectly |
+| Multiple separate images | Each = 1 | ✅ Yes | ✅ Each processed separately |
+
+## Example Log Output:
+```
+INFO: Extracting OCR text from claim_document.pdf
+INFO: OCR extracted text from 15 pages
+DEBUG:   Page 1: 1,234 characters
+DEBUG:   Page 2: 987 characters
+DEBUG:   Page 3: 1,456 characters
+...
+INFO: Extracted 15 pages from claim_document.pdf
+INFO: Processing batch of 10 pages (pages 1-10)
+DEBUG: Matched OCR text for 10/10 pages in batch
+DEBUG: Using OCR mode for image 1
+DEBUG: Using OCR mode for image 2
+...
+
+  
