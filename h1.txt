@@ -1,0 +1,764 @@
+**Here are ALL blocks you need to change to add OCR functionality - complete list with exact locations!**
+
+---
+
+## **FILE 1: config.json**
+
+### **BLOCK 1: Add Azure Document Intelligence Configuration**
+
+**FIND (top level, after azure_openai section):**
+```json
+{
+  "azure_openai": {
+    ...existing...
+  },
+  "azure_storage": {
+    ...existing...
+  }
+}
+```
+
+**ADD this section between azure_openai and azure_storage:**
+```json
+{
+  "azure_openai": {
+    ...existing...
+  },
+  "azure_document_intelligence": {
+    "endpoint": "https://your-doc-intelligence.cognitiveservices.azure.com/",
+    "api_key": "your-di-api-key",
+    "ocr_read_enabled": true
+  },
+  "azure_storage": {
+    ...existing...
+  }
+}
+```
+
+---
+
+### **BLOCK 2: Add use_ocr Flag to Document Types**
+
+**FIND (in processing.document_types):**
+```json
+"claim": {
+  "extraction_fields": ["claim_number", "patient_id", "diagnosis_code", "procedure_code", "claim_amount"],
+  "prompt_module": "claim_prompt",
+  "overlay_enabled": true,
+  "preprocessing_enabled": true
+}
+```
+
+**REPLACE WITH:**
+```json
+"claim": {
+  "extraction_fields": ["claim_number", "patient_id", "diagnosis_code", "procedure_code", "claim_amount"],
+  "prompt_module": "claim_prompt",
+  "overlay_enabled": true,
+  "preprocessing_enabled": true,
+  "use_ocr": true
+}
+```
+
+**AND for invoice and eob:**
+```json
+"invoice": {
+  "extraction_fields": ["invoice_number", "total_amount", "date", "vendor"],
+  "prompt_module": "invoice_prompt",
+  "use_ocr": false
+},
+"eob": {
+  "extraction_fields": ["eob_number", "patient_name", "service_date", "paid_amount", "provider"],
+  "prompt_module": "eob_prompt",
+  "use_ocr": false
+}
+```
+
+---
+
+## **FILE 2: document_intelligence_helper.py (NEW FILE)**
+
+### **BLOCK 3: Create New File**
+
+**CREATE NEW FILE: `document_intelligence_helper.py`**
+
+```python
+from azure.ai.formrecognizer import DocumentAnalysisClient
+from azure.core.credentials import AzureKeyCredential
+import logging
+
+
+class DocumentIntelligenceHelper:
+    """Azure Document Intelligence helper for OCR with multi-page support."""
+    
+    def __init__(self, endpoint, api_key, logger=None):
+        self.endpoint = endpoint
+        self.api_key = api_key
+        self.logger = logger or logging.getLogger("doc_intelligence")
+        
+        self.client = DocumentAnalysisClient(
+            endpoint=self.endpoint,
+            credential=AzureKeyCredential(self.api_key)
+        )
+        
+        self.logger.info("Document Intelligence initialized")
+        self.logger.info(f"  Endpoint: {self.endpoint}")
+    
+    def extract_text_per_page(self, document_bytes):
+        """
+        Extract OCR text per page.
+        
+        Args:
+            document_bytes: Document content as bytes
+        
+        Returns:
+            List of (page_number, text) tuples or None on error
+        """
+        try:
+            self.logger.debug("Starting OCR analysis")
+            
+            poller = self.client.begin_analyze_document(
+                "prebuilt-read",
+                document=document_bytes
+            )
+            result = poller.result()
+            
+            pages_text = []
+            
+            for page in result.pages:
+                page_num = page.page_number - 1  # 0-indexed
+                
+                # Combine all lines in this page
+                page_lines = []
+                for line in page.lines:
+                    page_lines.append(line.content)
+                
+                page_text = "\n".join(page_lines)
+                pages_text.append((page_num, page_text))
+                
+                self.logger.debug(f"Page {page_num + 1}: extracted {len(page_text)} characters")
+            
+            self.logger.info(f"OCR extracted text from {len(pages_text)} pages")
+            return pages_text
+        
+        except Exception as e:
+            self.logger.error(f"OCR error: {str(e)}")
+            return None
+```
+
+---
+
+## **FILE 3: llm.py**
+
+### **BLOCK 4: Update process_general Method**
+
+**FIND (your current process_general method, around line 343-425):**
+```python
+def process_general(self, image_base64_strings, prompts, systemprompt=None):
+    """
+    Process images using the general (non-batch) API.
+    
+    Parameters:
+    - image_base64_strings: List of base64-encoded image strings
+    - prompts: List of corresponding prompts
+    - systemprompt: System prompt (optional)
+    
+    Returns:
+    - List of API responses
+    """
+    results = []
+    
+    for i, (base64_img, prompt) in enumerate(zip(image_base64_strings, prompts)):
+        try:
+            self.logger.info(f"Processing image {i+1}/{len(image_base64_strings)}")
+            
+            # ... rest of your code with messages = [] ...
+```
+
+**REPLACE WITH (the complete corrected version I provided above):**
+```python
+def process_general(self, image_base64_strings, prompts, systemprompt=None, ocr_texts=None):
+    """
+    Process images using the general (non-batch) API.
+    
+    Parameters:
+    - image_base64_strings: List of base64-encoded image strings
+    - prompts: List of corresponding prompts
+    - systemprompt: System prompt (optional)
+    - ocr_texts: List of OCR extracted text (optional, one per image)
+    
+    Returns:
+    - List of API responses
+    """
+    results = []
+    
+    self.logger.info(f"Processing {len(image_base64_strings)} images using General API")
+    if ocr_texts:
+        self.logger.info(f"OCR text provided for {len([t for t in ocr_texts if t])} images")
+    
+    for i, (base64_img, prompt) in enumerate(zip(image_base64_strings, prompts)):
+        try:
+            self.logger.debug(f"Processing image {i+1}/{len(image_base64_strings)}")
+            
+            # Check if OCR text is available for this image
+            has_ocr = ocr_texts and i < len(ocr_texts) and ocr_texts[i]
+            
+            if has_ocr:
+                # OCR MODE: system prompt, OCR text, prompt, image all in user content
+                self.logger.debug(f"Using OCR mode for image {i+1}")
+                
+                ocr_text = ocr_texts[i]
+                
+                response = self.openai_client.chat.completions.create(
+                    model=self.deployment_name_openai,
+                    messages=[
+                        {
+                            "role": "user",
+                            "content": [
+                                {
+                                    "type": "text",
+                                    "text": systemprompt if systemprompt else ""
+                                },
+                                {
+                                    "type": "text",
+                                    "text": ocr_text
+                                },
+                                {
+                                    "type": "text",
+                                    "text": prompt
+                                },
+                                {
+                                    "type": "image_url",
+                                    "image_url": {
+                                        "url": f"data:image/png;base64,{base64_img}"
+                                    }
+                                }
+                            ]
+                        }
+                    ],
+                    max_tokens=2000,
+                    temperature=0.5,
+                    response_format={"type": "json_object"}
+                )
+            
+            else:
+                # NORMAL MODE: separate system message + user message with image
+                self.logger.debug(f"Using standard mode for image {i+1}")
+                
+                messages = []
+                
+                # Add system message if provided
+                if systemprompt:
+                    messages.append({
+                        "role": "system",
+                        "content": systemprompt
+                    })
+                
+                # Add user message with image
+                messages.append({
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": prompt
+                        },
+                        {
+                            "type": "image_url",
+                            "image_url": {
+                                "url": f"data:image/png;base64,{base64_img}"
+                            }
+                        }
+                    ]
+                })
+                
+                response = self.openai_client.chat.completions.create(
+                    model=self.deployment_name_openai,
+                    messages=messages,
+                    max_tokens=2000,
+                    temperature=0.5,
+                    response_format={"type": "json_object"}
+                )
+            
+            self.track_tokens(response)
+            
+            if hasattr(response, 'choices') and len(response.choices) > 0:
+                content = response.choices[0].message.content
+                results.append(json.dumps({
+                    "custom_id": f"request-{i+1}",
+                    "response": {
+                        "body": {
+                            "choices": [
+                                {
+                                    "message": {
+                                        "content": content
+                                    }
+                                }
+                            ]
+                        }
+                    }
+                }))
+            else:
+                results.append(json.dumps({
+                    "custom_id": f"request-{i+1}",
+                    "error": "No response content"
+                }))
+        
+        except Exception as e:
+            print(f"Error processing image {i+1}: {str(e)}")
+            results.append(json.dumps({
+                "custom_id": f"request-{i+1}",
+                "error": str(e)
+            }))
+    
+    self.logger.info(f"General API processing complete: {len([r for r in results if 'error' not in r])}/{len(results)} successful")
+    
+    return results
+```
+
+---
+
+### **BLOCK 5: Update process_batch Method (if you have it)**
+
+**FIND (around line 500+, if process_batch exists):**
+```python
+def process_batch(self, image_base64_strings, prompts, systemprompt=None):
+```
+
+**REPLACE WITH:**
+```python
+def process_batch(self, image_base64_strings, prompts, systemprompt=None, ocr_texts=None):
+    """
+    Process images using the Batch API.
+    
+    Parameters:
+    - image_base64_strings: List of base64-encoded image strings
+    - prompts: List of corresponding prompts
+    - systemprompt: System prompt (optional)
+    - ocr_texts: List of OCR extracted text (optional, one per image)
+    
+    Returns:
+    - List of API responses in same order as input
+    """
+    self.logger.info(f"Processing {len(image_base64_strings)} images using Batch API")
+    if ocr_texts:
+        self.logger.info(f"OCR text provided for {len([t for t in ocr_texts if t])} images")
+    
+    try:
+        # Create batch requests with OCR text if available
+        batch_requests = self._create_batch_requests(image_base64_strings, prompts, systemprompt, ocr_texts)
+        
+        # ... rest of your batch processing code ...
+```
+
+---
+
+### **BLOCK 6: Update _create_batch_requests Method (if you have it)**
+
+**FIND the loop in _create_batch_requests:**
+```python
+for i, (base64_img, prompt) in enumerate(zip(image_base64_strings, prompts)):
+    messages = []
+    
+    if systemprompt:
+        messages.append({
+            "role": "system",
+            "content": systemprompt
+        })
+    
+    messages.append({
+        "role": "user",
+        "content": [...]
+    })
+```
+
+**REPLACE WITH:**
+```python
+for i, (base64_img, prompt) in enumerate(zip(image_base64_strings, prompts)):
+    messages = []
+    
+    # Check if OCR text is available for this request
+    has_ocr = ocr_texts and i < len(ocr_texts) and ocr_texts[i]
+    
+    if has_ocr:
+        # OCR MODE
+        self.logger.debug(f"Using OCR mode for batch request {i}")
+        
+        ocr_text = ocr_texts[i]
+        
+        messages.append({
+            "role": "user",
+            "content": [
+                {"type": "text", "text": systemprompt if systemprompt else ""},
+                {"type": "text", "text": ocr_text},
+                {"type": "text", "text": prompt},
+                {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{base64_img}"}}
+            ]
+        })
+    
+    else:
+        # NORMAL MODE
+        if systemprompt:
+            messages.append({"role": "system", "content": systemprompt})
+        
+        messages.append({
+            "role": "user",
+            "content": [
+                {"type": "text", "text": prompt},
+                {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{base64_img}"}}
+            ]
+        })
+```
+
+---
+
+## **FILE 4: h2.py (Main Script)**
+
+### **BLOCK 7: Add --no-ocr Argument**
+
+**FIND (around line 850):**
+```python
+parser.add_argument("--no-preprocessing", action="store_true",
+                 help="Disable image preprocessing regardless of config setting")
+
+args = parser.parse_args()
+```
+
+**ADD before args = parser.parse_args():**
+```python
+parser.add_argument("--no-preprocessing", action="store_true",
+                 help="Disable image preprocessing regardless of config setting")
+parser.add_argument("--no-ocr", action="store_true",
+                 help="Disable OCR extraction regardless of config setting")
+
+args = parser.parse_args()
+```
+
+---
+
+### **BLOCK 8: Handle --no-ocr Argument**
+
+**FIND (around line 880):**
+```python
+# Handle preprocessing arguments
+enable_preprocessing = None
+if args.enable_preprocessing:
+    enable_preprocessing = True
+elif args.no_preprocessing:
+    enable_preprocessing = False
+
+# Override archive setting if --no-archive is specified
+```
+
+**ADD before "Override archive setting":**
+```python
+# Handle preprocessing arguments
+enable_preprocessing = None
+if args.enable_preprocessing:
+    enable_preprocessing = True
+elif args.no_preprocessing:
+    enable_preprocessing = False
+
+# Handle OCR arguments
+enable_ocr = None
+if args.no_ocr:
+    enable_ocr = False
+    logger.info("OCR disabled via --no-ocr argument")
+
+# Override archive setting if --no-archive is specified
+```
+
+---
+
+### **BLOCK 9: Update get_document_config Return**
+
+**FIND (around line 60-80):**
+```python
+# Get preprocessing configuration
+preprocessing_enabled = doc_config.get("preprocessing_enabled", False)
+preprocessing_config = doc_config.get("preprocessing_config", {}) if preprocessing_enabled else None
+
+return extraction_fields, systemprompt, prompt_template, model_config, overlay_config, preprocessing_config
+```
+
+**REPLACE WITH:**
+```python
+# Get preprocessing configuration
+preprocessing_enabled = doc_config.get("preprocessing_enabled", False)
+preprocessing_config = doc_config.get("preprocessing_config", {}) if preprocessing_enabled else None
+
+# Get OCR configuration
+use_ocr = doc_config.get("use_ocr", False)
+
+return extraction_fields, systemprompt, prompt_template, model_config, overlay_config, preprocessing_config, use_ocr
+```
+
+---
+
+### **BLOCK 10: Update process_azure_pdf_files Signature**
+
+**FIND (around line 150):**
+```python
+def process_azure_pdf_files(config, api_type, azure_folder, doc_type, logger, enable_overlay=None, enable_preprocessing=None):
+    """
+    Process PDF files from Azure Blob Storage.
+    
+    Parameters:
+    - config: Configuration dictionary
+    - api_type: 'batch' or 'general'
+    - azure_folder: Folder path in Azure Blob Storage
+    - doc_type: Document type ('invoice', 'eob', 'claim')
+    - logger: Logger instance
+    - enable_overlay: Override overlay setting (True/False/None for config default)
+    - enable_preprocessing: Override preprocessing setting (True/False/None for config default)
+    """
+```
+
+**REPLACE WITH:**
+```python
+def process_azure_pdf_files(config, api_type, azure_folder, doc_type, logger, enable_overlay=None, enable_preprocessing=None, enable_ocr=None):
+    """
+    Process PDF files from Azure Blob Storage with OCR support.
+    
+    Parameters:
+    - config: Configuration dictionary
+    - api_type: 'batch' or 'general'
+    - azure_folder: Folder path in Azure Blob Storage
+    - doc_type: Document type ('invoice', 'eob', 'claim')
+    - logger: Logger instance
+    - enable_overlay: Override overlay setting (True/False/None for config default)
+    - enable_preprocessing: Override preprocessing setting (True/False/None for config default)
+    - enable_ocr: Override OCR setting (True/False/None for config default)
+    """
+```
+
+---
+
+### **BLOCK 11: Update process_azure_pdf_files Call**
+
+**FIND (around line 920):**
+```python
+if args.source == "azure":
+    process_azure_pdf_files(config, args.apitype, args.folder, args.doctype, logger, enable_overlay, enable_preprocessing)
+```
+
+**REPLACE WITH:**
+```python
+if args.source == "azure":
+    process_azure_pdf_files(config, args.apitype, args.folder, args.doctype, logger, enable_overlay, enable_preprocessing, enable_ocr)
+```
+
+---
+
+### **BLOCK 12: Get use_ocr in process_azure_pdf_files**
+
+**FIND (around line 170):**
+```python
+# Get document-specific configuration
+extraction_fields, systemprompt, prompt_template, model_config, overlay_config, preprocessing_config = get_document_config(config, doc_type)
+```
+
+**REPLACE WITH:**
+```python
+# Get document-specific configuration including OCR
+extraction_fields, systemprompt, prompt_template, model_config, overlay_config, preprocessing_config, use_ocr = get_document_config(config, doc_type)
+```
+
+---
+
+### **BLOCK 13: Initialize Document Intelligence**
+
+**FIND (around line 210, after overlay initialization):**
+```python
+else:
+    logger.info(f"Overlay processing disabled for {doc_type} documents")
+
+# Initialize storage helper
+storage_helper = AzureStorageHelper(...)
+```
+
+**ADD between overlay and storage_helper:**
+```python
+else:
+    logger.info(f"Overlay processing disabled for {doc_type} documents")
+
+# Handle OCR configuration
+if enable_ocr is not None:
+    use_ocr = enable_ocr
+    logger.info(f"OCR setting overridden via command line: {use_ocr}")
+
+# Initialize Document Intelligence if OCR is enabled
+doc_intelligence = None
+if use_ocr:
+    di_config = config.get("azure_document_intelligence", {})
+    if di_config.get("endpoint") and di_config.get("api_key") and di_config.get("ocr_read_enabled", True):
+        from document_intelligence_helper import DocumentIntelligenceHelper
+        doc_intelligence = DocumentIntelligenceHelper(
+            di_config["endpoint"],
+            di_config["api_key"],
+            logger
+        )
+        logger.info(f"Document Intelligence OCR initialized for {doc_type}")
+    else:
+        logger.warning(f"OCR enabled for {doc_type} but Document Intelligence not configured")
+        use_ocr = False
+else:
+    logger.info(f"OCR disabled for {doc_type} documents")
+
+# Initialize storage helper
+storage_helper = AzureStorageHelper(...)
+```
+
+---
+
+### **BLOCK 14: Extract OCR in Processing Loop**
+
+**FIND (around line 400, after downloading blob and applying overlay):**
+```python
+# Apply overlay processing if enabled
+processed_pdf_content = blob_content
+if overlay_processor and filename.lower().endswith('.pdf'):
+    processed_pdf_content = overlay_processor.process_pdf_with_overlay(blob_content, overlay_config)
+
+# Extract pages
+filename = blob_name.split('/')[-1]
+logger.info(f"Extracting pages from {filename}")
+pages = pdf_processor.extract_pages_from_file(processed_pdf_content, filename)
+```
+
+**ADD after overlay, before page extraction:**
+```python
+# Apply overlay processing if enabled
+processed_pdf_content = blob_content
+if overlay_processor and filename.lower().endswith('.pdf'):
+    processed_pdf_content = overlay_processor.process_pdf_with_overlay(blob_content, overlay_config)
+
+# Extract OCR text per page if enabled
+ocr_pages_dict = {}
+if doc_intelligence and use_ocr:
+    logger.info(f"Extracting OCR text from {filename}")
+    ocr_result = doc_intelligence.extract_text_per_page(processed_pdf_content)
+    
+    if ocr_result:
+        for page_num, text in ocr_result:
+            ocr_pages_dict[page_num] = text
+        logger.info(f"OCR extracted text from {len(ocr_pages_dict)} pages")
+    else:
+        logger.warning(f"OCR extraction failed for {filename}")
+
+# Extract pages
+filename = blob_name.split('/')[-1]
+logger.info(f"Extracting pages from {filename}")
+pages = pdf_processor.extract_pages_from_file(processed_pdf_content, filename)
+```
+
+---
+
+### **BLOCK 15: Pass OCR to Batch Processing**
+
+**FIND (around line 450, in batch processing loop):**
+```python
+# Create prompts
+formatted_prompt = create_formatted_prompt(prompt_template, extraction_fields)
+prompts = [formatted_prompt for _ in range(len(batch_pages))]
+
+logger.info(f"Processing batch of {len(batch_pages)} pages")
+
+# Process batch
+try:
+    if api_type == "batch":
+        raw_results = ai_client.process_batch(base64_strings, prompts, systemprompt)
+    else:
+        raw_results = ai_client.process_general(base64_strings, prompts, systemprompt)
+```
+
+**REPLACE WITH:**
+```python
+# Create prompts (simple, no OCR in prompt string)
+formatted_prompt = create_formatted_prompt(prompt_template, extraction_fields)
+prompts = [formatted_prompt for _ in range(len(batch_pages))]
+
+# Create OCR text list matching pages in batch
+batch_ocr_texts = []
+for page_num, base64_string in batch_pages:
+    if page_num in ocr_pages_dict:
+        batch_ocr_texts.append(ocr_pages_dict[page_num])
+    else:
+        batch_ocr_texts.append(None)
+
+logger.info(f"Processing batch of {len(batch_pages)} pages (pages {batch_start+1}-{batch_end})")
+
+# Log OCR availability
+if any(batch_ocr_texts):
+    ocr_count = len([t for t in batch_ocr_texts if t])
+    logger.debug(f"OCR text available for {ocr_count}/{len(batch_ocr_texts)} pages in this batch")
+
+# Process batch with OCR texts
+try:
+    if api_type == "batch":
+        logger.debug("Using batch API for processing")
+        raw_results = ai_client.process_batch(base64_strings, prompts, systemprompt, ocr_texts=batch_ocr_texts)
+    else:
+        logger.debug("Using general API for processing")
+        raw_results = ai_client.process_general(base64_strings, prompts, systemprompt, ocr_texts=batch_ocr_texts)
+```
+
+---
+
+## **FILE 5: requirements.txt**
+
+### **BLOCK 16: Add Azure Form Recognizer**
+
+**ADD this line:**
+```txt
+azure-ai-formrecognizer
+```
+
+---
+
+## **COMPLETE SUMMARY OF ALL BLOCKS:**
+
+| File | Block | Line | Change |
+|------|-------|------|--------|
+| **config.json** | 1 | Top | Add azure_document_intelligence section |
+| **config.json** | 2 | doc_types | Add use_ocr flag to each type |
+| **document_intelligence_helper.py** | 3 | NEW FILE | Create OCR helper |
+| **llm.py** | 4 | ~343 | Update process_general method |
+| **llm.py** | 5 | ~500+ | Update process_batch method (if exists) |
+| **llm.py** | 6 | batch loop | Update _create_batch_requests (if exists) |
+| **h2.py** | 7 | ~850 | Add --no-ocr argument |
+| **h2.py** | 8 | ~880 | Handle enable_ocr variable |
+| **h2.py** | 9 | ~60 | Update get_document_config return |
+| **h2.py** | 10 | ~150 | Update process_azure_pdf_files signature |
+| **h2.py** | 11 | ~920 | Update process_azure_pdf_files call |
+| **h2.py** | 12 | ~170 | Get use_ocr from config |
+| **h2.py** | 13 | ~210 | Initialize Document Intelligence |
+| **h2.py** | 14 | ~400 | Extract OCR per page |
+| **h2.py** | 15 | ~450 | Pass OCR to batch processing |
+| **requirements.txt** | 16 | - | Add azure-ai-formrecognizer |
+
+---
+
+## **Installation:**
+
+```bash
+pip install azure-ai-formrecognizer
+```
+
+---
+
+## **Testing:**
+
+```bash
+# With OCR (claim documents)
+python h2.py --apitype general --source azure --folder "claims/" --doctype claim
+
+# Without OCR (invoice documents)
+python h2.py --apitype general --source azure --folder "invoices/" --doctype invoice
+
+# Force disable OCR
+python h2.py --apitype general --source azure --folder "claims/" --doctype claim --no-ocr
+```
+
+---
+
+**That's ALL 16 blocks you need to change!** Complete OCR integration with multi-page support! 🎯
