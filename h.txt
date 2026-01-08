@@ -1,0 +1,146 @@
+import csv
+import json
+import logging
+from openai import AzureOpenAI
+from typing import List, Dict
+
+# --------------------------------------------------
+# Logging
+# --------------------------------------------------
+logging.basicConfig(level=logging.INFO, format="%(levelname)s - %(message)s")
+logger = logging.getLogger(__name__)
+
+
+# --------------------------------------------------
+# Universal CSV Consolidator (LLM-driven)
+# --------------------------------------------------
+class SimpleCSVConsolidator:
+    def __init__(
+        self,
+        azure_endpoint: str,
+        api_key: str,
+        deployment_name: str,
+        api_version: str = "2024-02-15-preview",
+    ):
+        self.client = AzureOpenAI(
+            azure_endpoint=azure_endpoint,
+            api_key=api_key,
+            api_version=api_version,
+        )
+        self.deployment_name = deployment_name
+
+    # --------------------------------------------------
+    # Read CSV
+    # --------------------------------------------------
+    def read_csv(self, path: str) -> List[Dict]:
+        with open(path, "r", encoding="utf-8") as f:
+            reader = csv.DictReader(f)
+            rows = list(reader)
+
+        if not rows:
+            raise ValueError("Input CSV is empty")
+
+        logger.info(f"Read {len(rows)} rows")
+        return rows
+
+    # --------------------------------------------------
+    # Build Prompt (ALL logic in prompt)
+    # --------------------------------------------------
+    def build_prompt(self, rows: List[Dict]) -> str:
+        rows_json = json.dumps(rows, indent=2, ensure_ascii=False)
+
+        return f"""
+You are an expert data consolidation AI.
+
+TASK:
+- Input is a CSV extracted page-by-page from a document.
+- Each row represents one page.
+- Your job is to consolidate ALL rows into ONE single row.
+
+RULES:
+1. Keep identical values only once.
+2. Merge differing values intelligently.
+3. Merge line items so each line appears once.
+4. Do not lose any information.
+5. Do not duplicate information.
+6. Use EXACT SAME column names as input.
+7. Output must be VALID JSON ONLY.
+8. Output must represent ONE consolidated row.
+
+INPUT DATA:
+{rows_json}
+
+OUTPUT:
+Return only a single JSON object (no markdown, no explanation).
+"""
+
+    # --------------------------------------------------
+    # Call LLM
+    # --------------------------------------------------
+    def consolidate(self, rows: List[Dict]) -> Dict:
+        prompt = self.build_prompt(rows)
+
+        logger.info("Sending data to LLM...")
+
+        response = self.client.chat.completions.create(
+            model=self.deployment_name,
+            messages=[
+                {
+                    "role": "system",
+                    "content": "You only return valid JSON. No explanations.",
+                },
+                {"role": "user", "content": prompt},
+            ],
+            temperature=0.0,
+            max_tokens=8000,
+        )
+
+        text = response.content[0].text.strip()
+
+        # Clean markdown if model adds it
+        if text.startswith("```"):
+            text = text.replace("```json", "").replace("```", "").strip()
+
+        return json.loads(text)
+
+    # --------------------------------------------------
+    # Write Output CSV
+    # --------------------------------------------------
+    def write_csv(self, path: str, row: Dict):
+        with open(path, "w", newline="", encoding="utf-8") as f:
+            writer = csv.DictWriter(f, fieldnames=row.keys())
+            writer.writeheader()
+            writer.writerow(row)
+
+        logger.info(f"Output written to {path}")
+
+    # --------------------------------------------------
+    # End-to-end
+    # --------------------------------------------------
+    def process(self, input_csv: str, output_csv: str):
+        logger.info("Starting CSV consolidation")
+
+        rows = self.read_csv(input_csv)
+        consolidated = self.consolidate(rows)
+        self.write_csv(output_csv, consolidated)
+
+        logger.info("Consolidation complete")
+        return consolidated
+
+
+# --------------------------------------------------
+# Example Usage
+# --------------------------------------------------
+if __name__ == "__main__":
+    import os
+
+    consolidator = SimpleCSVConsolidator(
+        azure_endpoint=os.getenv("AZURE_OPENAI_ENDPOINT"),
+        api_key=os.getenv("AZURE_OPENAI_API_KEY"),
+        deployment_name=os.getenv("AZURE_OPENAI_DEPLOYMENT", "gpt-4"),
+    )
+
+    consolidator.process(
+        input_csv="input.csv",
+        output_csv="output.csv",
+    )
