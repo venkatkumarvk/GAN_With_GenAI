@@ -22,3 +22,32 @@ Example:
 Input: 5 rows with confidence values: 98, 98, 97, 97, 97
 Output: "confidence": "98;98;97;97;97"
 """
+--------------------------
+
+class SimpleCSVConsolidator:
+    def build_prompt(self, rows: List[Dict]) -> str:
+        instructions = """
+1. Keep identical values only once.
+2. Merge differing values intelligently.
+3. Merge line items so each line appears once.
+4. Do not lose any information.
+5. Do not duplicate information.
+6. Use EXACT SAME column names as input.
+7. Output must be VALID JSON ONLY.
+8. Output must represent ONE consolidated row.
+9. Consider numeric sequences before merging values; ensure numbers are evaluated correctly.
+10. Use ";" to separate merged values where applicable, instead of "/" or "-".
+11. If a value includes both a date and a timestamp (e.g., "11/25/2025;11/25/2025 3:03:47 PM"),
+    evaluate the header/context of the column to determine the appropriate format:
+    - Use the date-only format (e.g., "11/25/2025") if the timestamp is unnecessary for the context.
+    - Retain the full date-time format (e.g., "11/25/2025 3:03:47 PM") if the timestamp is relevant to the column's purpose.
+12. Omit values such as "N/A" or "N/A" from the consolidated output unless they are critical to the data's meaning.
+13. Only if fieldname_confidence header provide all values, just combine like 3 rows (98;98;99)
+    similarly any count of rows similar pattern need
+
+SPECIAL RULE for confidence columns:
+- For ANY column whose name ends with "_Confidence" (case-insensitive), preserve ALL values including duplicates in their original order.
+- Example: If column "fieldname_Confidence" has values [98, 98, 97, 97, 97] across 5 rows, output: "98;98;97;97;97"
+- This rule applies ONLY to columns ending with "_Confidence". All other columns follow the standard deduplication rule.
+"""
+        return instructions
