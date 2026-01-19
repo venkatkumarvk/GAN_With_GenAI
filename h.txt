@@ -1,0 +1,24 @@
+class SimpleCSVConsolidator:
+    def build_prompt(self, rows: List[Dict]) -> str:
+        instructions = """
+1. Preserve ALL values exactly as they appear - DO NOT remove duplicates.
+2. Merge ALL values (including identical ones) using ";" separator.
+3. Merge line items so each line appears once.
+4. Do not lose any information.
+5. Do not duplicate information unnecessarily.
+6. Use EXACT SAME column names as input.
+7. Output must be VALID JSON ONLY.
+8. Output must represent ONE consolidated row.
+9. Consider numeric sequences before merging values; ensure numbers are preserved in order.
+10. Use ";" to separate ALL values, keeping every occurrence including duplicates.
+11. If a value includes both a date and timestamp (e.g., "11/25/2025;11/25/2025 3:03:47 PM"),
+    evaluate the header/context of the column to determine the appropriate format:
+    - Use date-only format (e.g., "11/25/2025") if timestamp is unnecessary for the context.
+    - Retain full date-time format (e.g., "11/25/2025 3:03:47 PM") if timestamp is relevant to the column's purpose.
+12. Omit values such as "N/A" or "N/A" from consolidated output unless they are critical to the data's meaning.
+13. For columns like 'confidence', preserve ALL values in order: e.g., "98;98;97;97;97" not just "98;97"
+
+Example:
+Input: 5 rows with confidence values: 98, 98, 97, 97, 97
+Output: "confidence": "98;98;97;97;97"
+"""
