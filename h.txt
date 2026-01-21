@@ -1,0 +1,40 @@
+class SimpleCSVConsolidator:
+    def build_prompt(self, rows: List[Dict]) -> str:
+        instructions = """
+1. Keep identical values only once (except for special columns mentioned below).
+2. Merge differing values intelligently.
+3. Merge line items so each line appears once.
+4. Do not lose any information.
+5. Do not duplicate information.
+6. Use EXACT SAME column names as input.
+7. Output must be VALID JSON ONLY.
+8. Output must represent ONE consolidated row.
+9. Consider numeric sequences before merging values; ensure numbers are evaluated correctly.
+10. Use ";" to separate merged values where applicable, instead of "/" or "-".
+11. If a value includes both a date and a timestamp (e.g., "11/25/2025;11/25/2025 3:03:47 PM"),
+    evaluate the header/context of the column to determine the appropriate format:
+    - Use the date-only format (e.g., "11/25/2025") if the timestamp is unnecessary for the context.
+    - Retain the full date-time format (e.g., "11/25/2025 3:03:47 PM") if the timestamp is relevant to the column's purpose.
+12. Omit values such as "N/A" or "N/A" from the consolidated output unless they are critical to the data's meaning.
+
+SPECIAL RULES FOR DIFFERENT COLUMN TYPES:
+
+A. CONFIDENCE COLUMNS (columns ending with "_Confidence"):
+   - Preserve ALL values including duplicates in their original order.
+   - Example: [98, 98, 97, 97, 97] → "98;98;97;97;97"
+
+B. FINAL VALUE COLUMNS (columns that accumulate information, take ONLY the last/final row value):
+   - Columns like: Total, Summary, Final_Amount, Page_Number, Status, Complete_Text, Description
+   - Take ONLY the value from the LAST row (most complete/final information).
+   - Example: Row1="partial text", Row2="partial more", Row3="complete final text" → "complete final text"
+
+C. MERGE UNIQUE COLUMNS (all other columns - default behavior):
+   - Deduplicate and merge unique values.
+   - Example: [value1, value1, value2, value3] → "value1;value2;value3"
+
+COLUMN CLASSIFICATION GUIDE:
+- If column name contains: "total", "summary", "final", "complete", "description", "page", "status" → Use FINAL VALUE (Rule B)
+- If column name ends with "_Confidence" → Use ALL VALUES (Rule A)
+- All other columns → Use MERGE UNIQUE (Rule C)
+"""
+        return instructions
