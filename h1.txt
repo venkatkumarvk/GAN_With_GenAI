@@ -412,10 +412,23 @@ Be precise and conservative with confidence scores. Only use high confidence (>0
     def generate_embeddings(self, text: str) -> List[float]:
         """Generate embeddings for text using text-embedding-3-large"""
         try:
+            # Validate input
+            if not text or not isinstance(text, str):
+                logger.warning("Invalid or empty text provided for embedding generation")
+                return []
+            
+            # Convert to string if needed (defensive)
+            text = str(text).strip()
+            
+            if not text:
+                logger.warning("Empty text after stripping, returning empty embeddings")
+                return []
+            
             # Truncate text if too long (max 8191 tokens for embedding models)
             max_chars = 30000  # Approximate
             if len(text) > max_chars:
                 text = text[:max_chars]
+                logger.info(f"Text truncated to {max_chars} characters for embedding generation")
             
             response = self.client.embeddings.create(
                 model=self.embedding_deployment_name,
@@ -427,7 +440,7 @@ Be precise and conservative with confidence scores. Only use high confidence (>0
             return embeddings
             
         except Exception as e:
-            logger.error(f"Embedding generation failed: {str(e)}")
+            logger.error(f"Embedding generation failed: {str(e)}", exc_info=True)
             return []
     
     def get_token_usage(self) -> Dict[str, int]:
@@ -841,3 +854,471 @@ if __name__ == "__main__":
         print(f"Confidence threshold: {config_manager.get('confidence_threshold')}")
     except Exception as e:
         print(f"Error: {str(e)}")
+
+
+
+----
+
+
+main
+
+
+"""
+Azure RAG Document Processing - Main Module
+Production-grade document processing pipeline with OCR, extraction, 
+embeddings, and Azure AI Search indexing.
+"""
+
+import argparse
+import logging
+from datetime import datetime
+from typing import List, Dict, Any
+import json
+from concurrent.futures import ThreadPoolExecutor, as_completed
+import time
+
+from helper import (
+    ConfigManager,
+    AzureBlobManager,
+    DocumentIntelligenceManager,
+    AzureOpenAIManager,
+    AzureAISearchManager,
+    DataProcessor,
+    CostLogger,
+    validate_environment,
+    logger
+)
+
+# Configure logger for main module
+logger = logging.getLogger(__name__)
+
+
+class DocumentProcessor:
+    """Main document processing orchestrator"""
+    
+    def __init__(self, config_path: str = 'config.json', use_ocr: bool = True):
+        """Initialize document processor with configuration"""
+        logger.info("=" * 80)
+        logger.info("AZURE RAG DOCUMENT PROCESSING PIPELINE")
+        logger.info("=" * 80)
+        
+        # Load configuration
+        self.config = ConfigManager(config_path)
+        self.use_ocr = use_ocr
+        
+        # Initialize Azure services
+        self._initialize_services()
+        
+        # Processing statistics
+        self.stats = {
+            'total_providers': 0,
+            'total_documents': 0,
+            'successful_documents': 0,
+            'failed_documents': 0,
+            'high_confidence_count': 0,
+            'low_confidence_count': 0
+        }
+    
+    def _initialize_services(self):
+        """Initialize all Azure service managers"""
+        logger.info("Initializing Azure services...")
+        
+        # Blob Storage
+        blob_config = self.config.get('AzureBlob')
+        self.blob_manager = AzureBlobManager(
+            connection_string=blob_config['connection_string'],
+            input_container=blob_config['inputcontainer'],
+            output_container=blob_config['outputcontainer']
+        )
+        
+        # Document Intelligence (if OCR enabled)
+        if self.use_ocr:
+            doc_intel_config = self.config.get('DocumentIntelligence')
+            self.doc_intel_manager = DocumentIntelligenceManager(
+                endpoint=doc_intel_config['endpoint'],
+                key=doc_intel_config['key']
+            )
+            logger.info("OCR enabled: Document Intelligence initialized")
+        else:
+            self.doc_intel_manager = None
+            logger.info("OCR disabled: Skipping Document Intelligence")
+        
+        # Azure OpenAI
+        openai_config = self.config.get('AzureOpenAI')
+        self.openai_manager = AzureOpenAIManager(
+            endpoint=openai_config['endpoint'],
+            api_key=openai_config['api_key'],
+            api_version=openai_config['api_version'],
+            deployment_name=openai_config['deployment_name'],
+            embedding_deployment_name=openai_config['embedding_deployment_name']
+        )
+        
+        # Azure AI Search
+        search_config = self.config.get('AzureAISearch')
+        self.search_manager = AzureAISearchManager(
+            endpoint=search_config['endpoint'],
+            api_key=search_config['api_key']
+        )
+        
+        # Cost Logger
+        self.cost_logger = CostLogger(self.blob_manager)
+        
+        logger.info("All Azure services initialized successfully")
+    
+    def process_document(self, file_info: Dict[str, str], fields: List[str]) -> Dict[str, Any]:
+        """Process a single document"""
+        document_name = file_info['name']
+        provider = file_info['provider']
+        
+        try:
+            logger.info(f"Processing: {document_name}")
+            
+            # Download document as base64
+            base64_data = self.blob_manager.download_blob_as_base64(document_name)
+            
+            # OCR processing if enabled
+            extracted_text = ""
+            page_count = 0
+            
+            if self.use_ocr and self.doc_intel_manager:
+                ocr_result = self.doc_intel_manager.analyze_document(
+                    base64_data=base64_data,
+                    file_extension=file_info['extension']
+                )
+                
+                if ocr_result['success']:
+                    extracted_text = ocr_result['text']
+                    page_count = ocr_result['page_count']
+                    logger.info(f"OCR completed: {page_count} pages, {len(extracted_text)} chars")
+                else:
+                    logger.warning(f"OCR failed for {document_name}: {ocr_result.get('error', 'Unknown error')}")
+                    return None
+            else:
+                # If OCR disabled, we can't process images - skip them
+                if file_info['extension'] in ['.png', '.jpg', '.jpeg', '.tiff', '.tif']:
+                    logger.warning(f"Skipping image file (OCR disabled): {document_name}")
+                    return None
+                
+                # For text-based documents without OCR, you'd need a different extraction method
+                # For now, we'll require OCR for all documents
+                logger.warning(f"OCR disabled - cannot process: {document_name}")
+                return None
+            
+            # Skip if no text extracted
+            if not extracted_text or len(extracted_text.strip()) < 50:
+                logger.warning(f"Insufficient text extracted from {document_name}")
+                return None
+            
+            # Extract fields using GPT
+            extraction_result = self.openai_manager.extract_fields(
+                text=extracted_text,
+                fields=fields,
+                source_document=document_name
+            )
+            
+            if not extraction_result['success']:
+                logger.error(f"Field extraction failed for {document_name}")
+                return None
+            
+            # Generate embeddings for the extracted text
+            # Ensure extracted_text is a valid string
+            if not extracted_text or not isinstance(extracted_text, str):
+                logger.warning(f"Invalid extracted_text for {document_name}, using empty string for embeddings")
+                extracted_text = ""
+            
+            embeddings = self.openai_manager.generate_embeddings(extracted_text)
+            
+            # Create document ID
+            doc_id = DataProcessor.generate_document_id(provider, document_name)
+            
+            # Prepare result
+            result = {
+                'id': doc_id,
+                'provider': provider,
+                'document_name': document_name,
+                'extraction_datetime': datetime.utcnow().isoformat(),
+                'extracted_fields': extraction_result['extracted_fields'],
+                'raw_response': extraction_result['raw_response'],
+                'page_count': page_count,
+                'content': extracted_text,
+                'embeddings': embeddings,
+                'file_extension': file_info['extension']
+            }
+            
+            logger.info(f"Successfully processed: {document_name}")
+            self.stats['successful_documents'] += 1
+            
+            return result
+            
+        except Exception as e:
+            logger.error(f"Failed to process {document_name}: {str(e)}", exc_info=True)
+            self.stats['failed_documents'] += 1
+            return None
+    
+    def process_provider(self, provider: str) -> Dict[str, Any]:
+        """Process all documents for a specific provider"""
+        logger.info("=" * 80)
+        logger.info(f"PROCESSING PROVIDER: {provider}")
+        logger.info("=" * 80)
+        
+        # Get all files for provider
+        files = self.blob_manager.get_provider_files(provider)
+        
+        if not files:
+            logger.warning(f"No valid files found for provider: {provider}")
+            return None
+        
+        logger.info(f"Found {len(files)} documents for provider: {provider}")
+        
+        # Get processing configuration
+        fields = self.config.get('fields')
+        batch_size = self.config.get('processing', {}).get('batch_size', 10)
+        parallel_workers = self.config.get('processing', {}).get('parallel_workers', 5)
+        
+        # Process documents in parallel batches
+        extraction_results = []
+        
+        for i in range(0, len(files), batch_size):
+            batch = files[i:i + batch_size]
+            logger.info(f"Processing batch {i//batch_size + 1}/{(len(files)-1)//batch_size + 1}")
+            
+            with ThreadPoolExecutor(max_workers=parallel_workers) as executor:
+                futures = {
+                    executor.submit(self.process_document, file_info, fields): file_info 
+                    for file_info in batch
+                }
+                
+                for future in as_completed(futures):
+                    result = future.result()
+                    if result:
+                        extraction_results.append(result)
+            
+            # Small delay between batches to avoid rate limiting
+            if i + batch_size < len(files):
+                time.sleep(1)
+        
+        logger.info(f"Provider '{provider}' processing complete: {len(extraction_results)}/{len(files)} successful")
+        
+        if not extraction_results:
+            logger.warning(f"No successful extractions for provider: {provider}")
+            return None
+        
+        # Create provider-specific search index
+        logger.info(f"Creating search index for provider: {provider}")
+        index_name, _ = self.search_manager.create_index(provider, embedding_dimension=3072)
+        
+        # Create DataFrame
+        df = DataProcessor.create_result_dataframe(provider, extraction_results, fields)
+        
+        # Split by confidence
+        # Access config.config dict directly for confidence_threshold
+        confidence_threshold = self.config.config.get('confidence_threshold', 0.90)
+        high_conf_df, low_conf_df = DataProcessor.split_by_confidence(df, fields, confidence_threshold)
+        
+        self.stats['high_confidence_count'] += len(high_conf_df)
+        self.stats['low_confidence_count'] += len(low_conf_df)
+        
+        # Generate unique run ID (short timestamp-based)
+        run_id = datetime.utcnow().strftime('%Y%m%d_%H%M%S')
+        
+        # Save results to blob storage using provider name directly
+        # High confidence results
+        if not high_conf_df.empty:
+            csv_path = f"HighConfidence/processedcsvresult/{provider}_{run_id}.csv"
+            self.blob_manager.upload_dataframe_as_csv(high_conf_df, csv_path)
+            logger.info(f"High confidence CSV saved: {csv_path}")
+            
+            json_path = f"HighConfidence/processedjsonresult/{provider}_{run_id}.json"
+            json_data = high_conf_df.to_json(orient='records', indent=2)
+            self.blob_manager.upload_to_blob(json_data, json_path, 'application/json')
+            logger.info(f"High confidence JSON saved: {json_path}")
+        
+        # Low confidence results
+        if not low_conf_df.empty:
+            csv_path = f"LowConfidence/processedcsvresult/{provider}_{run_id}.csv"
+            self.blob_manager.upload_dataframe_as_csv(low_conf_df, csv_path)
+            logger.info(f"Low confidence CSV saved: {csv_path}")
+            
+            json_path = f"LowConfidence/processedjsonresult/{provider}_{run_id}.json"
+            json_data = low_conf_df.to_json(orient='records', indent=2)
+            self.blob_manager.upload_to_blob(json_data, json_path, 'application/json')
+            logger.info(f"Low confidence JSON saved: {json_path}")
+        
+        # Save raw responses using provider name
+        raw_responses = {
+            'provider': provider,
+            'run_id': run_id,
+            'documents': [
+                {
+                    'document_name': r['document_name'],
+                    'raw_response': r['raw_response']
+                }
+                for r in extraction_results
+            ]
+        }
+        raw_path = f"raw_responses/{provider}_{run_id}.json"
+        self.blob_manager.upload_to_blob(
+            json.dumps(raw_responses, indent=2),
+            raw_path,
+            'application/json'
+        )
+        logger.info(f"Raw responses saved: {raw_path}")
+        
+        # Prepare documents for search index
+        search_documents = []
+        for result in extraction_results:
+            if result['embeddings']:  # Only add if embeddings were generated
+                search_doc = {
+                    'id': result['id'],
+                    'content': result['content'][:50000],  # Limit content size
+                    'provider': result['provider'],
+                    'document_name': result['document_name'],
+                    'file_extension': result['file_extension'],
+                    'page_count': result['page_count'],
+                    'extraction_datetime': result['extraction_datetime'],
+                    'extracted_fields': json.dumps(result['extracted_fields']),
+                    'content_vector': result['embeddings']
+                }
+                search_documents.append(search_doc)
+        
+        # Upload documents to provider-specific index
+        if search_documents:
+            logger.info(f"Uploading {len(search_documents)} documents to search index for provider: {provider}")
+            self.search_manager.upload_documents(provider, search_documents)
+        
+        # Update cost tracking with provider name
+        total_pages = sum(r['page_count'] for r in extraction_results)
+        gpt_cost = self.openai_manager.calculate_cost(self.config.get('costs'))
+        self.cost_logger.update(
+            gpt_cost=gpt_cost,
+            pages=total_pages,
+            documents=len(extraction_results),
+            embedding_count=len(search_documents),
+            costs_config=self.config.get('costs'),
+            provider=provider  # Track cost per provider
+        )
+        
+        return {
+            'provider': provider,
+            'total_documents': len(files),
+            'successful_documents': len(extraction_results),
+            'high_confidence': len(high_conf_df),
+            'low_confidence': len(low_conf_df),
+            'search_documents': search_documents
+        }
+    
+    def run(self):
+        """Main execution flow"""
+        try:
+            # Validate environment
+            validate_environment()
+            
+            # Start cost tracking
+            self.cost_logger.start()
+            
+            # Get all providers
+            providers = self.blob_manager.get_providers()
+            self.stats['total_providers'] = len(providers)
+            
+            if not providers:
+                logger.error("No providers found in input container")
+                return
+            
+            logger.info(f"Found {len(providers)} providers to process")
+            
+            # Process each provider (index is created per provider)
+            for idx, provider in enumerate(providers, 1):
+                logger.info(f"\nProcessing provider {idx}/{len(providers)}: {provider}")
+                
+                result = self.process_provider(provider)
+            
+            # Update final statistics
+            self.stats['total_documents'] = self.stats['successful_documents'] + self.stats['failed_documents']
+            
+            # Save cost report
+            self.cost_logger.save_to_blob()
+            
+            # Print final summary
+            self._print_summary()
+            
+        except Exception as e:
+            logger.error(f"Pipeline execution failed: {str(e)}", exc_info=True)
+            raise
+    
+    def _print_summary(self):
+        """Print processing summary"""
+        logger.info("\n" + "=" * 80)
+        logger.info("PROCESSING SUMMARY")
+        logger.info("=" * 80)
+        logger.info(f"Total Providers Processed: {self.stats['total_providers']}")
+        logger.info(f"Total Documents Found: {self.stats['total_documents']}")
+        logger.info(f"Successfully Processed: {self.stats['successful_documents']}")
+        logger.info(f"Failed to Process: {self.stats['failed_documents']}")
+        logger.info(f"High Confidence Results: {self.stats['high_confidence_count']}")
+        logger.info(f"Low Confidence Results: {self.stats['low_confidence_count']}")
+        
+        # Token usage
+        token_usage = self.openai_manager.get_token_usage()
+        logger.info(f"\nToken Usage:")
+        logger.info(f"  Total Tokens: {token_usage['total_tokens']:,}")
+        logger.info(f"  Prompt Tokens: {token_usage['prompt_tokens']:,}")
+        logger.info(f"  Completion Tokens: {token_usage['completion_tokens']:,}")
+        
+        # Cost summary
+        costs = self.openai_manager.calculate_cost(self.config.get('costs'))
+        logger.info(f"\nEstimated Costs:")
+        logger.info(f"  GPT Input: ${costs['input_cost']:.4f}")
+        logger.info(f"  GPT Output: ${costs['output_cost']:.4f}")
+        logger.info(f"  Total GPT: ${costs['total_cost']:.4f}")
+        
+        logger.info("=" * 80)
+        logger.info("Pipeline execution completed successfully!")
+        logger.info("=" * 80 + "\n")
+
+
+def main():
+    """Main entry point"""
+    parser = argparse.ArgumentParser(
+        description='Azure RAG Document Processing Pipeline',
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  # Run with OCR enabled (default)
+  python main.py --ocr true
+  
+  # Run without OCR
+  python main.py --ocr false
+  
+  # Use custom config file
+  python main.py --config custom_config.json --ocr true
+        """
+    )
+    
+    parser.add_argument(
+        '--ocr',
+        type=str,
+        choices=['true', 'false'],
+        default='true',
+        help='Enable or disable OCR processing (default: true)'
+    )
+    
+    parser.add_argument(
+        '--config',
+        type=str,
+        default='config.json',
+        help='Path to configuration file (default: config.json)'
+    )
+    
+    args = parser.parse_args()
+    
+    # Convert string to boolean
+    use_ocr = args.ocr.lower() == 'true'
+    
+    # Initialize and run processor
+    processor = DocumentProcessor(config_path=args.config, use_ocr=use_ocr)
+    processor.run()
+
+
+if __name__ == "__main__":
+    main()
+
