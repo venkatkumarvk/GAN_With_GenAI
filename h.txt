@@ -13,13 +13,11 @@
   },
   "DocumentIntelligence": {
     "endpoint": "https://YOUR_DOC_INTEL.cognitiveservices.azure.com/",
-    "key": "YOUR_DOC_INTEL_KEY",
-    "api_version": "2024-07-31-preview"
+    "key": "YOUR_DOC_INTEL_KEY"
   },
   "AzureAISearch": {
     "endpoint": "https://YOUR_SEARCH_SERVICE.search.windows.net",
-    "api_key": "YOUR_SEARCH_KEY",
-    "api_version": "2024-07-01"
+    "api_key": "YOUR_SEARCH_KEY"
   },
   "fields": [
     "name",
@@ -49,9 +47,9 @@
 }
 
 
-----
+-----
 
-helper.py
+helper
 
 """
 Azure RAG Document Processing - Helper Module
@@ -73,7 +71,6 @@ import re
 # Azure SDK imports
 from azure.storage.blob import BlobServiceClient, BlobClient, ContainerClient
 from azure.ai.documentintelligence import DocumentIntelligenceClient
-from azure.ai.documentintelligence.models import AnalyzeDocumentRequest, AnalyzeResult
 from azure.core.credentials import AzureKeyCredential
 from azure.search.documents import SearchClient
 from azure.search.documents.indexes import SearchIndexClient
@@ -247,12 +244,11 @@ class AzureBlobManager:
 class DocumentIntelligenceManager:
     """Manages Azure Document Intelligence OCR operations"""
     
-    def __init__(self, endpoint: str, key: str, api_version: str = "2024-07-31-preview"):
+    def __init__(self, endpoint: str, key: str):
         self.client = DocumentIntelligenceClient(
             endpoint=endpoint,
             credential=AzureKeyCredential(key)
         )
-        self.api_version = api_version
         logger.info("DocumentIntelligenceManager initialized")
     
     @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=2, max=10))
@@ -270,10 +266,18 @@ class DocumentIntelligenceManager:
             }
             content_type = content_type_mapping.get(file_extension.lower(), 'application/octet-stream')
             
-            # Create analyze request
+            # Convert base64 string to bytes
+            import base64 as b64
+            document_bytes = b64.b64decode(base64_data)
+            
+            # Create analyze request using bytes directly
+            from io import BytesIO
+            document_stream = BytesIO(document_bytes)
+            
+            # Call Document Intelligence API with byte stream
             poller = self.client.begin_analyze_document(
-                "prebuilt-read",
-                AnalyzeDocumentRequest(base64_source=base64_data),
+                model_id="prebuilt-read",
+                document=document_stream,
                 content_type=content_type
             )
             
@@ -447,10 +451,9 @@ Be precise and conservative with confidence scores. Only use high confidence (>0
 class AzureAISearchManager:
     """Manages Azure AI Search index creation and document indexing"""
     
-    def __init__(self, endpoint: str, api_key: str, api_version: str = "2024-07-01"):
+    def __init__(self, endpoint: str, api_key: str):
         self.endpoint = endpoint
         self.credential = AzureKeyCredential(api_key)
-        self.api_version = api_version
         
         self.index_client = SearchIndexClient(
             endpoint=endpoint,
@@ -826,7 +829,10 @@ if __name__ == "__main__":
     except Exception as e:
         print(f"Error: {str(e)}")
 
--------
+
+----
+
+main.py
 
 """
 Azure RAG Document Processing - Main Module
@@ -901,8 +907,7 @@ class DocumentProcessor:
             doc_intel_config = self.config.get('DocumentIntelligence')
             self.doc_intel_manager = DocumentIntelligenceManager(
                 endpoint=doc_intel_config['endpoint'],
-                key=doc_intel_config['key'],
-                api_version=doc_intel_config.get('api_version', '2024-07-31-preview')
+                key=doc_intel_config['key']
             )
             logger.info("OCR enabled: Document Intelligence initialized")
         else:
@@ -923,8 +928,7 @@ class DocumentProcessor:
         search_config = self.config.get('AzureAISearch')
         self.search_manager = AzureAISearchManager(
             endpoint=search_config['endpoint'],
-            api_key=search_config['api_key'],
-            api_version=search_config.get('api_version', '2024-07-01')
+            api_key=search_config['api_key']
         )
         
         # Cost Logger
