@@ -43,14 +43,16 @@
 
 
 main.py
+
 import json
 import argparse
 import uuid
+import base64
 from datetime import datetime
 
 from azure.storage.blob import BlobServiceClient
-from azure.ai.formrecognizer import DocumentAnalysisClient
 from azure.core.credentials import AzureKeyCredential
+from azure.ai.formrecognizer import DocumentAnalysisClient
 
 from azure.search.documents import SearchClient
 from azure.search.documents.indexes import SearchIndexClient
@@ -68,34 +70,54 @@ from openai import AzureOpenAI
 
 
 # =========================
-# UTIL FUNCTIONS
+# CONFIG
 # =========================
 
 def load_config():
     with open("config.json") as f:
         return json.load(f)
 
+
 def now():
     return datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
 
-def supported(name):
-    return name.lower().endswith((".pdf", ".doc", ".docx", ".jpg", ".jpeg", ".png"))
 
-def chunk_text(text, size=2000):
-    return [text[i:i+size] for i in range(0, len(text), size)]
+# =========================
+# FILE SUPPORT
+# =========================
+
+def is_supported(file_name):
+    return file_name.lower().endswith((
+        ".pdf", ".doc", ".docx",
+        ".png", ".jpg", ".jpeg", ".tiff",
+        ".txt"
+    ))
+
+
+def needs_ocr(file_name):
+    return file_name.lower().endswith((
+        ".pdf", ".doc", ".docx",
+        ".png", ".jpg", ".jpeg", ".tiff"
+    ))
 
 
 # =========================
-# OCR
+# OCR USING DOCUMENT INTELLIGENCE
 # =========================
 
-def extract_text(config, file_bytes):
+def extract_text_ocr(config, file_bytes):
     client = DocumentAnalysisClient(
-        config["DocumentIntelligence"]["endpoint"],
-        AzureKeyCredential(config["DocumentIntelligence"]["api_key"])
+        endpoint=config["DocumentIntelligence"]["endpoint"],
+        credential=AzureKeyCredential(config["DocumentIntelligence"]["api_key"])
     )
 
-    poller = client.begin_analyze_document("prebuilt-read", file_bytes)
+    base64_encoded = base64.b64encode(file_bytes).decode("utf-8")
+
+    poller = client.begin_analyze_document(
+        model_id="prebuilt-read",
+        analyze_request={"base64Source": base64_encoded}
+    )
+
     result = poller.result()
 
     text = ""
@@ -126,16 +148,15 @@ def get_embedding(config, text):
 
 
 # =========================
-# CREATE INDEX (LATEST SDK)
+# CREATE AI SEARCH INDEX
 # =========================
 
-def create_index_if_not_exists(config, index_name):
-
+def create_index(config, index_name):
     dimension = config["AzureEmbedding"]["dimension"]
 
     index_client = SearchIndexClient(
-        config["AzureAISearch"]["endpoint"],
-        AzureKeyCredential(config["AzureAISearch"]["api_key"])
+        endpoint=config["AzureAISearch"]["endpoint"],
+        credential=AzureKeyCredential(config["AzureAISearch"]["api_key"])
     )
 
     fields = [
@@ -157,15 +178,11 @@ def create_index_if_not_exists(config, index_name):
     ]
 
     vector_search = VectorSearch(
-        algorithms=[
-            HnswAlgorithmConfiguration(name="hnsw-algorithm")
-        ],
-        profiles=[
-            VectorSearchProfile(
-                name="vector-profile",
-                algorithm_configuration_name="hnsw-algorithm"
-            )
-        ]
+        algorithms=[HnswAlgorithmConfiguration(name="hnsw-config")],
+        profiles=[VectorSearchProfile(
+            name="vector-profile",
+            algorithm_configuration_name="hnsw-config"
+        )]
     )
 
     index = SearchIndex(
@@ -182,41 +199,14 @@ def create_index_if_not_exists(config, index_name):
 
 
 # =========================
-# UPLOAD CHUNKS
-# =========================
-
-def upload_chunks(config, index_name, chunks):
-
-    client = SearchClient(
-        config["AzureAISearch"]["endpoint"],
-        index_name,
-        AzureKeyCredential(config["AzureAISearch"]["api_key"])
-    )
-
-    docs = []
-
-    for chunk in chunks:
-        embedding = get_embedding(config, chunk)
-
-        docs.append({
-            "id": str(uuid.uuid4()),
-            "content": chunk,
-            "embedding": embedding
-        })
-
-    client.upload_documents(docs)
-
-
-# =========================
 # VECTOR SEARCH
 # =========================
 
 def vector_search(config, index_name, query):
-
     client = SearchClient(
-        config["AzureAISearch"]["endpoint"],
-        index_name,
-        AzureKeyCredential(config["AzureAISearch"]["api_key"])
+        endpoint=config["AzureAISearch"]["endpoint"],
+        index_name=index_name,
+        credential=AzureKeyCredential(config["AzureAISearch"]["api_key"])
     )
 
     embedding = get_embedding(config, query)
@@ -238,11 +228,10 @@ def vector_search(config, index_name, query):
 
 
 # =========================
-# GPT EXTRACTION
+# GPT FIELD EXTRACTION
 # =========================
 
 def extract_fields(config, context):
-
     client = AzureOpenAI(
         api_key=config["AzureOpenAI"]["api_key"],
         azure_endpoint=config["AzureOpenAI"]["endpoint"],
@@ -250,7 +239,7 @@ def extract_fields(config, context):
     )
 
     prompt = f"""
-Extract the following fields and return STRICT JSON.
+Extract the following fields in strict JSON.
 
 Fields:
 {config["fields"]}
@@ -268,18 +257,15 @@ Context:
     try:
         return json.loads(response.choices[0].message.content)
     except:
-        print("Invalid JSON from GPT")
         return {}
 
 
 # =========================
-# MAIN PIPELINE
+# MAIN
 # =========================
 
 def main():
-
     parser = argparse.ArgumentParser()
-    parser.add_argument("--inputfolder", default=None)
     parser.add_argument("--ocr", default="true")
     args = parser.parse_args()
 
@@ -298,15 +284,12 @@ def main():
         config["AzureBlob"]["outputcontainer"]
     )
 
-    prefix = args.inputfolder.strip("/") + "/" if args.inputfolder else ""
-
-    blobs = input_container.list_blobs(name_starts_with=prefix)
-
+    blobs = input_container.list_blobs()
     providers = {}
 
     for blob in blobs:
         parts = blob.name.split("/")
-        provider = parts[0] if not prefix else parts[1]
+        provider = parts[0]
         providers.setdefault(provider, []).append(blob.name)
 
     for provider, files in providers.items():
@@ -314,13 +297,14 @@ def main():
         print("Processing provider:", provider)
 
         index_name = provider.lower().replace("_", "-")
-        create_index_if_not_exists(config, index_name)
+        create_index(config, index_name)
 
         full_text = ""
 
         for file in files:
 
-            if not supported(file):
+            if not is_supported(file):
+                print("Unsupported:", file)
                 continue
 
             blob = blob_service.get_blob_client(
@@ -330,18 +314,40 @@ def main():
 
             file_bytes = blob.download_blob().readall()
 
-            if ocr_enabled:
-                text = extract_text(config, file_bytes)
-            else:
+            if ocr_enabled and needs_ocr(file):
+                text = extract_text_ocr(config, file_bytes)
+            elif not ocr_enabled and file.lower().endswith(".txt"):
                 text = file_bytes.decode(errors="ignore")
+            else:
+                print("Skipped (OCR disabled):", file)
+                continue
 
             full_text += text + "\n"
 
-        chunks = chunk_text(full_text)
+        if not full_text.strip():
+            print("No valid text for", provider)
+            continue
 
-        upload_chunks(config, index_name, chunks)
+        chunks = [full_text[i:i+2000] for i in range(0, len(full_text), 2000)]
 
-        query = "Extract " + ", ".join(config["fields"])
+        search_client = SearchClient(
+            config["AzureAISearch"]["endpoint"],
+            index_name,
+            AzureKeyCredential(config["AzureAISearch"]["api_key"])
+        )
+
+        docs = []
+        for chunk in chunks:
+            embedding = get_embedding(config, chunk)
+            docs.append({
+                "id": str(uuid.uuid4()),
+                "content": chunk,
+                "embedding": embedding
+            })
+
+        search_client.upload_documents(docs)
+
+        query = "Extract: " + ", ".join(config["fields"])
         context = vector_search(config, index_name, query)
 
         result = extract_fields(config, context)
