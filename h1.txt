@@ -43,8 +43,7 @@
 
 
 main.py
-
-  import json
+import json
 import argparse
 import uuid
 from datetime import datetime
@@ -55,14 +54,22 @@ from azure.core.credentials import AzureKeyCredential
 
 from azure.search.documents import SearchClient
 from azure.search.documents.indexes import SearchIndexClient
-from azure.search.documents.indexes.models import *
+from azure.search.documents.indexes.models import (
+    SearchIndex,
+    SearchField,
+    SimpleField,
+    SearchFieldDataType,
+    VectorSearch,
+    HnswAlgorithmConfiguration,
+    VectorSearchProfile
+)
 
 from openai import AzureOpenAI
 
 
-# --------------------
-# UTIL
-# --------------------
+# =========================
+# UTIL FUNCTIONS
+# =========================
 
 def load_config():
     with open("config.json") as f:
@@ -78,9 +85,9 @@ def chunk_text(text, size=2000):
     return [text[i:i+size] for i in range(0, len(text), size)]
 
 
-# --------------------
+# =========================
 # OCR
-# --------------------
+# =========================
 
 def extract_text(config, file_bytes):
     client = DocumentAnalysisClient(
@@ -99,9 +106,9 @@ def extract_text(config, file_bytes):
     return text
 
 
-# --------------------
+# =========================
 # EMBEDDING
-# --------------------
+# =========================
 
 def get_embedding(config, text):
     client = AzureOpenAI(
@@ -118,9 +125,9 @@ def get_embedding(config, text):
     return response.data[0].embedding
 
 
-# --------------------
-# AI SEARCH
-# --------------------
+# =========================
+# CREATE INDEX (LATEST SDK)
+# =========================
 
 def create_index_if_not_exists(config, index_name):
 
@@ -133,23 +140,39 @@ def create_index_if_not_exists(config, index_name):
 
     fields = [
         SimpleField(name="id", type=SearchFieldDataType.String, key=True),
-        SearchField(name="content", type=SearchFieldDataType.String, searchable=True),
+
+        SearchField(
+            name="content",
+            type=SearchFieldDataType.String,
+            searchable=True
+        ),
+
         SearchField(
             name="embedding",
             type=SearchFieldDataType.Collection(SearchFieldDataType.Single),
             searchable=True,
             vector_search_dimensions=dimension,
-            vector_search_configuration="vector-config"
+            vector_search_profile_name="vector-profile"
         )
     ]
 
     vector_search = VectorSearch(
-        algorithm_configurations=[
-            HnswAlgorithmConfiguration(name="vector-config")
+        algorithms=[
+            HnswAlgorithmConfiguration(name="hnsw-algorithm")
+        ],
+        profiles=[
+            VectorSearchProfile(
+                name="vector-profile",
+                algorithm_configuration_name="hnsw-algorithm"
+            )
         ]
     )
 
-    index = SearchIndex(name=index_name, fields=fields, vector_search=vector_search)
+    index = SearchIndex(
+        name=index_name,
+        fields=fields,
+        vector_search=vector_search
+    )
 
     try:
         index_client.create_index(index)
@@ -157,6 +180,10 @@ def create_index_if_not_exists(config, index_name):
     except:
         print("Index exists:", index_name)
 
+
+# =========================
+# UPLOAD CHUNKS
+# =========================
 
 def upload_chunks(config, index_name, chunks):
 
@@ -167,6 +194,7 @@ def upload_chunks(config, index_name, chunks):
     )
 
     docs = []
+
     for chunk in chunks:
         embedding = get_embedding(config, chunk)
 
@@ -178,6 +206,10 @@ def upload_chunks(config, index_name, chunks):
 
     client.upload_documents(docs)
 
+
+# =========================
+# VECTOR SEARCH
+# =========================
 
 def vector_search(config, index_name, query):
 
@@ -191,11 +223,11 @@ def vector_search(config, index_name, query):
 
     results = client.search(
         search_text=None,
-        vector={
+        vectors=[{
             "value": embedding,
             "fields": "embedding",
             "k": 5
-        }
+        }]
     )
 
     context = ""
@@ -205,9 +237,9 @@ def vector_search(config, index_name, query):
     return context
 
 
-# --------------------
+# =========================
 # GPT EXTRACTION
-# --------------------
+# =========================
 
 def extract_fields(config, context):
 
@@ -218,7 +250,7 @@ def extract_fields(config, context):
     )
 
     prompt = f"""
-Extract fields strictly in JSON.
+Extract the following fields and return STRICT JSON.
 
 Fields:
 {config["fields"]}
@@ -236,19 +268,19 @@ Context:
     try:
         return json.loads(response.choices[0].message.content)
     except:
+        print("Invalid JSON from GPT")
         return {}
 
 
-# --------------------
-# MAIN
-# --------------------
+# =========================
+# MAIN PIPELINE
+# =========================
 
 def main():
 
     parser = argparse.ArgumentParser()
     parser.add_argument("--inputfolder", default=None)
     parser.add_argument("--ocr", default="true")
-
     args = parser.parse_args()
 
     config = load_config()
@@ -279,7 +311,7 @@ def main():
 
     for provider, files in providers.items():
 
-        print("Processing:", provider)
+        print("Processing provider:", provider)
 
         index_name = provider.lower().replace("_", "-")
         create_index_if_not_exists(config, index_name)
