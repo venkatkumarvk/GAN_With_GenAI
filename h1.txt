@@ -356,14 +356,37 @@ Be precise and conservative with confidence scores. Only use high confidence (>0
             
             extracted_data = json.loads(content)
             
-            # Add source document to each field
+            # Validate and normalize the extracted data format
+            normalized_data = {}
             for field in extracted_data:
-                extracted_data[field]['source_document'] = source_document
+                field_value = extracted_data[field]
+                
+                # Ensure each field is in the correct dict format
+                if isinstance(field_value, dict):
+                    # Already in correct format
+                    if 'value' in field_value and 'confidence' in field_value:
+                        normalized_data[field] = field_value
+                    else:
+                        # Missing keys, create proper structure
+                        normalized_data[field] = {
+                            'value': field_value.get('value', ''),
+                            'confidence': float(field_value.get('confidence', 0.5))
+                        }
+                else:
+                    # Direct value, wrap it
+                    normalized_data[field] = {
+                        'value': str(field_value),
+                        'confidence': 0.5  # Default confidence for non-standard format
+                    }
             
-            logger.info(f"Successfully extracted {len(extracted_data)} fields")
+            # Add source document to each field
+            for field in normalized_data:
+                normalized_data[field]['source_document'] = source_document
+            
+            logger.info(f"Successfully extracted {len(normalized_data)} fields")
             
             return {
-                'extracted_fields': extracted_data,
+                'extracted_fields': normalized_data,
                 'raw_response': content,
                 'success': True
             }
@@ -604,9 +627,19 @@ class DataProcessor:
             for field in fields:
                 if field in extracted_fields:
                     field_data = extracted_fields[field]
-                    row[field] = field_data.get('value', '')
-                    row[f"{field}_confidence"] = field_data.get('confidence', 0.0)
-                    row[f"{field}_source"] = field_data.get('source_document', '')
+                    
+                    # Handle both dict format and direct value format
+                    if isinstance(field_data, dict):
+                        # Standard format: {"value": "...", "confidence": 0.95}
+                        row[field] = field_data.get('value', '')
+                        row[f"{field}_confidence"] = field_data.get('confidence', 0.0)
+                        row[f"{field}_source"] = field_data.get('source_document', '')
+                    else:
+                        # Direct value (fallback if GPT returns wrong format)
+                        row[field] = str(field_data) if field_data else ''
+                        row[f"{field}_confidence"] = 0.5  # Default medium confidence
+                        row[f"{field}_source"] = ''
+                        logger.warning(f"Field '{field}' is not in expected dict format, using fallback")
                 else:
                     row[field] = ''
                     row[f"{field}_confidence"] = 0.0
