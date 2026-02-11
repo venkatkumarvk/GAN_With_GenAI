@@ -210,23 +210,32 @@ class DocumentIntelligenceManager:
     def analyze_document(self, base64_data: str, file_extension: str) -> Dict[str, Any]:
         """Analyze document using Document Intelligence Read model"""
         try:
-            # Import required models
-            from azure.ai.documentintelligence.models import AnalyzeDocumentRequest
+            # Convert base64 string to bytes
+            import base64 as b64
+            document_bytes = b64.b64decode(base64_data)
             
-            logger.info(f"Starting OCR analysis for document with extension: {file_extension}")
+            logger.info(f"Starting OCR analysis for document with extension: {file_extension}, size: {len(document_bytes)} bytes")
             
-            # Create analyze request with base64Source
-            # This is the required format for the API
-            analyze_request = AnalyzeDocumentRequest(
-                base64_source=base64_data
-            )
+            # Determine content type
+            content_type_map = {
+                '.pdf': 'application/pdf',
+                '.png': 'image/png',
+                '.jpg': 'image/jpeg',
+                '.jpeg': 'image/jpeg',
+                '.tiff': 'image/tiff',
+                '.tif': 'image/tiff',
+                '.bmp': 'image/bmp'
+            }
+            content_type = content_type_map.get(file_extension.lower(), 'application/pdf')
             
-            logger.info("Sending document to Document Intelligence API...")
+            logger.info(f"Using content type: {content_type}")
             
-            # Call Document Intelligence API with analyze_request
+            # Call Document Intelligence API
+            # Pass bytes directly with content_type parameter
             poller = self.client.begin_analyze_document(
-                "prebuilt-read",
-                analyze_request=analyze_request
+                model_id="prebuilt-read",
+                analyze_request=document_bytes,
+                content_type=content_type
             )
             
             logger.info("Waiting for OCR analysis to complete...")
