@@ -1,0 +1,202 @@
+import json
+import base64
+import argparse
+from datetime import datetime
+
+from azure.storage.blob import BlobServiceClient
+from azure.core.credentials import AzureKeyCredential
+from azure.ai.documentintelligence import DocumentIntelligenceClient
+from azure.ai.documentintelligence.models import AnalyzeDocumentRequest
+from openai import AzureOpenAI
+
+# =========================================
+# UTILS
+# =========================================
+
+def now():
+    return datetime.utcnow().strftime("%Y-%m-%d_%H-%M-%S")
+
+
+def is_supported(file_name):
+    return file_name.lower().endswith(
+        (".pdf", ".doc", ".docx", ".png", ".jpg", ".jpeg", ".tiff")
+    )
+
+
+def to_base64(file_bytes):
+    return base64.b64encode(file_bytes).decode("utf-8")
+
+
+# =========================================
+# OCR
+# =========================================
+
+def run_ocr_base64(config, base64_data):
+    client = DocumentIntelligenceClient(
+        endpoint=config["DocumentIntelligence"]["endpoint"],
+        credential=AzureKeyCredential(config["DocumentIntelligence"]["key"])
+    )
+    poller = client.begin_analyze_document(
+        "prebuilt-read",
+        AnalyzeDocumentRequest(base64_source=base64_data)
+    )
+    result = poller.result()
+    text = ""
+    if result.pages:
+        for page in result.pages:
+            if page and page.lines:
+                for line in page.lines:
+                    if line and hasattr(line, "content"):
+                        text += line.content + "\n"
+    return text.strip()
+
+
+# =========================================
+# GPT EXTRACT
+# =========================================
+
+def gpt_extract_text(config, text):
+    client = AzureOpenAI(
+        api_key=config["AzureOpenAI"]["api_key"],
+        azure_endpoint=config["AzureOpenAI"]["endpoint"],
+        api_version=config["AzureOpenAI"]["api_version"]
+    )
+    fields_str = ", ".join(config["fields"])
+    prompt = f"""
+Extract the following fields from the document text.
+Return strict JSON.
+
+Fields:
+{fields_str}
+
+Format:
+{{
+  "field": "value",
+  "field_confidence": 0.95
+}}
+
+Text:
+{text}
+"""
+    response = client.chat.completions.create(
+        model=config["AzureOpenAI"]["deployment_name"],
+        messages=[{"role": "user", "content": prompt}],
+        temperature=0
+    )
+    raw_content = response.choices[0].message.content
+    tokens = response.usage.total_tokens
+    try:
+        parsed = json.loads(raw_content)
+    except:
+        parsed = {}
+    return parsed, raw_content, tokens
+
+
+# =========================================
+# MAIN
+# =========================================
+
+def main():
+
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--ocr", required=True, help="true or false")
+    args = parser.parse_args()
+    use_ocr = args.ocr.lower() == "true"
+
+    # Load config
+    with open("config.json") as f:
+        config = json.load(f)
+
+    blob_service = BlobServiceClient.from_connection_string(
+        config["AzureBlob"]["connection_string"]
+    )
+    input_container = blob_service.get_container_client(config["AzureBlob"]["inputcontainer"])
+    output_container = blob_service.get_container_client(config["AzureBlob"]["outputcontainer"])
+
+    # List blobs & detect providers
+    blobs = list(input_container.list_blobs())
+    providers = {}
+    for blob in blobs:
+        provider = blob.name.split("/")[0]
+        providers.setdefault(provider, []).append(blob.name)
+
+    total_tokens = 0
+
+    for provider, files in providers.items():
+        provider_data = {}
+        raw_outputs = []
+
+        print(f"Processing provider: {provider}")
+
+        for file in files:
+            if not is_supported(file):
+                print("Unsupported:", file)
+                continue
+
+            blob_client = input_container.get_blob_client(file)
+            file_bytes = blob_client.download_blob().readall()
+            base64_data = to_base64(file_bytes)
+
+            # OCR
+            if use_ocr:
+                text = run_ocr_base64(config, base64_data)
+            else:
+                try:
+                    text = file_bytes.decode("utf-8", errors="ignore")
+                except:
+                    text = ""
+
+            if not text.strip():
+                continue
+
+            parsed, raw_content, tokens = gpt_extract_text(config, text)
+            total_tokens += tokens
+
+            raw_outputs.append({
+                "document": file,
+                "raw_output": raw_content
+            })
+
+            provider_data.update(parsed)
+
+        # Build CSV row
+        row = {"id": provider, "extractiondatetime": now()}
+        high_conf = True
+
+        for field in config["fields"]:
+            value = provider_data.get(field, "")
+            conf = float(provider_data.get(f"{field}_confidence", 0))
+            row[field] = value
+            row[f"{field}_confidence"] = conf
+            row[f"{field}_sourcedocument"] = provider
+            if conf < config["confidence_threshold"]:
+                high_conf = False
+
+        label = "Highconfidence" if high_conf else "Lowconfidence"
+
+        # Save CSV
+        headers = row.keys()
+        csv_data = ",".join(headers) + "\n" + ",".join(str(row[h]) for h in headers)
+        output_container.upload_blob(f"{label}/processedcsvresult/{provider}.csv", csv_data, overwrite=True)
+
+        # Save JSON
+        output_container.upload_blob(
+            f"{label}/processedjsonresult/{provider}.json",
+            json.dumps(raw_outputs, indent=2),
+            overwrite=True
+        )
+
+        print(f"Saved results for provider: {provider}")
+
+    # Cost log
+    output_container.upload_blob(
+        f"cost_logs/run_{now()}.txt",
+        f"Total tokens used: {total_tokens}",
+        overwrite=True
+    )
+
+    print("Run completed. Total tokens:", total_tokens)
+
+
+if __name__ == "__main__":
+    main()
