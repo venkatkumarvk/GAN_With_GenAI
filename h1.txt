@@ -415,14 +415,14 @@ Be precise and conservative with confidence scores. Only use high confidence (>0
             # Validate input
             if not text or not isinstance(text, str):
                 logger.warning("Invalid or empty text provided for embedding generation")
-                return []
+                return [0.0] * 3072  # Return zero vector instead of empty list
             
             # Convert to string if needed (defensive)
             text = str(text).strip()
             
-            if not text:
-                logger.warning("Empty text after stripping, returning empty embeddings")
-                return []
+            if not text or len(text) < 3:
+                logger.warning("Text too short for embedding generation, using placeholder")
+                text = "No content available"
             
             # Truncate text if too long (max 8191 tokens for embedding models)
             max_chars = 30000  # Approximate
@@ -436,12 +436,13 @@ Be precise and conservative with confidence scores. Only use high confidence (>0
             )
             
             embeddings = response.data[0].embedding
-            logger.debug(f"Generated embeddings with dimension: {len(embeddings)}")
+            logger.info(f"Generated embeddings with dimension: {len(embeddings)}")
             return embeddings
             
         except Exception as e:
             logger.error(f"Embedding generation failed: {str(e)}", exc_info=True)
-            return []
+            # Return zero vector instead of empty list so document can still be indexed
+            return [0.0] * 3072
     
     def get_token_usage(self) -> Dict[str, int]:
         """Get total token usage statistics"""
@@ -856,12 +857,9 @@ if __name__ == "__main__":
         print(f"Error: {str(e)}")
 
 
-
 ----
 
-
-main
-
+main.py
 
 """
 Azure RAG Document Processing - Main Module
@@ -1021,12 +1019,17 @@ class DocumentProcessor:
                 return None
             
             # Generate embeddings for the extracted text
-            # Ensure extracted_text is a valid string
+            # Ensure extracted_text is a valid string with content
             if not extracted_text or not isinstance(extracted_text, str):
-                logger.warning(f"Invalid extracted_text for {document_name}, using empty string for embeddings")
-                extracted_text = ""
+                logger.warning(f"Invalid extracted_text for {document_name}, using placeholder")
+                extracted_text_for_embedding = "No text content available"
+            elif len(extracted_text.strip()) == 0:
+                logger.warning(f"Empty extracted_text for {document_name}, using placeholder")
+                extracted_text_for_embedding = "No text content available"
+            else:
+                extracted_text_for_embedding = extracted_text
             
-            embeddings = self.openai_manager.generate_embeddings(extracted_text)
+            embeddings = self.openai_manager.generate_embeddings(extracted_text_for_embedding)
             
             # Create document ID
             doc_id = DataProcessor.generate_document_id(provider, document_name)
@@ -1167,19 +1170,25 @@ class DocumentProcessor:
         # Prepare documents for search index
         search_documents = []
         for result in extraction_results:
-            if result['embeddings']:  # Only add if embeddings were generated
-                search_doc = {
-                    'id': result['id'],
-                    'content': result['content'][:50000],  # Limit content size
-                    'provider': result['provider'],
-                    'document_name': result['document_name'],
-                    'file_extension': result['file_extension'],
-                    'page_count': result['page_count'],
-                    'extraction_datetime': result['extraction_datetime'],
-                    'extracted_fields': json.dumps(result['extracted_fields']),
-                    'content_vector': result['embeddings']
-                }
-                search_documents.append(search_doc)
+            # Create search document
+            # If embeddings are empty, create a zero vector
+            embeddings = result['embeddings']
+            if not embeddings or len(embeddings) == 0:
+                logger.warning(f"No embeddings for {result['document_name']}, using zero vector")
+                embeddings = [0.0] * 3072  # Default zero vector for text-embedding-3-large
+            
+            search_doc = {
+                'id': result['id'],
+                'content': result['content'][:50000],  # Limit content size
+                'provider': result['provider'],
+                'document_name': result['document_name'],
+                'file_extension': result['file_extension'],
+                'page_count': result['page_count'],
+                'extraction_datetime': result['extraction_datetime'],
+                'extracted_fields': json.dumps(result['extracted_fields']),
+                'content_vector': embeddings
+            }
+            search_documents.append(search_doc)
         
         # Upload documents to provider-specific index
         if search_documents:
@@ -1321,4 +1330,3 @@ Examples:
 
 if __name__ == "__main__":
     main()
-
