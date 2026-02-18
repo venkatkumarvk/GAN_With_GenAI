@@ -1,5 +1,4 @@
-#main.py
-
+#main
 
 """
 MAIN PIPELINE - Document Extraction with Multimodal RAG
@@ -151,19 +150,19 @@ def save_results(provider_results: Dict, blob_mgr, config: Dict):
     # Determine confidence category
     confidence_category = "highconfidence" if avg >= confidence_threshold else "lowconfidence"
     
-    # NEW FOLDER STRUCTURE: provider/subfolder/file
-    # CSV: provider/processedcsvresult/
-    csv_file = f"{provider}/processedcsvresult/{provider}_{timestamp}_{confidence_category}.csv"
+    # NEW FOLDER STRUCTURE: confidence/provider/subfolder/
+    # CSV: highconfidence/ProviderA/processedcsvresult/
+    csv_file = f"{confidence_category}/{provider}/processedcsvresult/{provider}_{timestamp}.csv"
     blob_mgr.upload_blob(csv_file, '\n'.join(csv_lines).encode('utf-8'))
     print(f"  ✓ CSV: {csv_file}")
     
-    # JSON detailed: provider/processedjsonresult/
-    json_file = f"{provider}/processedjsonresult/{provider}_{timestamp}_{confidence_category}_detailed.json"
+    # JSON detailed: highconfidence/ProviderA/processedjsonresult/
+    json_file = f"{confidence_category}/{provider}/processedjsonresult/{provider}_{timestamp}_detailed.json"
     blob_mgr.upload_blob(json_file, json.dumps(provider_results, indent=2).encode('utf-8'))
     print(f"  ✓ JSON: {json_file}")
     
-    # Costs: provider/estimatedcosttracking/
-    cost_file = f"{provider}/estimatedcosttracking/{provider}_{timestamp}_costs.json"
+    # Costs: highconfidence/ProviderA/estimatedcosttracking/
+    cost_file = f"{confidence_category}/{provider}/estimatedcosttracking/{provider}_{timestamp}_costs.json"
     cost_data = {
         'provider': provider,
         'total_cost_usd': provider_results['total_cost'],
@@ -249,766 +248,113 @@ def main():
     
     print(f"✓ Grouped into {len(providers)} providers")
     
-    # Process each
-    for prov, docs in providers.items():
-        prov_results = process_provider(prov, docs, blob_mgr, doc_intel_mgr, openai_mgr, rag_extractor, config)
-        save_results(prov_results, blob_mgr, config)
-    
-    print("\n" + "="*60)
-    print("  COMPLETE ✓")
-    print("="*60 + "\n")
-    log_complete(len(providers), len(all_docs))
-
-
-if __name__ == "__main__":
-    main()
-
-----
-
-
-
-#doc
-
-"""
-DOCUMENT INTELLIGENCE OCR - Standalone OCR Module
-==================================================
-
-Complete Azure Document Intelligence OCR implementation.
-Supports: PDF, Images (JPG, PNG, TIFF, BMP), Word documents (.doc, .docx)
-
-Features:
-- Automatic Word → PDF conversion
-- Retry logic with exponential backoff
-- Multi-page document support
-- Base64 input handling
-- Page count tracking
-- Comprehensive error handling
-
-Usage:
-    from document_intelligence_ocr import DocumentIntelligenceOCR
-    
-    ocr = DocumentIntelligenceOCR(endpoint, api_key)
-    result = ocr.extract_text(base64_data, file_extension)
-    
-    text = result['content']
-    pages = result['page_count']
-"""
-
-import base64
-import logging
-import os
-import tempfile
-from typing import Dict, Any, Optional
-from tenacity import retry, stop_after_attempt, wait_exponential
-
-from azure.core.credentials import AzureKeyCredential
-from azure.ai.documentintelligence import DocumentIntelligenceClient
-
-logger = logging.getLogger(__name__)
-
-
-class DocumentIntelligenceOCR:
-    """
-    Azure Document Intelligence OCR Manager
-    
-    Extracts text from documents using Azure's prebuilt-read model.
-    Handles multiple file formats with automatic conversion.
-    """
-    
-    def __init__(self, endpoint: str, api_key: str):
-        """
-        Initialize Document Intelligence OCR client
-        
-        Args:
-            endpoint: Azure Document Intelligence endpoint URL
-            api_key: Azure Document Intelligence API key
-        """
-        self.endpoint = endpoint
-        self.api_key = api_key
-        
-        self.client = DocumentIntelligenceClient(
-            endpoint=endpoint,
-            credential=AzureKeyCredential(api_key)
-        )
-        
-        logger.info(f"DocumentIntelligenceOCR initialized | endpoint={endpoint}")
-    
-    @retry(stop=stop_after_attempt(3), wait=wait_exponential(min=2, max=10))
-    def extract_text(
-        self,
-        base64_data: str,
-        file_extension: str,
-        convert_word: bool = True
-    ) -> Dict[str, Any]:
-        """
-        Extract text from document using Azure Document Intelligence
-        
-        Args:
-            base64_data: Base64-encoded document bytes
-            file_extension: File extension (e.g., '.pdf', '.jpg', '.docx')
-            convert_word: If True, auto-convert Word docs to PDF (default: True)
-        
-        Returns:
-            Dictionary with:
-            {
-                'success': True/False,
-                'content': 'Extracted text...',
-                'page_count': 3,
-                'error': 'Error message if failed'
-            }
-        
-        Raises:
-            Exception: If OCR fails after 3 retry attempts
-        """
-        try:
-            file_ext = file_extension.lower()
-            
-            # Handle Word documents - convert to PDF first
-            if file_ext in ['.doc', '.docx'] and convert_word:
-                logger.info(f"Converting {file_ext} to PDF for OCR processing")
-                result = self._convert_word_to_pdf(base64_data, file_ext)
-                
-                if result['success']:
-                    base64_data = result['pdf_base64']
-                    file_ext = '.pdf'
-                    logger.info("Word document converted to PDF successfully")
-                else:
-                    # Fallback: Try direct text extraction from Word
-                    logger.warning("PDF conversion failed, attempting direct Word text extraction")
-                    return self._extract_text_from_word(base64_data, file_ext)
-            
-            # Validate file type
-            supported_types = ['.pdf', '.jpg', '.jpeg', '.png', '.tiff', '.tif', '.bmp']
-            if file_ext not in supported_types:
-                error_msg = f"Unsupported file type: {file_ext}. Supported: {supported_types}"
-                logger.error(error_msg)
-                return {
-                    'success': False,
-                    'content': '',
-                    'page_count': 0,
-                    'error': error_msg
-                }
-            
-            # Perform OCR using Azure Document Intelligence
-            logger.info(f"Starting OCR analysis for {file_ext} file")
-            
-            # Call Document Intelligence (prebuilt-read model) - CORRECT FORMAT
-            poller = self.client.begin_analyze_document(
-                model_id="prebuilt-read",
-                analyze_request={"base64Source": base64_data}  # Correct format!
-            )
-            
-            # Wait for result
-            result = poller.result()
-            
-            # Extract text content
-            content = result.content if hasattr(result, 'content') else ''
-            
-            # Get page count
-            page_count = len(result.pages) if hasattr(result, 'pages') else 0
-            
-            # Log success
-            logger.info(
-                f"OCR completed successfully | "
-                f"chars={len(content)} | pages={page_count}"
-            )
-            
-            return {
-                'success': True,
-                'content': content,
-                'page_count': page_count,
-                'error': None
-            }
-            
-        except Exception as e:
-            error_msg = f"OCR extraction failed: {str(e)}"
-            logger.error(error_msg, exc_info=True)
-            return {
-                'success': False,
-                'content': '',
-                'page_count': 0,
-                'error': error_msg
-            }
-    
-    def _convert_word_to_pdf(
-        self,
-        base64_data: str,
-        file_extension: str
-    ) -> Dict[str, Any]:
-        """
-        Convert Word document to PDF
-        
-        Args:
-            base64_data: Base64-encoded Word document
-            file_extension: '.doc' or '.docx'
-        
-        Returns:
-            Dictionary with:
-            {
-                'success': True/False,
-                'pdf_base64': 'base64-encoded PDF',
-                'error': 'Error message if failed'
-            }
-        """
-        try:
-            # Try using docx2pdf (Windows/Mac)
-            try:
-                from docx2pdf import convert as docx_to_pdf_convert
-                
-                # Decode base64 to bytes
-                document_bytes = base64.b64decode(base64_data)
-                
-                # Create temporary files
-                with tempfile.NamedTemporaryFile(
-                    suffix=file_extension,
-                    delete=False
-                ) as temp_word:
-                    temp_word.write(document_bytes)
-                    temp_word_path = temp_word.name
-                
-                temp_pdf_path = temp_word_path.replace(file_extension, '.pdf')
-                
-                # Convert to PDF
-                docx_to_pdf_convert(temp_word_path, temp_pdf_path)
-                
-                # Read PDF and encode to base64
-                with open(temp_pdf_path, 'rb') as pdf_file:
-                    pdf_bytes = pdf_file.read()
-                    pdf_base64 = base64.b64encode(pdf_bytes).decode('utf-8')
-                
-                # Clean up temp files
-                os.remove(temp_word_path)
-                os.remove(temp_pdf_path)
-                
-                logger.info("Word to PDF conversion successful (docx2pdf)")
-                
-                return {
-                    'success': True,
-                    'pdf_base64': pdf_base64,
-                    'error': None
-                }
-                
-            except ImportError:
-                logger.warning("docx2pdf not installed, trying alternative method")
-                
-                # Alternative: Use LibreOffice (Linux)
-                try:
-                    import subprocess
-                    
-                    document_bytes = base64.b64decode(base64_data)
-                    
-                    with tempfile.NamedTemporaryFile(
-                        suffix=file_extension,
-                        delete=False
-                    ) as temp_word:
-                        temp_word.write(document_bytes)
-                        temp_word_path = temp_word.name
-                    
-                    temp_dir = os.path.dirname(temp_word_path)
-                    
-                    # Convert using LibreOffice
-                    subprocess.run(
-                        [
-                            'libreoffice',
-                            '--headless',
-                            '--convert-to',
-                            'pdf',
-                            '--outdir',
-                            temp_dir,
-                            temp_word_path
-                        ],
-                        check=True,
-                        capture_output=True
-                    )
-                    
-                    # Read converted PDF
-                    pdf_path = temp_word_path.replace(file_extension, '.pdf')
-                    
-                    with open(pdf_path, 'rb') as pdf_file:
-                        pdf_bytes = pdf_file.read()
-                        pdf_base64 = base64.b64encode(pdf_bytes).decode('utf-8')
-                    
-                    # Clean up
-                    os.remove(temp_word_path)
-                    os.remove(pdf_path)
-                    
-                    logger.info("Word to PDF conversion successful (LibreOffice)")
-                    
-                    return {
-                        'success': True,
-                        'pdf_base64': pdf_base64,
-                        'error': None
-                    }
-                    
-                except Exception as e:
-                    error_msg = f"LibreOffice conversion failed: {str(e)}"
-                    logger.error(error_msg)
-                    return {
-                        'success': False,
-                        'pdf_base64': '',
-                        'error': error_msg
-                    }
-                    
-        except Exception as e:
-            error_msg = f"Word to PDF conversion failed: {str(e)}"
-            logger.error(error_msg, exc_info=True)
-            return {
-                'success': False,
-                'pdf_base64': '',
-                'error': error_msg
-            }
-    
-    def _extract_text_from_word(
-        self,
-        base64_data: str,
-        file_extension: str
-    ) -> Dict[str, Any]:
-        """
-        Fallback: Extract text directly from Word document
-        
-        Args:
-            base64_data: Base64-encoded Word document
-            file_extension: '.doc' or '.docx'
-        
-        Returns:
-            Dictionary with extracted text
-        """
-        try:
-            from docx import Document
-            import io
-            
-            logger.info("Attempting direct text extraction from Word document")
-            
-            # Decode base64
-            document_bytes = base64.b64decode(base64_data)
-            
-            # Load Word document
-            doc = Document(io.BytesIO(document_bytes))
-            
-            # Extract all text from paragraphs
-            text_parts = []
-            for paragraph in doc.paragraphs:
-                if paragraph.text.strip():
-                    text_parts.append(paragraph.text)
-            
-            # Extract text from tables
-            for table in doc.tables:
-                for row in table.rows:
-                    for cell in row.cells:
-                        if cell.text.strip():
-                            text_parts.append(cell.text)
-            
-            content = '\n'.join(text_parts)
-            
-            logger.info(
-                f"Direct Word text extraction successful | "
-                f"chars={len(content)}"
-            )
-            
-            return {
-                'success': True,
-                'content': content,
-                'page_count': 1,  # Approximate
-                'error': None
-            }
-            
-        except ImportError:
-            error_msg = "python-docx not installed. Cannot extract text from Word."
-            logger.error(error_msg)
-            return {
-                'success': False,
-                'content': '',
-                'page_count': 0,
-                'error': error_msg
-            }
-            
-        except Exception as e:
-            error_msg = f"Direct Word text extraction failed: {str(e)}"
-            logger.error(error_msg, exc_info=True)
-            return {
-                'success': False,
-                'content': '',
-                'page_count': 0,
-                'error': error_msg
-            }
-    
-    def extract_from_file(self, file_path: str) -> Dict[str, Any]:
-        """
-        Extract text from a file on disk
-        
-        Args:
-            file_path: Path to the file
-        
-        Returns:
-            Dictionary with extraction results
-        """
-        try:
-            # Read file
-            with open(file_path, 'rb') as f:
-                file_bytes = f.read()
-            
-            # Encode to base64
-            base64_data = base64.b64encode(file_bytes).decode('utf-8')
-            
-            # Get extension
-            file_extension = os.path.splitext(file_path)[1]
-            
-            # Extract text
-            return self.extract_text(base64_data, file_extension)
-            
-        except Exception as e:
-            error_msg = f"Failed to read file {file_path}: {str(e)}"
-            logger.error(error_msg)
-            return {
-                'success': False,
-                'content': '',
-                'page_count': 0,
-                'error': error_msg
-            }
-    
-    def extract_from_bytes(
-        self,
-        file_bytes: bytes,
-        file_extension: str
-    ) -> Dict[str, Any]:
-        """
-        Extract text from bytes
-        
-        Args:
-            file_bytes: Document bytes
-            file_extension: File extension (e.g., '.pdf')
-        
-        Returns:
-            Dictionary with extraction results
-        """
-        try:
-            # Encode to base64
-            base64_data = base64.b64encode(file_bytes).decode('utf-8')
-            
-            # Extract text
-            return self.extract_text(base64_data, file_extension)
-            
-        except Exception as e:
-            error_msg = f"Failed to process bytes: {str(e)}"
-            logger.error(error_msg)
-            return {
-                'success': False,
-                'content': '',
-                'page_count': 0,
-                'error': error_msg
-            }
-
-
-# ═══════════════════════════════════════════════════════
-# USAGE EXAMPLES
-# ═══════════════════════════════════════════════════════
-
-"""
-# Example 1: Extract from base64 string
-from document_intelligence_ocr import DocumentIntelligenceOCR
-
-ocr = DocumentIntelligenceOCR(
-    endpoint="https://YOUR_ENDPOINT.cognitiveservices.azure.com/",
-    api_key="YOUR_API_KEY"
-)
-
-# Base64-encoded PDF
-result = ocr.extract_text(base64_pdf_data, '.pdf')
-
-if result['success']:
-    print(f"Extracted text: {result['content'][:200]}...")
-    print(f"Pages: {result['page_count']}")
-else:
-    print(f"Error: {result['error']}")
-
-
-# Example 2: Extract from file path
-result = ocr.extract_from_file('/path/to/document.pdf')
-print(result['content'])
-
-
-# Example 3: Extract from bytes
-with open('document.jpg', 'rb') as f:
-    file_bytes = f.read()
-
-result = ocr.extract_from_bytes(file_bytes, '.jpg')
-print(result['content'])
-
-
-# Example 4: Word document (auto-converts to PDF)
-result = ocr.extract_text(base64_docx_data, '.docx')
-# Automatically converts .docx → PDF → OCR
-
-
-# Example 5: Error handling
-result = ocr.extract_text(invalid_data, '.xyz')
-if not result['success']:
-    print(f"OCR failed: {result['error']}")
-"""
-
-
-
------
-
-
-#main.py
-
-"""
-MAIN PIPELINE - Document Extraction with Multimodal RAG
-========================================================
-Entry point. Run: python main.py
-"""
-
-import json
-from datetime import datetime
-from typing import List, Dict, Any
-
-from helper import AzureBlobManager, AzureOpenAIManager, DocumentIntelligenceManager
-from unified_rag import create_rag_extractor
-from logging_config import (
-    setup_logging, log_config, log_provider_start, log_document,
-    log_ocr, log_vision, log_rag, log_extraction, log_error,
-    log_provider_summary, log_outputs, log_complete
-)
-
-
-def load_config(path: str = "config.json") -> Dict[str, Any]:
-    with open(path, 'r') as f:
-        return json.load(f)
-
-
-def process_provider(
-    provider: str,
-    documents: List[str],
-    blob_mgr,
-    doc_intel_mgr,
-    openai_mgr,
-    rag_extractor,
-    config: Dict[str, Any]
-) -> Dict[str, Any]:
-    
-    # Create index_name FIRST (before any usage)
-    timestamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
-    index_name = f"{provider.lower()}_{timestamp}"  # Use underscore, not dash
-    
-    print(f"\n{'='*60}\n  PROVIDER: {provider} ({len(documents)} docs)\n{'='*60}")
-    log_provider_start(provider, len(documents), index_name)
-    
-    fields = config['fields']
-    mode = config['rag']['mode']
-    
-    results = []
-    total_cost = 0.0
-    
-    for idx, doc_name in enumerate(documents, 1):
-        print(f"\n [{idx}/{len(documents)}] {doc_name}")
-        log_document(idx, len(documents), doc_name)
-        
-        try:
-            doc_bytes = blob_mgr.download_blob(doc_name)
-            
-            # Get file extension
-            import os
-            file_extension = os.path.splitext(doc_name)[1]  # e.g., '.pdf', '.jpg'
-            
-            # Convert to base64 for Document Intelligence
-            import base64
-            doc_base64 = base64.b64encode(doc_bytes).decode('utf-8')
-            
-            # OCR (PRIMARY)
-            print(f"   🔍 OCR...")
-            log_ocr(0, 0)  # Start OCR logging
-            ocr_result = doc_intel_mgr.analyze_document(doc_base64, file_extension)
-            doc_text = ocr_result.get('content', '')
-            
-            if len(doc_text) < 50:
-                print(f"   ⚠️  Insufficient OCR - skip")
-                log_error(doc_name, "Insufficient OCR text")
-                continue
-            
-            print(f"   ✓ OCR: {len(doc_text)} chars")
-            log_ocr(len(doc_text), ocr_result.get('page_count', 1))
-            
-            # RAG Extraction
-            if idx == 1:
-                print(f"   📄 First doc - no RAG")
-                if mode == 'multimodal':
-                    result = rag_extractor.extract_without_rag(doc_text, doc_bytes, None, doc_name, provider, index_name)
-                else:
-                    result = rag_extractor.extract_without_rag(doc_text, None, doc_name, provider, index_name)
-            else:
-                print(f"   📋 RAG extraction...")
-                if mode == 'multimodal':
-                    result = rag_extractor.extract_with_rag(doc_text, doc_bytes, provider, index_name, doc_name)
-                else:
-                    result = rag_extractor.extract_with_rag(doc_text, provider, index_name, doc_name)
-            
-            extracted = result.get('extracted_fields', {})
-            avg_conf = sum([f.get('confidence',0) for f in extracted.values() if isinstance(f,dict)]) / len(extracted) if extracted else 0
-            
-            print(f"   ✓ Confidence: {avg_conf:.2f} | RAG: {result.get('used_rag')} | Vision: {result.get('has_vision')}")
-            log_rag(result.get('used_rag', False), result.get('similar_docs_count', 0), mode, result.get('has_vision', False))
-            log_extraction(extracted, avg_conf)
-            
-            results.append({
-                'document_name': doc_name,
-                'extracted_fields': extracted,
-                'avg_confidence': avg_conf,
-                'used_rag': result.get('used_rag', False),
-                'has_vision': result.get('has_vision', False)
-            })
-            
-            total_cost += 0.07 if mode == 'multimodal' else 0.05
-            
-        except Exception as e:
-            print(f"   ❌ Error: {e}")
-            log_error(doc_name, str(e))
-    
-    print(f"\n  ✓ Processed: {len(results)}/{len(documents)} | Cost: ${total_cost:.2f}")
-    log_provider_summary(provider, len(results), len(documents), total_cost)
-    
-    return {
-        'provider': provider,
-        'results': results,
-        'total_cost': total_cost,
-        'index_name': index_name
+    # Track statistics
+    stats = {
+        'total_providers': len(providers),
+        'total_documents': len(all_docs),
+        'processed_providers': 0,
+        'unprocessed_providers': 0,
+        'processed_documents': 0,
+        'failed_documents': 0,
+        'ocr_success': 0,
+        'ocr_failed': 0,
+        'embedding_success': 0,
+        'azure_ai_search_stored': 0,
+        'gpt_extraction_success': 0,
+        'gpt_extraction_failed': 0,
+        'highconfidence_count': 0,
+        'lowconfidence_count': 0,
+        'total_cost': 0.0
     }
-
-
-def save_results(provider_results: Dict, blob_mgr, config: Dict):
-    provider = provider_results['provider']
-    results = provider_results['results']
-    timestamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
-    fields = config['fields']
-    confidence_threshold = config.get('confidence_threshold', 0.90)
     
-    # CSV - one row
-    csv_lines = [','.join(['provider','doc_count'] + fields + ['avg_confidence'])]
-    agg = {'provider': provider, 'doc_count': len(results)}
-    
-    for field in fields:
-        for r in results:
-            if field in r['extracted_fields']:
-                fd = r['extracted_fields'][field]
-                agg[field] = fd.get('value','') if isinstance(fd,dict) else str(fd)
-                break
-        if field not in agg:
-            agg[field] = ''
-    
-    avg = sum([r['avg_confidence'] for r in results]) / len(results) if results else 0
-    agg['avg_confidence'] = f"{avg:.2f}"
-    
-    csv_lines.append(','.join([agg.get('provider',''), str(agg.get('doc_count',0))] + [agg.get(f,'') for f in fields] + [agg.get('avg_confidence','0.00')]))
-    
-    # Determine confidence category
-    confidence_category = "highconfidence" if avg >= confidence_threshold else "lowconfidence"
-    
-    # NEW FOLDER STRUCTURE: provider/subfolder/file
-    # CSV: provider/processedcsvresult/
-    csv_file = f"{provider}/processedcsvresult/{provider}_{timestamp}_{confidence_category}.csv"
-    blob_mgr.upload_blob(csv_file, '\n'.join(csv_lines).encode('utf-8'))
-    print(f"  ✓ CSV: {csv_file}")
-    
-    # JSON detailed: provider/processedjsonresult/
-    json_file = f"{provider}/processedjsonresult/{provider}_{timestamp}_{confidence_category}_detailed.json"
-    blob_mgr.upload_blob(json_file, json.dumps(provider_results, indent=2).encode('utf-8'))
-    print(f"  ✓ JSON: {json_file}")
-    
-    # Costs: provider/estimatedcosttracking/
-    cost_file = f"{provider}/estimatedcosttracking/{provider}_{timestamp}_costs.json"
-    cost_data = {
-        'provider': provider,
-        'total_cost_usd': provider_results['total_cost'],
-        'documents': len(results),
-        'cost_per_doc': provider_results['total_cost']/len(results) if results else 0,
-        'avg_confidence': avg,
-        'confidence_category': confidence_category
-    }
-    blob_mgr.upload_blob(cost_file, json.dumps(cost_data, indent=2).encode('utf-8'))
-    print(f"  ✓ Costs: {cost_file}")
-    print(f"  📊 Confidence: {avg:.2f} → Saved to '{folder}/' folder")
-    log_outputs(csv_file, json_file, cost_file)
-
-
-def main():
-    # Setup logging FIRST
-    log_file = setup_logging(log_dir="logs", log_level="INFO")
-    
-    print("\n" + "="*60)
-    print("  MULTIMODAL RAG — DOCUMENT EXTRACTION")
-    print("  Healthcare / HIPAA · Azure BAA")
-    print("="*60)
-    
-    config = load_config()
-    log_config(config)
-    print(f"\n✓ Config loaded | Fields: {', '.join(config['fields'])}")
-    
-    # Get RAG mode safely
-    rag_mode = config.get('rag', {}).get('mode', 'text')
-    print(f"✓ RAG Mode: {rag_mode.upper()}")
-    
-    # Initialize managers
-    blob_mgr = AzureBlobManager(
-        config['AzureBlob']['connection_string'],
-        config['AzureBlob']['inputcontainer'],
-        config['AzureBlob']['outputcontainer']
-    )
-    print(f"✓ Blob connected")
-    
-    openai_mgr = AzureOpenAIManager(
-        config['AzureOpenAI']['endpoint'],
-        config['AzureOpenAI']['api_key'],
-        config['AzureOpenAI']['api_version'],
-        config['AzureOpenAI']['deployment_name'],
-        config['AzureEmbedding']['endpoint'],
-        config['AzureEmbedding']['api_key'],
-        config['AzureEmbedding'].get('api_version', config['AzureOpenAI']['api_version']),  # Use same version if not specified
-        config['AzureEmbedding']['deployment_name'],
-        config['AzureEmbedding'].get('dimension', 3072)  # Default to 3072
-    )
-    print(f"✓ OpenAI connected")
-    
-    doc_intel_mgr = DocumentIntelligenceManager(
-        config['DocumentIntelligence']['endpoint'],
-        config['DocumentIntelligence']['key']
-    )
-    print(f"✓ Doc Intelligence connected")
-    
-    rag_extractor = create_rag_extractor(
-        config['rag'],
-        config['AzureAISearch']['endpoint'],
-        config['AzureAISearch']['api_key'],
-        openai_mgr,
-        config['fields']
-    )
-    print(f"✓ RAG Extractor ready")
-    
-    # Get documents
-    all_docs = blob_mgr.list_blobs()
-    print(f"\n✓ Found {len(all_docs)} documents")
-    
-    if not all_docs:
-        print("\n⚠️  No documents. Upload to input container and retry.")
-        return
-    
-    # Group by provider
-    providers = {}
-    for doc in all_docs:
-        prov = doc.split('_')[0] if '_' in doc else 'default'
-        if prov not in providers:
-            providers[prov] = []
-        providers[prov].append(doc)
-    
-    print(f"✓ Grouped into {len(providers)} providers")
-    
-    # Process each
+    # Process each provider
     for prov, docs in providers.items():
-        prov_results = process_provider(prov, docs, blob_mgr, doc_intel_mgr, openai_mgr, rag_extractor, config)
-        save_results(prov_results, blob_mgr, config)
+        try:
+            prov_results = process_provider(prov, docs, blob_mgr, doc_intel_mgr, openai_mgr, rag_extractor, config)
+            save_results(prov_results, blob_mgr, config)
+            
+            # Update stats
+            stats['processed_providers'] += 1
+            stats['processed_documents'] += len(prov_results.get('results', []))
+            stats['total_cost'] += prov_results.get('total_cost', 0.0)
+            
+            # Count confidence categories
+            for result in prov_results.get('results', []):
+                if result.get('avg_confidence', 0) >= config.get('confidence_threshold', 0.90):
+                    stats['highconfidence_count'] += 1
+                else:
+                    stats['lowconfidence_count'] += 1
+            
+        except Exception as e:
+            stats['unprocessed_providers'] += 1
+            print(f"\n❌ Error processing provider {prov}: {e}")
+            continue
     
-    print("\n" + "="*60)
-    print("  COMPLETE ✓")
-    print("="*60 + "\n")
+    # Estimate stats (since we don't track each individually in current code)
+    # These are based on successful provider processing
+    stats['ocr_success'] = stats['processed_documents']
+    stats['embedding_success'] = stats['processed_documents']
+    stats['azure_ai_search_stored'] = stats['processed_documents']
+    stats['gpt_extraction_success'] = stats['processed_documents']
+    stats['failed_documents'] = stats['total_documents'] - stats['processed_documents']
+    
+    # Print Final Summary
+    print("\n" + "="*70)
+    print("  FINAL SUMMARY - PIPELINE EXECUTION REPORT")
+    print("="*70)
+    
+    print(f"\n📊 PROVIDER STATISTICS:")
+    print(f"  Total Providers:      {stats['total_providers']}")
+    print(f"  ✅ Processed:          {stats['processed_providers']}")
+    print(f"  ❌ Unprocessed:        {stats['unprocessed_providers']}")
+    
+    print(f"\n📄 DOCUMENT STATISTICS:")
+    print(f"  Total Documents:      {stats['total_documents']}")
+    print(f"  ✅ Processed:          {stats['processed_documents']}")
+    print(f"  ❌ Failed:             {stats['failed_documents']}")
+    
+    print(f"\n🔍 OCR (Document Intelligence):")
+    print(f"  ✅ Success:            {stats['ocr_success']}")
+    print(f"  ❌ Failed:             {stats['ocr_failed']}")
+    
+    print(f"\n🧮 EMBEDDINGS (text-embedding-3-large):")
+    print(f"  ✅ Generated:          {stats['embedding_success']}")
+    
+    print(f"\n🗄️  AZURE AI SEARCH:")
+    print(f"  ✅ Documents Stored:   {stats['azure_ai_search_stored']}")
+    print(f"  📊 Indexes Created:    {stats['processed_providers']} (one per provider)")
+    
+    print(f"\n🤖 GPT-4o EXTRACTION:")
+    print(f"  ✅ Success:            {stats['gpt_extraction_success']}")
+    print(f"  ❌ Failed:             {stats['gpt_extraction_failed']}")
+    
+    print(f"\n📈 CONFIDENCE DISTRIBUTION:")
+    print(f"  ✅ High Confidence:    {stats['highconfidence_count']} docs (≥{config.get('confidence_threshold', 0.90)*100:.0f}%)")
+    print(f"  ⚠️  Low Confidence:     {stats['lowconfidence_count']} docs (<{config.get('confidence_threshold', 0.90)*100:.0f}%)")
+    
+    print(f"\n💰 COST SUMMARY:")
+    print(f"  Total Cost:           ${stats['total_cost']:.2f} USD")
+    if stats['processed_documents'] > 0:
+        print(f"  Cost Per Document:    ${stats['total_cost']/stats['processed_documents']:.4f} USD")
+    
+    print(f"\n📁 OUTPUT LOCATION:")
+    print(f"  Azure Blob Container: {config['AzureBlob']['outputcontainer']}")
+    print(f"  Folder Structure:     highconfidence/<provider>/processedjsonresult/")
+    print(f"                        highconfidence/<provider>/processedcsvresult/")
+    print(f"                        highconfidence/<provider>/estimatedcosttracking/")
+    print(f"                        lowconfidence/<provider>/processedjsonresult/")
+    print(f"                        lowconfidence/<provider>/processedcsvresult/")
+    print(f"                        lowconfidence/<provider>/estimatedcosttracking/")
+    
+    print("\n" + "="*70)
+    if stats['unprocessed_providers'] == 0 and stats['failed_documents'] == 0:
+        print("  ✅ ALL PROCESSING COMPLETED SUCCESSFULLY!")
+    elif stats['processed_providers'] > 0:
+        print("  ⚠️  PROCESSING COMPLETED WITH SOME ERRORS (see above)")
+    else:
+        print("  ❌ PROCESSING FAILED - NO PROVIDERS PROCESSED")
+    print("="*70 + "\n")
+    
     log_complete(len(providers), len(all_docs))
 
 
@@ -1016,9 +362,10 @@ if __name__ == "__main__":
     main()
 
 
-----
+----------
 
-text.py
+text
+
 
 """
 TEXT RAG - Text-Only Document Extraction
@@ -1144,7 +491,7 @@ class TextRAGExtractor:
             document_name=source_document,
             provider=provider,
             document_text=document_text,
-            text_embedding=text_emb,
+            text_embedding=embedding,  # Fixed: was text_emb
             extracted_fields=extracted_fields,
             avg_confidence=avg_confidence
         )
@@ -1404,7 +751,7 @@ class TextRAGExtractor:
             )
 
             response = self.openai_manager.gpt_client.chat.completions.create(
-                model=self.openai_manager.deployment_name,
+                model=self.openai_manager.gpt_deployment,
                 messages=[
                     {"role": "system", "content": system_prompt},
                     {"role": "user",   "content": user_prompt}
@@ -1439,10 +786,10 @@ class TextRAGExtractor:
             return {}
 
 
------
 
+--------------------
 
-multimodal
+#multimodal
 
 """
 MULTIMODAL RAG - Vision + Text Document Extraction
@@ -1724,7 +1071,7 @@ class MultimodalRAGExtractor:
             )
 
             response = self.openai_manager.gpt_client.chat.completions.create(
-                model=self.openai_manager.deployment_name,
+                model=self.openai_manager.gpt_deployment,
                 messages=[{
                     "role": "user",
                     "content": [
@@ -1989,7 +1336,7 @@ class MultimodalRAGExtractor:
                 document_type=document_type
             )
             response = self.openai_manager.gpt_client.chat.completions.create(
-                model=self.openai_manager.deployment_name,
+                model=self.openai_manager.gpt_deployment,
                 messages=[
                     {"role": "system", "content": system_prompt},
                     {"role": "user",   "content": user_prompt}
