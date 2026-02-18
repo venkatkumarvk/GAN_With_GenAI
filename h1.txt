@@ -1,0 +1,364 @@
+helper.py
+
+  """
+HELPER - Azure Service Managers
+================================
+Manages Azure Blob, OpenAI, Document Intelligence, AI Search
+"""
+
+from azure.storage.blob import BlobServiceClient
+from azure.ai.formrecognizer import DocumentAnalysisClient
+from azure.core.credentials import AzureKeyCredential
+from openai import AzureOpenAI
+from typing import List, Dict, Any
+import json
+
+
+class AzureBlobManager:
+    """Azure Blob Storage Manager"""
+    
+    def __init__(self, connection_string: str, input_container: str, output_container: str):
+        self.blob_service = BlobServiceClient.from_connection_string(connection_string)
+        self.input_container = input_container
+        self.output_container = output_container
+        
+        # Ensure containers exist
+        try:
+            self.blob_service.create_container(input_container)
+        except:
+            pass
+        try:
+            self.blob_service.create_container(output_container)
+        except:
+            pass
+    
+    def list_blobs(self) -> List[str]:
+        """List all blobs in input container"""
+        container_client = self.blob_service.get_container_client(self.input_container)
+        return [blob.name for blob in container_client.list_blobs()]
+    
+    def download_blob(self, blob_name: str) -> bytes:
+        """Download blob as bytes"""
+        blob_client = self.blob_service.get_blob_client(self.input_container, blob_name)
+        return blob_client.download_blob().readall()
+    
+    def upload_blob(self, blob_name: str, data: bytes, overwrite: bool = True):
+        """Upload blob to output container"""
+        blob_client = self.blob_service.get_blob_client(self.output_container, blob_name)
+        blob_client.upload_blob(data, overwrite=overwrite)
+
+
+class AzureOpenAIManager:
+    """Azure OpenAI Manager (GPT-4o + Embeddings)"""
+    
+    def __init__(
+        self,
+        endpoint: str,
+        api_key: str,
+        api_version: str,
+        deployment_name: str,
+        embedding_endpoint: str,
+        embedding_api_key: str,
+        embedding_deployment: str
+    ):
+        self.deployment_name = deployment_name
+        self.embedding_deployment = embedding_deployment
+        
+        # GPT-4o client
+        self.gpt_client = AzureOpenAI(
+            azure_endpoint=endpoint,
+            api_key=api_key,
+            api_version=api_version
+        )
+        
+        # Embedding client
+        self.embedding_client = AzureOpenAI(
+            azure_endpoint=embedding_endpoint,
+            api_key=embedding_api_key,
+            api_version=api_version
+        )
+        
+        # Token tracking
+        self.prompt_tokens = 0
+        self.completion_tokens = 0
+        self.total_tokens = 0
+    
+    def generate_embeddings(self, text: str) -> List[float]:
+        """Generate text embedding (3072 dims)"""
+        response = self.embedding_client.embeddings.create(
+            input=text,
+            model=self.embedding_deployment
+        )
+        return response.data[0].embedding
+
+
+class DocumentIntelligenceManager:
+    """Azure Document Intelligence Manager (OCR)"""
+    
+    def __init__(self, endpoint: str, key: str):
+        self.client = DocumentAnalysisClient(
+            endpoint=endpoint,
+            credential=AzureKeyCredential(key)
+        )
+    
+    def analyze_document(self, document_bytes: bytes) -> Dict[str, Any]:
+        """
+        Analyze document with OCR
+        Returns: {'content': 'extracted text', 'pages': [...]}
+        """
+        poller = self.client.begin_analyze_document(
+            "prebuilt-read",
+            document=document_bytes
+        )
+        result = poller.result()
+        
+        # Extract all text
+        content = result.content if hasattr(result, 'content') else ''
+        
+        # Extract pages
+        pages = []
+        if hasattr(result, 'pages'):
+            for page in result.pages:
+                pages.append({
+                    'page_number': page.page_number,
+                    'width': page.width,
+                    'height': page.height,
+                    'unit': page.unit
+                })
+        
+        return {
+            'content': content,
+            'pages': pages
+        }
+
+
+
+-------
+
+
+  main.py
+
+  """
+MAIN PIPELINE - Document Extraction with Multimodal RAG
+========================================================
+Entry point. Run: python main.py
+"""
+
+import json
+from datetime import datetime
+from typing import List, Dict, Any
+
+from helper import AzureBlobManager, AzureOpenAIManager, DocumentIntelligenceManager
+from unified_rag import create_rag_extractor
+
+
+def load_config(path: str = "config.json") -> Dict[str, Any]:
+    with open(path, 'r') as f:
+        return json.load(f)
+
+
+def process_provider(
+    provider: str,
+    documents: List[str],
+    blob_mgr,
+    doc_intel_mgr,
+    openai_mgr,
+    rag_extractor,
+    config: Dict[str, Any]
+) -> Dict[str, Any]:
+    
+    print(f"\n{'='*60}\n  PROVIDER: {provider} ({len(documents)} docs)\n{'='*60}")
+    
+    fields = config['fields']
+    mode = config['rag']['mode']
+    timestamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+    index_name = f"{provider.lower()}-{timestamp}"
+    
+    results = []
+    total_cost = 0.0
+    
+    for idx, doc_name in enumerate(documents, 1):
+        print(f"\n [{idx}/{len(documents)}] {doc_name}")
+        
+        try:
+            doc_bytes = blob_mgr.download_blob(doc_name)
+            
+            # OCR (PRIMARY)
+            print(f"   🔍 OCR...")
+            ocr_result = doc_intel_mgr.analyze_document(doc_bytes)
+            doc_text = ocr_result.get('content', '')
+            
+            if len(doc_text) < 50:
+                print(f"   ⚠️  Insufficient OCR - skip")
+                continue
+            
+            print(f"   ✓ OCR: {len(doc_text)} chars")
+            
+            # RAG Extraction
+            if idx == 1:
+                print(f"   📄 First doc - no RAG")
+                if mode == 'multimodal':
+                    result = rag_extractor.extract_without_rag(doc_text, doc_bytes, None, doc_name)
+                else:
+                    result = rag_extractor.extract_without_rag(doc_text, None, doc_name)
+            else:
+                print(f"   📋 RAG extraction...")
+                if mode == 'multimodal':
+                    result = rag_extractor.extract_with_rag(doc_text, doc_bytes, provider, index_name, doc_name)
+                else:
+                    result = rag_extractor.extract_with_rag(doc_text, provider, index_name, doc_name)
+            
+            extracted = result.get('extracted_fields', {})
+            avg_conf = sum([f.get('confidence',0) for f in extracted.values() if isinstance(f,dict)]) / len(extracted) if extracted else 0
+            
+            print(f"   ✓ Confidence: {avg_conf:.2f} | RAG: {result.get('used_rag')} | Vision: {result.get('has_vision')}")
+            
+            results.append({
+                'document_name': doc_name,
+                'extracted_fields': extracted,
+                'avg_confidence': avg_conf,
+                'used_rag': result.get('used_rag', False),
+                'has_vision': result.get('has_vision', False)
+            })
+            
+            total_cost += 0.07 if mode == 'multimodal' else 0.05
+            
+        except Exception as e:
+            print(f"   ❌ Error: {e}")
+    
+    print(f"\n  ✓ Processed: {len(results)}/{len(documents)} | Cost: ${total_cost:.2f}")
+    
+    return {
+        'provider': provider,
+        'results': results,
+        'total_cost': total_cost,
+        'index_name': index_name
+    }
+
+
+def save_results(provider_results: Dict, blob_mgr, config: Dict):
+    provider = provider_results['provider']
+    results = provider_results['results']
+    timestamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+    fields = config['fields']
+    
+    # CSV - one row
+    csv_lines = [','.join(['provider','doc_count'] + fields + ['avg_confidence'])]
+    agg = {'provider': provider, 'doc_count': len(results)}
+    
+    for field in fields:
+        for r in results:
+            if field in r['extracted_fields']:
+                fd = r['extracted_fields'][field]
+                agg[field] = fd.get('value','') if isinstance(fd,dict) else str(fd)
+                break
+        if field not in agg:
+            agg[field] = ''
+    
+    avg = sum([r['avg_confidence'] for r in results]) / len(results) if results else 0
+    agg['avg_confidence'] = f"{avg:.2f}"
+    
+    csv_lines.append(','.join([agg.get('provider',''), str(agg.get('doc_count',0))] + [agg.get(f,'') for f in fields] + [agg.get('avg_confidence','0.00')]))
+    
+    csv_file = f"{provider}_{timestamp}.csv"
+    blob_mgr.upload_blob(csv_file, '\n'.join(csv_lines).encode('utf-8'))
+    print(f"  ✓ CSV: {csv_file}")
+    
+    # JSON - detailed
+    json_file = f"{provider}_{timestamp}_detailed.json"
+    blob_mgr.upload_blob(json_file, json.dumps(provider_results, indent=2).encode('utf-8'))
+    print(f"  ✓ JSON: {json_file}")
+    
+    # Costs
+    cost_file = f"{provider}_{timestamp}_costs.json"
+    cost_data = {
+        'provider': provider,
+        'total_cost_usd': provider_results['total_cost'],
+        'documents': len(results),
+        'cost_per_doc': provider_results['total_cost']/len(results) if results else 0
+    }
+    blob_mgr.upload_blob(cost_file, json.dumps(cost_data, indent=2).encode('utf-8'))
+    print(f"  ✓ Costs: {cost_file}")
+
+
+def main():
+    print("\n" + "="*60)
+    print("  MULTIMODAL RAG — DOCUMENT EXTRACTION")
+    print("  Healthcare / HIPAA · Azure BAA")
+    print("="*60)
+    
+    config = load_config()
+    print(f"\n✓ Config loaded | Fields: {', '.join(config['fields'])}")
+    print(f"✓ RAG Mode: {config['rag']['mode'].upper()}")
+    
+    # Initialize managers
+    blob_mgr = AzureBlobManager(
+        config['AzureBlob']['connection_string'],
+        config['AzureBlob']['inputcontainer'],
+        config['AzureBlob']['outputcontainer']
+    )
+    print(f"✓ Blob connected")
+    
+    openai_mgr = AzureOpenAIManager(
+        config['AzureOpenAI']['endpoint'],
+        config['AzureOpenAI']['api_key'],
+        config['AzureOpenAI']['api_version'],
+        config['AzureOpenAI']['deployment_name'],
+        config['AzureEmbedding']['endpoint'],
+        config['AzureEmbedding']['api_key'],
+        config['AzureEmbedding']['deployment_name']
+    )
+    print(f"✓ OpenAI connected")
+    
+    doc_intel_mgr = DocumentIntelligenceManager(
+        config['DocumentIntelligence']['endpoint'],
+        config['DocumentIntelligence']['key']
+    )
+    print(f"✓ Doc Intelligence connected")
+    
+    rag_extractor = create_rag_extractor(
+        config['rag'],
+        config['AzureAISearch']['endpoint'],
+        config['AzureAISearch']['api_key'],
+        openai_mgr,
+        config['fields']
+    )
+    print(f"✓ RAG Extractor ready")
+    
+    # Get documents
+    all_docs = blob_mgr.list_blobs()
+    print(f"\n✓ Found {len(all_docs)} documents")
+    
+    if not all_docs:
+        print("\n⚠️  No documents. Upload to input container and retry.")
+        return
+    
+    # Group by provider
+    providers = {}
+    for doc in all_docs:
+        prov = doc.split('_')[0] if '_' in doc else 'default'
+        if prov not in providers:
+            providers[prov] = []
+        providers[prov].append(doc)
+    
+    print(f"✓ Grouped into {len(providers)} providers")
+    
+    # Process each
+    for prov, docs in providers.items():
+        prov_results = process_provider(prov, docs, blob_mgr, doc_intel_mgr, openai_mgr, rag_extractor, config)
+        save_results(prov_results, blob_mgr, config)
+    
+    print("\n" + "="*60)
+    print("  COMPLETE ✓")
+    print("="*60 + "\n")
+
+
+if __name__ == "__main__":
+    main()
+
+
+---------
+
+  
+
+  
