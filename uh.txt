@@ -1,3 +1,272 @@
+#main.py
+
+
+"""
+MAIN PIPELINE - Document Extraction with Multimodal RAG
+========================================================
+Entry point. Run: python main.py
+"""
+
+import json
+from datetime import datetime
+from typing import List, Dict, Any
+
+from helper import AzureBlobManager, AzureOpenAIManager, DocumentIntelligenceManager
+from unified_rag import create_rag_extractor
+from logging_config import (
+    setup_logging, log_config, log_provider_start, log_document,
+    log_ocr, log_vision, log_rag, log_extraction, log_error,
+    log_provider_summary, log_outputs, log_complete
+)
+
+
+def load_config(path: str = "config.json") -> Dict[str, Any]:
+    with open(path, 'r') as f:
+        return json.load(f)
+
+
+def process_provider(
+    provider: str,
+    documents: List[str],
+    blob_mgr,
+    doc_intel_mgr,
+    openai_mgr,
+    rag_extractor,
+    config: Dict[str, Any]
+) -> Dict[str, Any]:
+    
+    # Create index_name FIRST (before any usage)
+    timestamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+    index_name = f"{provider.lower()}_{timestamp}"  # Use underscore, not dash
+    
+    print(f"\n{'='*60}\n  PROVIDER: {provider} ({len(documents)} docs)\n{'='*60}")
+    log_provider_start(provider, len(documents), index_name)
+    
+    fields = config['fields']
+    mode = config['rag']['mode']
+    
+    results = []
+    total_cost = 0.0
+    
+    for idx, doc_name in enumerate(documents, 1):
+        print(f"\n [{idx}/{len(documents)}] {doc_name}")
+        log_document(idx, len(documents), doc_name)
+        
+        try:
+            doc_bytes = blob_mgr.download_blob(doc_name)
+            
+            # Get file extension
+            import os
+            file_extension = os.path.splitext(doc_name)[1]  # e.g., '.pdf', '.jpg'
+            
+            # Convert to base64 for Document Intelligence
+            import base64
+            doc_base64 = base64.b64encode(doc_bytes).decode('utf-8')
+            
+            # OCR (PRIMARY)
+            print(f"   🔍 OCR...")
+            log_ocr(0, 0)  # Start OCR logging
+            ocr_result = doc_intel_mgr.analyze_document(doc_base64, file_extension)
+            doc_text = ocr_result.get('content', '')
+            
+            if len(doc_text) < 50:
+                print(f"   ⚠️  Insufficient OCR - skip")
+                log_error(doc_name, "Insufficient OCR text")
+                continue
+            
+            print(f"   ✓ OCR: {len(doc_text)} chars")
+            log_ocr(len(doc_text), ocr_result.get('page_count', 1))
+            
+            # RAG Extraction
+            if idx == 1:
+                print(f"   📄 First doc - no RAG")
+                if mode == 'multimodal':
+                    result = rag_extractor.extract_without_rag(doc_text, doc_bytes, None, doc_name, provider, index_name)
+                else:
+                    result = rag_extractor.extract_without_rag(doc_text, None, doc_name, provider, index_name)
+            else:
+                print(f"   📋 RAG extraction...")
+                if mode == 'multimodal':
+                    result = rag_extractor.extract_with_rag(doc_text, doc_bytes, provider, index_name, doc_name)
+                else:
+                    result = rag_extractor.extract_with_rag(doc_text, provider, index_name, doc_name)
+            
+            extracted = result.get('extracted_fields', {})
+            avg_conf = sum([f.get('confidence',0) for f in extracted.values() if isinstance(f,dict)]) / len(extracted) if extracted else 0
+            
+            print(f"   ✓ Confidence: {avg_conf:.2f} | RAG: {result.get('used_rag')} | Vision: {result.get('has_vision')}")
+            log_rag(result.get('used_rag', False), result.get('similar_docs_count', 0), mode, result.get('has_vision', False))
+            log_extraction(extracted, avg_conf)
+            
+            results.append({
+                'document_name': doc_name,
+                'extracted_fields': extracted,
+                'avg_confidence': avg_conf,
+                'used_rag': result.get('used_rag', False),
+                'has_vision': result.get('has_vision', False)
+            })
+            
+            total_cost += 0.07 if mode == 'multimodal' else 0.05
+            
+        except Exception as e:
+            print(f"   ❌ Error: {e}")
+            log_error(doc_name, str(e))
+    
+    print(f"\n  ✓ Processed: {len(results)}/{len(documents)} | Cost: ${total_cost:.2f}")
+    log_provider_summary(provider, len(results), len(documents), total_cost)
+    
+    return {
+        'provider': provider,
+        'results': results,
+        'total_cost': total_cost,
+        'index_name': index_name
+    }
+
+
+def save_results(provider_results: Dict, blob_mgr, config: Dict):
+    provider = provider_results['provider']
+    results = provider_results['results']
+    timestamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+    fields = config['fields']
+    confidence_threshold = config.get('confidence_threshold', 0.90)
+    
+    # CSV - one row
+    csv_lines = [','.join(['provider','doc_count'] + fields + ['avg_confidence'])]
+    agg = {'provider': provider, 'doc_count': len(results)}
+    
+    for field in fields:
+        for r in results:
+            if field in r['extracted_fields']:
+                fd = r['extracted_fields'][field]
+                agg[field] = fd.get('value','') if isinstance(fd,dict) else str(fd)
+                break
+        if field not in agg:
+            agg[field] = ''
+    
+    avg = sum([r['avg_confidence'] for r in results]) / len(results) if results else 0
+    agg['avg_confidence'] = f"{avg:.2f}"
+    
+    csv_lines.append(','.join([agg.get('provider',''), str(agg.get('doc_count',0))] + [agg.get(f,'') for f in fields] + [agg.get('avg_confidence','0.00')]))
+    
+    # Determine confidence category
+    confidence_category = "highconfidence" if avg >= confidence_threshold else "lowconfidence"
+    
+    # NEW FOLDER STRUCTURE: provider/subfolder/file
+    # CSV: provider/processedcsvresult/
+    csv_file = f"{provider}/processedcsvresult/{provider}_{timestamp}_{confidence_category}.csv"
+    blob_mgr.upload_blob(csv_file, '\n'.join(csv_lines).encode('utf-8'))
+    print(f"  ✓ CSV: {csv_file}")
+    
+    # JSON detailed: provider/processedjsonresult/
+    json_file = f"{provider}/processedjsonresult/{provider}_{timestamp}_{confidence_category}_detailed.json"
+    blob_mgr.upload_blob(json_file, json.dumps(provider_results, indent=2).encode('utf-8'))
+    print(f"  ✓ JSON: {json_file}")
+    
+    # Costs: provider/estimatedcosttracking/
+    cost_file = f"{provider}/estimatedcosttracking/{provider}_{timestamp}_costs.json"
+    cost_data = {
+        'provider': provider,
+        'total_cost_usd': provider_results['total_cost'],
+        'documents': len(results),
+        'cost_per_doc': provider_results['total_cost']/len(results) if results else 0,
+        'avg_confidence': avg,
+        'confidence_category': confidence_category
+    }
+    blob_mgr.upload_blob(cost_file, json.dumps(cost_data, indent=2).encode('utf-8'))
+    print(f"  ✓ Costs: {cost_file}")
+    print(f"  📊 Confidence: {avg:.2f} → Category: {confidence_category}")
+    log_outputs(csv_file, json_file, cost_file)
+
+
+def main():
+    # Setup logging FIRST
+    log_file = setup_logging(log_dir="logs", log_level="INFO")
+    
+    print("\n" + "="*60)
+    print("  MULTIMODAL RAG — DOCUMENT EXTRACTION")
+    print("  Healthcare / HIPAA · Azure BAA")
+    print("="*60)
+    
+    config = load_config()
+    log_config(config)
+    print(f"\n✓ Config loaded | Fields: {', '.join(config['fields'])}")
+    
+    # Get RAG mode safely
+    rag_mode = config.get('rag', {}).get('mode', 'text')
+    print(f"✓ RAG Mode: {rag_mode.upper()}")
+    
+    # Initialize managers
+    blob_mgr = AzureBlobManager(
+        config['AzureBlob']['connection_string'],
+        config['AzureBlob']['inputcontainer'],
+        config['AzureBlob']['outputcontainer']
+    )
+    print(f"✓ Blob connected")
+    
+    openai_mgr = AzureOpenAIManager(
+        config['AzureOpenAI']['endpoint'],
+        config['AzureOpenAI']['api_key'],
+        config['AzureOpenAI']['api_version'],
+        config['AzureOpenAI']['deployment_name'],
+        config['AzureEmbedding']['endpoint'],
+        config['AzureEmbedding']['api_key'],
+        config['AzureEmbedding'].get('api_version', config['AzureOpenAI']['api_version']),  # Use same version if not specified
+        config['AzureEmbedding']['deployment_name'],
+        config['AzureEmbedding'].get('dimension', 3072)  # Default to 3072
+    )
+    print(f"✓ OpenAI connected")
+    
+    doc_intel_mgr = DocumentIntelligenceManager(
+        config['DocumentIntelligence']['endpoint'],
+        config['DocumentIntelligence']['key']
+    )
+    print(f"✓ Doc Intelligence connected")
+    
+    rag_extractor = create_rag_extractor(
+        config['rag'],
+        config['AzureAISearch']['endpoint'],
+        config['AzureAISearch']['api_key'],
+        openai_mgr,
+        config['fields']
+    )
+    print(f"✓ RAG Extractor ready")
+    
+    # Get documents
+    all_docs = blob_mgr.list_blobs()
+    print(f"\n✓ Found {len(all_docs)} documents")
+    
+    if not all_docs:
+        print("\n⚠️  No documents. Upload to input container and retry.")
+        return
+    
+    # Group by provider
+    providers = {}
+    for doc in all_docs:
+        prov = doc.split('_')[0] if '_' in doc else 'default'
+        if prov not in providers:
+            providers[prov] = []
+        providers[prov].append(doc)
+    
+    print(f"✓ Grouped into {len(providers)} providers")
+    
+    # Process each
+    for prov, docs in providers.items():
+        prov_results = process_provider(prov, docs, blob_mgr, doc_intel_mgr, openai_mgr, rag_extractor, config)
+        save_results(prov_results, blob_mgr, config)
+    
+    print("\n" + "="*60)
+    print("  COMPLETE ✓")
+    print("="*60 + "\n")
+    log_complete(len(providers), len(all_docs))
+
+
+if __name__ == "__main__":
+    main()
+
+----
+
+
+
 #doc
 
 """
