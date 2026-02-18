@@ -1,4 +1,4 @@
-#main
+main
 
 """
 MAIN PIPELINE - Document Extraction with Multimodal RAG
@@ -66,11 +66,19 @@ def process_provider(
             print(f"   🔍 OCR...")
             log_ocr(0, 0)  # Start OCR logging
             ocr_result = doc_intel_mgr.analyze_document(doc_base64, file_extension)
+            
+            # Check if OCR was successful
+            if not ocr_result.get('success', False):
+                print(f"   ❌ OCR failed: {ocr_result.get('error', 'Unknown error')}")
+                log_error(doc_name, f"OCR failed: {ocr_result.get('error', 'Unknown error')}")
+                continue
+            
             doc_text = ocr_result.get('content', '')
             
-            if len(doc_text) < 50:
-                print(f"   ⚠️  Insufficient OCR - skip")
-                log_error(doc_name, "Insufficient OCR text")
+            # Lower threshold to 10 chars (allow photos with minimal text)
+            if len(doc_text) < 10:
+                print(f"   ⚠️  Insufficient OCR ({len(doc_text)} chars) - skip")
+                log_error(doc_name, f"Insufficient OCR text: {len(doc_text)} chars")
                 continue
             
             print(f"   ✓ OCR: {len(doc_text)} chars")
@@ -241,7 +249,32 @@ def main():
     # Group by provider
     providers = {}
     for doc in all_docs:
-        prov = doc.split('_')[0] if '_' in doc else 'default'
+        # Try multiple provider detection methods:
+        # 1. If has folder: "ProviderA/file.pdf" → ProviderA
+        # 2. If has underscore: "ProviderA_file.pdf" → ProviderA
+        # 3. If has comma: "LASTNAME, FIRSTNAME/file.pdf" → LASTNAME_FIRSTNAME
+        # 4. Otherwise: Use first part before space or dot
+        
+        if '/' in doc:
+            # Has folder path
+            prov = doc.split('/')[0]
+        elif '_' in doc:
+            # Has underscore
+            prov = doc.split('_')[0]
+        else:
+            # Use filename before first space or dot
+            base = doc.split('.')[0]  # Remove extension
+            prov = base.split()[0] if ' ' in base else base
+        
+        # Sanitize provider name (Azure AI Search index name compatible)
+        # Index names: lowercase letters, digits, dash (no underscore at start/end)
+        import re
+        prov = re.sub(r'[^a-zA-Z0-9\-]', '', prov.lower())  # Remove invalid chars
+        prov = prov.strip('-')  # Remove leading/trailing dashes
+        
+        if not prov:
+            prov = 'unknown'
+        
         if prov not in providers:
             providers[prov] = []
         providers[prov].append(doc)
@@ -362,10 +395,9 @@ if __name__ == "__main__":
     main()
 
 
-----------
+----
 
-text
-
+#text
 
 """
 TEXT RAG - Text-Only Document Extraction
@@ -637,7 +669,25 @@ class TextRAGExtractor:
                 credential=self.search_credential
             )
             
-            doc_id = f"{provider}_{document_name}".replace('.', '_').replace('/', '_').replace('-', '_')[:512]
+            # Generate document ID for Azure AI Search
+            # LONG-TERM SOLUTION: Use hash of original filename
+            # This way:
+            # 1. Original filename preserved in metadata
+            # 2. Document ID is always valid (hash is alphanumeric)
+            # 3. No future errors from new special characters
+            # 4. Consistent and deterministic
+            
+            import hashlib
+            
+            # Create hash from provider + document name (deterministic)
+            unique_string = f"{provider}_{document_name}"
+            hash_value = hashlib.sha256(unique_string.encode()).hexdigest()[:32]  # 32 chars
+            
+            # Document ID: hash only (always valid!)
+            doc_id = f"{provider}_{hash_value}"
+            
+            # Store original filename separately in document metadata
+            # This is returned in search results and stored in JSON
             
             document = {
                 "id": doc_id,
@@ -786,8 +836,7 @@ class TextRAGExtractor:
             return {}
 
 
-
---------------------
+----
 
 #multimodal
 
@@ -1234,7 +1283,25 @@ class MultimodalRAGExtractor:
                 credential=self.search_credential
             )
             
-            doc_id = f"{provider}_{document_name}".replace('.', '_').replace('/', '_').replace('-', '_')[:512]
+            # Generate document ID for Azure AI Search
+            # LONG-TERM SOLUTION: Use hash of original filename
+            # This way:
+            # 1. Original filename preserved in metadata
+            # 2. Document ID is always valid (hash is alphanumeric)
+            # 3. No future errors from new special characters
+            # 4. Consistent and deterministic
+            
+            import hashlib
+            
+            # Create hash from provider + document name (deterministic)
+            unique_string = f"{provider}_{document_name}"
+            hash_value = hashlib.sha256(unique_string.encode()).hexdigest()[:32]  # 32 chars
+            
+            # Document ID: hash only (always valid!)
+            doc_id = f"{provider}_{hash_value}"
+            
+            # Store original filename separately in document metadata
+            # This is returned in search results and stored in JSON
             
             document = {
                 "id": doc_id,
@@ -1368,3 +1435,4 @@ class MultimodalRAGExtractor:
         except json.JSONDecodeError as e:
             logger.error(f"JSON parse error: {e} | text: {text[:300]}")
             return {}
+
