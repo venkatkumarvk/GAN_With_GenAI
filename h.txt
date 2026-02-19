@@ -236,19 +236,21 @@ def main():
         print(f"Provider ID: {provider_id}")
         print(f"{'='*80}")
         
-        # Create/get index - USE SINGLE INDEX PER PROVIDER (reuse if exists)
+        # Use SINGLE PERMANENT INDEX per provider (NO timestamp, NO cleanup needed!)
+        # Example: "arlenfern_index" - same index used every time for this provider
         index_name = provider_name.lower().replace(' ', '_').replace('-', '_')
         index_name = ''.join(c for c in index_name if c.isalnum() or c == '_')
-        index_name = f"{index_name}_documents"  # e.g., arlenfern_documents
+        index_name = f"{index_name}_index"  # e.g., arlenfern_index
         
-        # Only create if doesn't exist (avoid quota issues)
+        print(f"\n📊 Azure AI Search Index: {index_name}")
+        
+        # Create index if doesn't exist, reuse if exists
         try:
-            # Try to create index (will skip if already exists in Azure AI Search)
             search_manager.create_index(index_name)
-            print(f"✓ Azure AI Search index ready: {index_name}")
+            print(f"   ✓ Index ready (created or reused)\n")
         except Exception as e:
-            if "already exists" in str(e).lower() or "quota" in str(e).lower():
-                print(f"✓ Using existing index: {index_name}")
+            if "already exists" in str(e).lower():
+                print(f"   ✓ Using existing index\n")
             else:
                 logger.error(f"Index error: {e}")
                 raise
@@ -404,18 +406,32 @@ def main():
             'extraction_datetime': extraction_datetime
         }
         
-        # Get first successful extraction values for each field
+        # Get HIGHEST CONFIDENCE extraction for each field (not just first!)
         for field in fields:
+            best_result = None
+            best_confidence = -1
+            
+            # Find result with highest confidence for this field
             for r in results:
                 if field in r['extracted_fields']:
                     fd = r['extracted_fields'][field]
                     if isinstance(fd, dict):
-                        csv_data[field] = fd.get('value', '')
-                        csv_data[f"{field}_confidence"] = f"{fd.get('confidence', 0.0):.2f}"
-                        csv_data[f"{field}_source_document"] = r.get('document_name', '')
-                        break
-            # If field not found, set empty
-            if field not in csv_data:
+                        conf = fd.get('confidence', 0.0)
+                        if conf > best_confidence:
+                            best_confidence = conf
+                            best_result = {
+                                'value': fd.get('value', ''),
+                                'confidence': conf,
+                                'document': r.get('document_name', '')
+                            }
+            
+            # Use best result (highest confidence)
+            if best_result:
+                csv_data[field] = best_result['value']
+                csv_data[f"{field}_confidence"] = f"{best_result['confidence']:.2f}"
+                csv_data[f"{field}_source_document"] = best_result['document']
+            else:
+                # If field not found in any document
                 csv_data[field] = ''
                 csv_data[f"{field}_confidence"] = '0.00'
                 csv_data[f"{field}_source_document"] = ''
