@@ -436,37 +436,24 @@ class AzureAISearchManager:
         
         return index_name
 
-    def create_index(self, provider: str, embedding_dimension: int = 3072, timestamp: str = None):
+    def create_index(self, index_name: str, embedding_dimension: int = 3072):
         """
         Create search index with vector field and all required fields
         
         Args:
-            provider: Provider name
+            index_name: Full index name (e.g., "anand_emp001_20260219_index")
             embedding_dimension: Vector dimension (default 3072)
-            timestamp: Optional timestamp for unique index name (YYYYMMDD_HHMMSS)
         """
-        index_name = self.get_index_name(provider, timestamp)
-        
         logger.info(f"Creating index '{index_name}' with vector dimension {embedding_dimension}")
         
         # Define fields including vector field using SearchField
         fields = [
             SimpleField(name="id", type=SearchFieldDataType.String, key=True),
-            SearchableField(name="provider_id", type=SearchFieldDataType.String, filterable=True, sortable=True),
             SearchableField(name="provider", type=SearchFieldDataType.String, filterable=True),
             SearchableField(name="document_name", type=SearchFieldDataType.String, filterable=True),
-            SimpleField(name="document_type", type=SearchFieldDataType.String, filterable=True),
-            SimpleField(name="file_extension", type=SearchFieldDataType.String, filterable=True),
             SearchableField(name="content", type=SearchFieldDataType.String),
             SimpleField(name="page_count", type=SearchFieldDataType.Int32, filterable=True),
-            SimpleField(name="total_documents", type=SearchFieldDataType.Int32, filterable=True),
-            SimpleField(name="extraction_datetime", type=SearchFieldDataType.String, sortable=True),
             SearchableField(name="extracted_fields", type=SearchFieldDataType.String),
-            SimpleField(name="avg_confidence", type=SearchFieldDataType.Double, filterable=True, sortable=True),
-            # MULTIMODAL FIELDS
-            SearchableField(name="visual_description", type=SearchFieldDataType.String),
-            SimpleField(name="is_multimodal", type=SearchFieldDataType.Boolean, filterable=True),
-            SimpleField(name="modality", type=SearchFieldDataType.String, filterable=True),
             # CRITICAL: Use SearchField for vector field
             SearchField(
                 name="content_vector",
@@ -487,7 +474,7 @@ class AzureAISearchManager:
         index = SearchIndex(name=index_name, fields=fields, vector_search=vector_search)
         self.index_client.create_or_update_index(index)
         
-        logger.info(f"Index '{index_name}' created successfully with multimodal fields")
+        logger.info(f"Index '{index_name}' created successfully")
         return index_name
 
     def upload_document(
@@ -590,7 +577,10 @@ class AzureAISearchManager:
             raise
 
 
-------
+-----
+
+Main.py
+
 
 """
 MAIN PIPELINE - COMPLETE AZURE RAG DOCUMENT EXTRACTION
@@ -883,7 +873,7 @@ def main():
         
         # Create index if doesn't exist, reuse if exists
         try:
-            search_manager.create_index(index_name)
+            search_manager.create_index(index_name, embedding_dimension=embedding_config['dimension'])
             print(f"    Index ready (created or reused)\n")
         except Exception as e:
             if "already exists" in str(e).lower():
