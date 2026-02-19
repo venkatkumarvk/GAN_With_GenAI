@@ -25,6 +25,7 @@ from helper import (
 # Note: No separate OCR import needed - using DocumentIntelligenceManager from helper
 from text_rag import TextRAGExtractor
 from multimodal_rag import MultimodalRAGExtractor
+from unified_rag import UnifiedRAGExtractor
 from costtracking import CostTracker
 
 # Setup logging
@@ -139,6 +140,7 @@ def main():
     
     fields = cfg.get("fields")
     confidence_threshold = cfg.get("confidence_threshold")
+    min_text_length = cfg.get("min_text_length", 50)  # Default 50 chars
     rag_config = cfg.get("rag")
     costs_config = cfg.get("costs")
     
@@ -150,6 +152,7 @@ def main():
     print(f"  Mode: {mode}")
     print(f"  Fields: {', '.join(fields)}")
     print(f"  Confidence Threshold: {confidence_threshold} ({int(confidence_threshold*100)}%)")
+    print(f"  Min Text Length: {min_text_length} chars (skip shorter documents)")
     print(f"  RAG: top_k={top_k}, similarity={similarity_threshold}")
     
     # Initialize Azure services
@@ -276,6 +279,7 @@ def main():
                 raise
         
         results = []
+        skipped_docs = []  # Track skipped documents
         
         # Process each document
         for idx, blob_path in enumerate(provider_docs, 1):
@@ -300,18 +304,30 @@ def main():
                 document_text = ocr_result.get('text') or ocr_result.get('content', '')
                 
                 if not document_text:
-                    print(f"   ❌ No text extracted from document")
-                    logger.warning(f"No text extracted from {doc_name}")
+                    print(f"   ⚠️  No text extracted - skipping (likely portrait photo or blank page)")
+                    logger.warning(f"No text extracted from {doc_name} - skipped")
                     continue
                 
                 pages = ocr_result.get('page_count', 1) or ocr_result.get('pages', 1)
+                text_length = len(document_text.strip())
                 
-                print(f"   🔍 OCR: {len(document_text)} chars | {pages} page(s) | {file_extension}")
+                print(f"   🔍 OCR: {text_length} chars | {pages} page(s) | {file_extension}")
                 
-                if len(document_text) < 10:
-                    print(f"   ⚠️  OCR text too short ({len(document_text)} chars), skipping")
+                # Smart skip: Ignore photos with minimal text (portraits, blank pages, etc.)
+                if text_length < min_text_length:
+                    print(f"   ⚠️  Text too short ({text_length} chars < {min_text_length})")
+                    print(f"   ⏭️  SKIPPED - Not uploaded to Azure AI Search")
+                    logger.info(f"Skipped {doc_name} - insufficient text ({text_length} chars)")
+                    skipped_docs.append({
+                        'document_name': doc_name,
+                        'reason': 'insufficient_text',
+                        'text_length': text_length,
+                        'min_required': min_text_length
+                    })
                     continue
                 
+                # Document has sufficient text - proceed with processing
+                print(f"   ✓ Sufficient text detected - proceeding with extraction")
                 # Step 2: Generate embeddings
                 embedding = openai_manager.generate_embeddings(document_text)
                 print(f"   📊 Embedding: {len(embedding)} dims")
@@ -409,6 +425,17 @@ def main():
             category = "highconfidence"
         else:
             category = "lowconfidence"
+        
+        print(f"\n📊 PROCESSING SUMMARY:")
+        print(f"   Total Files: {len(provider_docs)}")
+        print(f"   Processed: {len(results)}")
+        print(f"   Skipped: {len(skipped_docs)}")
+        if skipped_docs:
+            print(f"   Skipped Reasons:")
+            for skip in skipped_docs[:5]:  # Show first 5
+                print(f"     • {skip['document_name']}: {skip['text_length']} chars (< {skip['min_required']})")
+            if len(skipped_docs) > 5:
+                print(f"     • ... and {len(skipped_docs)-5} more")
         
         print(f"\n📊 CONFIDENCE ANALYSIS:")
         print(f"   Min Confidence: {min_conf:.2f}")
@@ -538,8 +565,7 @@ if __name__ == "__main__":
     main()
 
 
-
------
+------
 
 helper.py
 
