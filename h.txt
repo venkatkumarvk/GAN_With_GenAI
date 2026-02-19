@@ -1,4 +1,347 @@
 """
+FIELD CONFIGURATIONS FOR DOCUMENT EXTRACTION
+============================================
+
+USERS: Edit this file to add/modify field configurations
+DEVELOPERS: Don't edit this file - edit prompt_builder.py instead
+
+To add a new field:
+1. Add field name to config.json
+2. Add field configuration below in FIELD_LIBRARY
+3. Run main.py - that's it!
+"""
+
+# ============================================================================
+# FIELD LIBRARY - EDIT THIS TO ADD/MODIFY FIELDS
+# ============================================================================
+
+FIELD_LIBRARY = {
+    "name": {
+        "description": "Full name as it appears on the document",
+        "examples": ["JOHN MICHAEL DOE", "Jane Smith", "李明"],
+        "format": "First Middle Last or Last First format",
+        "extraction_hints": [
+            "May be split across multiple lines",
+            "Check for 'Surname' and 'Given Names' labels",
+            "Look for 'Full Name' or 'Name of Holder' sections"
+        ],
+        "confidence_factors": [
+            "Clear text with proper spacing",
+            "Consistent formatting across document",
+            "Matches expected name pattern"
+        ]
+    },
+    
+    "passport_number": {
+        "description": "Official passport identification number",
+        "examples": ["AB123456", "P12345678", "N1234567890"],
+        "format": "Alphanumeric, typically 7-10 characters",
+        "extraction_hints": [
+            "Usually labeled 'Passport No.', 'No. du Passeport'",
+            "May appear multiple times (bio page and MRZ)",
+            "Verify against MRZ if present"
+        ],
+        "confidence_factors": [
+            "Clearly labeled as passport number",
+            "Matches expected format for issuing country",
+            "No OCR errors visible"
+        ]
+    },
+    
+    "date_of_birth": {
+        "description": "Person's date of birth",
+        "examples": ["15 JAN 1985", "1985-01-15", "01/15/1985"],
+        "format": "Various date formats (DD MMM YYYY, YYYY-MM-DD, MM/DD/YYYY)",
+        "extraction_hints": [
+            "Look for 'Date of Birth', 'DOB', 'Born'",
+            "May be in different formats based on country",
+            "Cross-check with MRZ if available"
+        ],
+        "confidence_factors": [
+            "Date is clearly labeled",
+            "Consistent with other documents",
+            "Reasonable age range"
+        ]
+    },
+    
+    "nationality": {
+        "description": "Country of citizenship",
+        "examples": ["USA", "United States of America", "GBR", "United Kingdom"],
+        "format": "Full country name or ISO 3166-1 alpha-3 code",
+        "extraction_hints": [
+            "Look for 'Nationality', 'Country', 'País'",
+            "May match issuing country",
+            "Can be in native language or English"
+        ],
+        "confidence_factors": [
+            "Clearly stated on document",
+            "Matches document issuing country",
+            "Valid country name/code"
+        ]
+    },
+    
+    "issue_date": {
+        "description": "Date when document was issued",
+        "examples": ["01 MAR 2020", "2020-03-01", "March 1, 2020"],
+        "format": "Various date formats accepted",
+        "extraction_hints": [
+            "Look for 'Date of Issue', 'Issued', 'Date délivrance'",
+            "Should be in the past",
+            "Usually 10 years before expiry for passports"
+        ],
+        "confidence_factors": [
+            "Clearly labeled as issue date",
+            "Before expiry date",
+            "Reasonable time frame"
+        ]
+    },
+    
+    "expiry_date": {
+        "description": "Date when document expires",
+        "examples": ["01 MAR 2030", "2030-03-01", "March 1, 2030"],
+        "format": "Various date formats accepted",
+        "extraction_hints": [
+            "Look for 'Date of Expiry', 'Valid Until', 'Expiry'",
+            "Usually 10 years after issue for passports",
+            "May be emphasized or highlighted"
+        ],
+        "confidence_factors": [
+            "Clearly labeled as expiry date",
+            "After issue date",
+            "Standard validity period"
+        ]
+    },
+    
+    "id_number": {
+        "description": "National ID card number",
+        "examples": ["ID123456789", "987654321", "AB-1234567"],
+        "format": "Varies by country, may be alphanumeric",
+        "extraction_hints": [
+            "Look for 'ID Number', 'Identity Number', 'National ID'",
+            "Format varies significantly by country",
+            "Usually prominently displayed"
+        ],
+        "confidence_factors": [
+            "Clearly labeled",
+            "Matches expected format for country",
+            "No OCR errors visible"
+        ]
+    },
+    
+    "license_number": {
+        "description": "Driver's license number",
+        "examples": ["DL123456", "A1234567890123", "AB-123-456"],
+        "format": "Varies by state/country, alphanumeric",
+        "extraction_hints": [
+            "Look for 'License Number', 'DL No.', 'Permit Number'",
+            "Format varies by state/country",
+            "Often has specific pattern based on issuing region"
+        ],
+        "confidence_factors": [
+            "Clearly labeled",
+            "Matches known format for jurisdiction",
+            "Consistent length and pattern"
+        ]
+    },
+    
+    "address": {
+        "description": "Full residential address",
+        "examples": [
+            "123 Main Street, New York, NY 10001",
+            "Flat 5, 10 Downing Street, London",
+            "北京市朝阳区建国路1号"
+        ],
+        "format": "Street, City, State/Province, Postal Code",
+        "extraction_hints": [
+            "May span multiple lines",
+            "Look for 'Address', 'Residence', 'Domicile'",
+            "Can be in various formats based on country"
+        ],
+        "confidence_factors": [
+            "Clearly labeled as address",
+            "Complete address components",
+            "Proper formatting"
+        ]
+    },
+    
+    "place_of_birth": {
+        "description": "Location where person was born",
+        "examples": ["New York, USA", "London, United Kingdom", "Paris, France"],
+        "format": "City, Country or City, State, Country",
+        "extraction_hints": [
+            "Look for 'Place of Birth', 'Born in', 'Lieu de naissance'",
+            "Usually city and country",
+            "Can be in native language"
+        ],
+        "confidence_factors": [
+            "Clearly labeled",
+            "Valid location name",
+            "Consistent format"
+        ]
+    },
+    
+    "sex": {
+        "description": "Biological sex or gender",
+        "examples": ["M", "F", "Male", "Female"],
+        "format": "Usually M/F or Male/Female",
+        "extraction_hints": [
+            "Look for 'Sex', 'Gender', 'Sexe'",
+            "Usually single letter (M/F)",
+            "Check MRZ for verification"
+        ],
+        "confidence_factors": [
+            "Clearly labeled",
+            "Standard format",
+            "Unambiguous"
+        ]
+    },
+    
+    # ========================================================================
+    # ADD YOUR CUSTOM FIELDS BELOW
+    # ========================================================================
+    # 
+    # Template:
+    # "your_field_name": {
+    #     "description": "Brief description of what this field is",
+    #     "examples": ["Example 1", "Example 2", "Example 3"],
+    #     "format": "Expected format description",
+    #     "extraction_hints": [
+    #         "Hint 1: What to look for",
+    #         "Hint 2: Common labels",
+    #         "Hint 3: Special considerations"
+    #     ],
+    #     "confidence_factors": [
+    #         "Factor 1: When to be confident",
+    #         "Factor 2: What increases confidence",
+    #         "Factor 3: What confirms correctness"
+    #     ]
+    # },
+}
+
+
+# ============================================================================
+# SYSTEM PROMPT CONFIGURATION
+# ============================================================================
+
+SYSTEM_PROMPT_CONFIG = {
+    "role": "You are an expert document extraction system specialized in identity documents, passports, licenses, and official records.",
+    
+    "extraction_rules": [
+        "THINK STEP-BY-STEP before extracting each field:",
+        "  Step 1: Identify where this field typically appears",
+        "  Step 2: Look for the field label (e.g., 'Name:', 'Nationality:')",
+        "  Step 3: Extract the value immediately after or near the label",
+        "  Step 4: Verify the format matches expected pattern",
+        "  Step 5: Assign confidence based on clarity and format match",
+        "",
+        "Extract EXACT values as they appear in the document",
+        "For each field, provide: value (extracted text or empty string) and confidence (0.0 to 1.0)",
+        "Use similar document examples to understand field patterns",
+        "If a field is not present, return empty string for value and 0.0 for confidence",
+        "Be conservative with confidence scores - only use >0.9 when certain"
+    ],
+    
+    "confidence_guide": {
+        "0.95-1.0": "Crystal clear text, perfect format match, verified with examples",
+        "0.80-0.94": "Clear text but format slightly different from examples",
+        "0.60-0.79": "Readable text but some uncertainty in interpretation",
+        "0.40-0.59": "Partially visible or format doesn't match expectations",
+        "0.20-0.39": "Very uncertain, possibly OCR error",
+        "0.0-0.19": "Field not found or completely illegible"
+    },
+    
+    "output_format": 'Return ONLY a JSON object: {"field_name": {"value": "...", "confidence": 0.95}, ...}',
+    
+    "restrictions": "Do NOT include any explanations, markdown formatting, or additional text. Just the pure JSON object."
+}
+
+
+# ============================================================================
+# DOCUMENT TYPE SPECIFIC HINTS
+# ============================================================================
+
+DOCUMENT_TYPE_HINTS = {
+    "passport": {
+        "title": "PASSPORT DOCUMENT EXTRACTION",
+        "special_considerations": [
+            "Passport numbers may include letters and numbers",
+            "Dates are often in DD MMM YYYY format (e.g., 15 JAN 1990)",
+            "Look for MRZ (Machine Readable Zone) at bottom",
+            "Names may be split (Surname / Given Names)"
+        ]
+    },
+    
+    "license": {
+        "title": "DRIVER'S LICENSE EXTRACTION",
+        "special_considerations": [
+            "License numbers vary by state/country",
+            "May contain multiple date fields",
+            "Address may span multiple lines",
+            "License class indicates vehicle types"
+        ]
+    },
+    
+    "id_card": {
+        "title": "ID CARD EXTRACTION",
+        "special_considerations": [
+            "ID formats vary significantly by country",
+            "May have both front and back text",
+            "Look for official stamps or holograms",
+            "National ID numbers follow country-specific patterns"
+        ]
+    }
+}
+
+
+# ============================================================================
+# RAG PROMPT TEMPLATES
+# ============================================================================
+
+RAG_PROMPT_TEMPLATE = {
+    "intro": "FEW-SHOT LEARNING: Study these {num_docs} similar documents carefully. They show you EXACTLY how to extract fields from this type of document.",
+    
+    "example_header": "═══════════════════════════════════════════════════════════\nREFERENCE EXAMPLES (Learn the pattern):\n═══════════════════════════════════════════════════════════",
+    
+    "transition": "\n═══════════════════════════════════════════════════════════\nNOW APPLY WHAT YOU LEARNED TO THIS NEW DOCUMENT:\n═══════════════════════════════════════════════════════════\n",
+    
+    "instructions": [
+        "STEP-BY-STEP EXTRACTION PROCESS:",
+        "",
+        "1. OBSERVE the examples above:",
+        "   - Notice WHERE each field appears in the document",
+        "   - See HOW the field is labeled",
+        "   - Understand the EXPECTED FORMAT",
+        "",
+        "2. FIND the same patterns in the new document:",
+        "   - Look for similar labels",
+        "   - Check similar locations",
+        "   - Match the format",
+        "",
+        "3. EXTRACT with confidence:",
+        "   - If it matches examples perfectly → confidence 0.95-1.0",
+        "   - If it matches but format differs slightly → confidence 0.80-0.94",
+        "   - If uncertain or unclear → confidence <0.80",
+        "",
+        "4. VERIFY your extraction:",
+        "   - Does the value make sense?",
+        "   - Does it match the expected format?",
+        "   - Is it similar to the examples?"
+    ],
+    
+    "reminder": "\nIMPORTANT: Return ONLY the JSON object. No explanations. No markdown. Just pure JSON."
+}
+
+
+STANDARD_PROMPT_TEMPLATE = {
+    "header": "Extract the required fields from this document:",
+    "reminder": "Remember to return ONLY the JSON object with extracted fields and confidence scores."
+}
+
+
+
+-----
+
+"""
 PROMPT BUILDER - STABLE CODE (DON'T EDIT!)
 ============================================
 
@@ -109,20 +452,14 @@ class ExtractionPromptBuilder:
             if field in FIELD_LIBRARY:
                 info = FIELD_LIBRARY[field]
                 parts.append(f"**{field}**:")
-                parts.append(f"  Description: {info.get('description', 'No description')}")
-                
-                # Safety check for examples
-                examples = info.get('examples', [])
-                if examples and all(ex is not None for ex in examples):
-                    parts.append(f"  Examples: {', '.join(str(ex) for ex in examples)}")
-                
-                parts.append(f"  Format: {info.get('format', 'Any format')}")
+                parts.append(f"  Description: {info['description']}")
+                parts.append(f"  Examples: {', '.join(info['examples'])}")
+                parts.append(f"  Format: {info['format']}")
                 
                 if info.get('extraction_hints'):
                     parts.append("  Extraction Hints:")
                     for hint in info['extraction_hints']:
-                        if hint:  # Safety check
-                            parts.append(f"    - {hint}")
+                        parts.append(f"    - {hint}")
                 
                 parts.append("")
         
