@@ -296,10 +296,10 @@ class TextRAGExtractor:
             }
 
 
------
 
+----
 
-  """
+"""
 MULTIMODAL RAG EXTRACTION  
 ==========================
 Vision + Text RAG extraction
@@ -644,3 +644,146 @@ class MultimodalRAGExtractor:
             source_document=source_document,
             document_type=document_type
         )
+
+
+-----
+
+
+"""
+Unified RAG Extractor
+Automatically chooses between text-only or multimodal based on config
+"""
+
+import logging
+from typing import Dict, Any, List
+
+from text_rag import TextRAGExtractor
+from multimodal_rag import MultimodalRAGExtractor
+
+logger = logging.getLogger(__name__)
+
+
+class UnifiedRAGExtractor:
+    """
+    Unified RAG extractor that wraps both text and multimodal extractors
+    Chooses the appropriate one based on mode configuration
+    """
+    
+    def __init__(
+        self,
+        search_endpoint: str,
+        search_api_key: str,
+        openai_manager,
+        blob_manager=None,
+        fields: List[str] = None,
+        mode: str = "text",
+        top_k: int = 5,
+        similarity_threshold: float = 0.70
+    ):
+        """
+        Initialize unified extractor
+        
+        Args:
+            search_endpoint: Azure AI Search endpoint
+            search_api_key: Azure AI Search API key
+            openai_manager: AzureOpenAIManager instance
+            blob_manager: AzureBlobManager instance (required for multimodal)
+            fields: List of fields to extract
+            mode: 'text' or 'multimodal'
+            top_k: Number of similar documents to retrieve
+            similarity_threshold: Minimum similarity score
+        """
+        self.mode = mode
+        self.fields = fields or []
+        
+        if mode == "multimodal":
+            if not blob_manager:
+                raise ValueError("blob_manager required for multimodal mode")
+            
+            self.extractor = MultimodalRAGExtractor(
+                search_endpoint=search_endpoint,
+                search_api_key=search_api_key,
+                openai_manager=openai_manager,
+                blob_manager=blob_manager,
+                fields=fields,
+                top_k=top_k,
+                similarity_threshold=similarity_threshold
+            )
+            logger.info("Initialized MultimodalRAGExtractor")
+        else:
+            self.extractor = TextRAGExtractor(
+                search_endpoint=search_endpoint,
+                search_api_key=search_api_key,
+                openai_manager=openai_manager,
+                fields=fields,
+                top_k=top_k,
+                similarity_threshold=similarity_threshold
+            )
+            logger.info("Initialized TextRAGExtractor")
+    
+    def extract_with_rag(
+        self,
+        document_text: str,
+        provider: str,
+        source_document: str,
+        index_name: str = None,
+        blob_path: str = None,
+        document_type: str = None
+    ) -> Dict[str, Any]:
+        """
+        Extract fields using RAG
+        
+        Args:
+            document_text: OCR extracted text
+            provider: Provider name
+            source_document: Document filename
+            index_name: Azure AI Search index name
+            blob_path: Blob storage path (for multimodal)
+            document_type: Document type hint
+            
+        Returns:
+            Extraction result dictionary
+        """
+        if self.mode == "multimodal":
+            return self.extractor.extract_with_rag(
+                document_text=document_text,
+                provider=provider,
+                source_document=source_document,
+                index_name=index_name,
+                blob_path=blob_path,
+                document_type=document_type
+            )
+        else:
+            return self.extractor.extract_with_rag(
+                document_text=document_text,
+                provider=provider,
+                source_document=source_document,
+                index_name=index_name,
+                document_type=document_type
+            )
+    
+    def extract_without_rag(
+        self,
+        document_text: str,
+        source_document: str,
+        document_type: str = None
+    ) -> Dict[str, Any]:
+        """
+        Extract fields without RAG (fallback)
+        
+        Args:
+            document_text: OCR extracted text
+            source_document: Document filename
+            document_type: Document type hint
+            
+        Returns:
+            Extraction result dictionary
+        """
+        return self.extractor.extract_without_rag(
+            document_text=document_text,
+            source_document=source_document,
+            document_type=document_type
+        )
+
+
+------
