@@ -269,9 +269,12 @@ def main():
     for provider_name, provider_docs in providers.items():
         run_timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
         
+        # Sanitize provider name for IDs (remove spaces, special chars)
+        provider_name_clean = provider_name.replace(' ', '_').replace('-', '_')
+        provider_name_clean = ''.join(c for c in provider_name_clean if c.isalnum() or c == '_')
+        
         # Create unique provider ID: providername_timestamp
-        # This ensures unique index per run while keeping provider identity
-        provider_id = f"{provider_name}_{run_timestamp}"
+        provider_id = f"{provider_name_clean}_{run_timestamp}"
         
         print(f"\n{'='*80}")
         print(f"Processing Provider: {provider_name} ({len(provider_docs)} documents)")
@@ -504,8 +507,16 @@ def main():
                 csv_data[f"{field}_confidence"] = '0.00'
                 csv_data[f"{field}_source_document"] = ''
         
-        # Build CSV row
-        csv_lines.append(','.join(str(csv_data.get(h, '')) for h in csv_header))
+        # Build CSV row with proper escaping
+        def escape_csv_value(val):
+            """Escape CSV value if it contains comma, quote, or newline"""
+            val_str = str(val)
+            if ',' in val_str or '"' in val_str or '\n' in val_str:
+                # Escape quotes and wrap in quotes
+                return f'"{val_str.replace('"', '""')}"'
+            return val_str
+        
+        csv_lines.append(','.join(escape_csv_value(csv_data.get(h, '')) for h in csv_header))
         
         # Upload CSV
         csv_path = f"{output_base_path}/{provider_id}.csv"
