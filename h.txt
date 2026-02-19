@@ -178,8 +178,7 @@ def main():
     )
     search_manager = AzureAISearchManager(
         search_config['endpoint'],
-        search_config['api_key'],
-        embedding_config['dimension']
+        search_config['api_key']
     )
     
     print(f"✓ Azure services initialized")
