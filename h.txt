@@ -115,7 +115,7 @@ def main():
        - If MIN >= threshold → highconfidence/
        - If MIN < threshold → lowconfidence/
        
-       Example: 0.52 >= 0.50 → highconfidence/ ✅
+       Example: 0.52 >= 0.50 → highconfidence/ 
     
     6. Save outputs to:
        outputcontainer/highconfidence/provider1_20250219_120000/
@@ -139,8 +139,8 @@ def main():
     search_config = cfg.get("AzureAISearch")
     
     fields = cfg.get("fields")
-    confidence_threshold = cfg.get("confidence_threshold")
-    min_text_length = cfg.get("min_text_length", 50)  # Default 50 chars
+    confidence_threshold = cfg.get("confidence_threshold", 0.50)
+    min_text_length = cfg.get("min_text_length", 10)  # Default 10 chars (was 50)
     rag_config = cfg.get("rag")
     costs_config = cfg.get("costs")
     
@@ -148,7 +148,7 @@ def main():
     top_k = rag_config.get("top_k", 5)
     similarity_threshold = rag_config.get("similarity_threshold", 0.70)
     
-    print(f"\n✓ Configuration loaded")
+    print(f"\n Configuration loaded")
     print(f"  Mode: {mode}")
     print(f"  Fields: {', '.join(fields)}")
     print(f"  Confidence Threshold: {confidence_threshold} ({int(confidence_threshold*100)}%)")
@@ -184,13 +184,13 @@ def main():
         search_config['api_key']
     )
     
-    print(f"✓ Azure services initialized")
+    print(f" Azure services initialized")
     
     # List providers and their documents using YOUR helper.py methods
     provider_list = blob_manager.get_providers()
     
     if not provider_list:
-        print(f"\n❌ No providers found in {input_container}")
+        print(f"\n No providers found in {input_container}")
         return
     
     # Get documents for each provider
@@ -212,14 +212,14 @@ def main():
                 total_docs += len(supported_files)
                 print(f"  {provider_name}: {len(supported_files)} supported documents")
             else:
-                print(f"  ⚠️  {provider_name}: No supported documents (only supports: PDF, JPG, PNG, DOC, DOCX)")
+                print(f"    {provider_name}: No supported documents (only supports: PDF, JPG, PNG, DOC, DOCX)")
     
     if not providers:
-        print(f"\n❌ No supported documents found!")
+        print(f"\n No supported documents found!")
         print(f"   Supported formats: {', '.join(SUPPORTED_EXTENSIONS)}")
         return
     
-    print(f"\n✓ Total: {total_docs} supported documents in {len(providers)} providers")
+    print(f"\n Total: {total_docs} supported documents in {len(providers)} providers")
     print(f"  Providers: {', '.join(providers.keys())}")
     
     # Initialize extractors
@@ -243,7 +243,10 @@ def main():
             similarity_threshold=similarity_threshold
         )
     
-    print(f"✓ Extractor initialized: {mode.upper()}")
+    print(f" Extractor initialized: {mode.upper()}")
+    
+    # Track all providers
+    provider_results = []
     
     # Process each provider
     for provider_name, provider_docs in providers.items():
@@ -265,15 +268,15 @@ def main():
         index_name = ''.join(c for c in index_name if c.isalnum() or c == '_')
         index_name = f"{index_name}_{run_timestamp}_index"
         
-        print(f"\n📊 Azure AI Search Index: {index_name}")
+        print(f"\n Azure AI Search Index: {index_name}")
         
         # Create index if doesn't exist, reuse if exists
         try:
             search_manager.create_index(index_name)
-            print(f"   ✓ Index ready (created or reused)\n")
+            print(f"    Index ready (created or reused)\n")
         except Exception as e:
             if "already exists" in str(e).lower():
-                print(f"   ✓ Using existing index\n")
+                print(f"    Using existing index\n")
             else:
                 logger.error(f"Index error: {e}")
                 raise
@@ -296,7 +299,7 @@ def main():
                 
                 if not ocr_result.get('success', False):
                     error_msg = ocr_result.get('error', 'Unknown error')
-                    print(f"   ❌ OCR failed: {error_msg}")
+                    print(f"    OCR failed: {error_msg}")
                     logger.error(f"OCR failed for {doc_name}: {error_msg}")
                     continue
                 
@@ -304,19 +307,19 @@ def main():
                 document_text = ocr_result.get('text') or ocr_result.get('content', '')
                 
                 if not document_text:
-                    print(f"   ⚠️  No text extracted - skipping (likely portrait photo or blank page)")
+                    print(f"     No text extracted - skipping (likely portrait photo or blank page)")
                     logger.warning(f"No text extracted from {doc_name} - skipped")
                     continue
                 
                 pages = ocr_result.get('page_count', 1) or ocr_result.get('pages', 1)
                 text_length = len(document_text.strip())
                 
-                print(f"   🔍 OCR: {text_length} chars | {pages} page(s) | {file_extension}")
+                print(f"    OCR: {text_length} chars | {pages} page(s) | {file_extension}")
                 
                 # Smart skip: Ignore photos with minimal text (portraits, blank pages, etc.)
                 if text_length < min_text_length:
-                    print(f"   ⚠️  Text too short ({text_length} chars < {min_text_length})")
-                    print(f"   ⏭️  SKIPPED - Not uploaded to Azure AI Search")
+                    print(f"     Text too short ({text_length} chars < {min_text_length})")
+                    print(f"     SKIPPED - Not uploaded to Azure AI Search")
                     logger.info(f"Skipped {doc_name} - insufficient text ({text_length} chars)")
                     skipped_docs.append({
                         'document_name': doc_name,
@@ -327,10 +330,10 @@ def main():
                     continue
                 
                 # Document has sufficient text - proceed with processing
-                print(f"   ✓ Sufficient text detected - proceeding with extraction")
+                print(f"    Sufficient text detected - proceeding with extraction")
                 # Step 2: Generate embeddings
                 embedding = openai_manager.generate_embeddings(document_text)
-                print(f"   📊 Embedding: {len(embedding)} dims")
+                print(f"    Embedding: {len(embedding)} dims")
                 
                 # Step 3: Store in search (for future RAG)
                 doc_id = generate_document_id(provider_name, doc_name)
@@ -344,7 +347,7 @@ def main():
                     extracted_fields={},
                     page_count=pages
                 )
-                print(f"   🗄️  Stored in Azure AI Search")
+                print(f"     Stored in Azure AI Search")
                 
                 # Step 4: Extract fields
                 if mode == "text":
@@ -374,8 +377,8 @@ def main():
                     ]
                     doc_conf = sum(confidences) / len(confidences) if confidences else 0.0
                     
-                    print(f"   ✓ Extracted: {len(extracted_fields)} fields")
-                    print(f"   📊 Confidence: {doc_conf:.2f} | RAG: {extraction.get('used_rag', False)}")
+                    print(f"    Extracted: {len(extracted_fields)} fields")
+                    print(f"    Confidence: {doc_conf:.2f} | RAG: {extraction.get('used_rag', False)}")
                     
                     # Store result
                     results.append({
@@ -401,11 +404,11 @@ def main():
                         page_count=pages
                     )
                 else:
-                    print(f"   ❌ Extraction failed: {extraction.get('error', 'Unknown')}")
+                    print(f"    Extraction failed: {extraction.get('error', 'Unknown')}")
                 
             except Exception as e:
                 logger.error(f"Error processing {doc_name}: {e}", exc_info=True)
-                print(f"   ❌ Error: {e}")
+                print(f"    Error: {e}")
                 continue
         
         print(f"\n{'='*80}")
@@ -413,7 +416,7 @@ def main():
         print(f"{'='*80}")
         
         if not results:
-            print("⚠️  No successful extractions, skipping output")
+            print("  No successful extractions, skipping output")
             continue
         
         # Calculate confidences
@@ -426,23 +429,13 @@ def main():
         else:
             category = "lowconfidence"
         
-        print(f"\n📊 PROCESSING SUMMARY:")
-        print(f"   Total Files: {len(provider_docs)}")
-        print(f"   Processed: {len(results)}")
-        print(f"   Skipped: {len(skipped_docs)}")
-        if skipped_docs:
-            print(f"   Skipped Reasons:")
-            for skip in skipped_docs[:5]:  # Show first 5
-                print(f"     • {skip['document_name']}: {skip['text_length']} chars (< {skip['min_required']})")
-            if len(skipped_docs) > 5:
-                print(f"     • ... and {len(skipped_docs)-5} more")
-        
-        print(f"\n📊 CONFIDENCE ANALYSIS:")
-        print(f"   Min Confidence: {min_conf:.2f}")
-        print(f"   Avg Confidence: {avg_conf:.2f}")
-        print(f"   Threshold: {confidence_threshold:.2f}")
-        print(f"   Category: {category}")
-        print(f"   Reason: MIN {min_conf:.2f} {'≥' if min_conf >= confidence_threshold else '<'} {confidence_threshold:.2f}")
+        # Simple summary
+        status = "COMPLETED" if len(results) > 0 else "NO RESULTS"
+        print(f"\nProvider: {provider_name}")
+        print(f"Status: {status}")
+        print(f"Processed: {len(results)}/{len(provider_docs)} documents")
+        if len(skipped_docs) > 0:
+            print(f"Skipped: {len(skipped_docs)} documents (insufficient text)")
         
         # Save outputs (output_container already defined at top)
         output_base_path = f"{category}/{provider_id}"
@@ -505,7 +498,7 @@ def main():
             'text/csv',
             output_container
         )
-        print(f"✓ CSV saved: {csv_path}")
+        print(f" CSV saved: {csv_path}")
         
         # Build and upload JSON
         json_output = {
@@ -528,7 +521,7 @@ def main():
             'application/json',
             output_container
         )
-        print(f"✓ JSON saved: {json_path}")
+        print(f" JSON saved: {json_path}")
         
         # Track costs
         cost_tracker = CostTracker(costs_config)
@@ -553,11 +546,34 @@ def main():
             'application/json',
             output_container
         )
-        print(f"✓ Costs saved: {cost_path}")
+        print(f" Costs saved: {cost_path}")
         print(f"   Total Cost: ${cost_data['costs']['total_estimated']:.4f}")
+        
+        # Track provider result
+        provider_results.append({
+            'provider': provider_name,
+            'status': 'COMPLETED' if len(results) > 0 else 'NO RESULTS',
+            'processed': len(results),
+            'total': len(provider_docs),
+            'skipped': len(skipped_docs)
+        })
     
+    # Final summary
     print(f"\n{'='*80}")
-    print("  ✅ PIPELINE COMPLETED SUCCESSFULLY")
+    print("FINAL SUMMARY")
+    print(f"{'='*80}")
+    print(f"Total Providers: {len(provider_results)}")
+    
+    completed = sum(1 for p in provider_results if p['status'] == 'COMPLETED')
+    no_results = sum(1 for p in provider_results if p['status'] == 'NO RESULTS')
+    
+    print(f"Completed: {completed}")
+    print(f"No Results: {no_results}")
+    print()
+    
+    for pr in provider_results:
+        print(f"{pr['provider']}: {pr['status']} ({pr['processed']}/{pr['total']} processed)")
+    
     print(f"{'='*80}\n")
 
 
@@ -565,7 +581,7 @@ if __name__ == "__main__":
     main()
 
 
-------
+--------
 
 helper.py
 
@@ -1144,3 +1160,4 @@ class AzureAISearchManager:
         except Exception as e:
             logger.error(f"Document upload failed: {e}", exc_info=True)
             raise
+
