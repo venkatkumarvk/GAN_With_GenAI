@@ -1,532 +1,575 @@
-"""
-MAIN PIPELINE - COMPLETE AZURE RAG DOCUMENT EXTRACTION
-=======================================================
-
-COMPLETE WORKFLOW WITH CONFIDENCE-BASED STORAGE
-
-Example: Provider1 with 20 documents, confidence_threshold=0.50
-"""
-
 import os
 import json
+import base64
 import logging
-from datetime import datetime
-from typing import List, Dict, Any
 import hashlib
+from datetime import datetime
+from io import BytesIO
+from typing import List, Dict, Any, Tuple
 
-# Import all modules
-from helper import (
-    ConfigManager,
-    AzureBlobManager,
-    DocumentIntelligenceManager,
-    AzureOpenAIManager,
-    AzureAISearchManager
-)
-# Note: No separate OCR import needed - using DocumentIntelligenceManager from helper
-from text_rag import TextRAGExtractor
-from multimodal_rag import MultimodalRAGExtractor
-from costtracking import CostTracker
+import pandas as pd
+from tenacity import retry, stop_after_attempt, wait_exponential
 
-# Setup logging
-os.makedirs('logs', exist_ok=True)
-timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.FileHandler(f'logs/extraction_{timestamp}.log'),
-        logging.StreamHandler()
-    ]
+from azure.storage.blob import BlobServiceClient, ContentSettings
+from azure.ai.documentintelligence import DocumentIntelligenceClient
+from azure.core.credentials import AzureKeyCredential
+from azure.search.documents import SearchClient
+from azure.search.documents.indexes import SearchIndexClient
+from azure.search.documents.indexes.models import (
+    SearchIndex, SimpleField, SearchableField, SearchField, SearchFieldDataType,  # ADDED SearchField
+    VectorSearch, HnswAlgorithmConfiguration, VectorSearchProfile,
+    SemanticConfiguration, SemanticField, SemanticPrioritizedFields, SemanticSearch
 )
+from openai import AzureOpenAI
+
+logging.basicConfig(level=logging.INFO,
+                    format='%(asctime)s - %(levelname)s - %(message)s',
+                    handlers=[logging.StreamHandler()])
 logger = logging.getLogger(__name__)
 
 
-def generate_document_id(provider: str, document_name: str) -> str:
-    """Generate unique document ID using SHA-256"""
-    unique_string = f"{provider}_{document_name}_{datetime.utcnow().isoformat()}"
-    return hashlib.sha256(unique_string.encode()).hexdigest()
+class ConfigManager:
+    def __init__(self, config_path: str = 'config.json'):
+        self.config_path = config_path
+        self.config = self.load_config()
+
+    def load_config(self) -> Dict[str, Any]:
+        with open(self.config_path, 'r') as f:
+            cfg = json.load(f)
+        return cfg
+
+    def get(self, section: str, key: str = None) -> Any:
+        if key:
+            return self.config.get(section, {}).get(key)
+        return self.config.get(section)
 
 
-def calculate_min_confidence(results: List[Dict]) -> float:
-    """Calculate minimum confidence across ALL fields in ALL documents"""
-    all_confidences = []
-    
-    for doc in results:
-        extracted = doc.get('extracted_fields', {})
-        for field_name, field_data in extracted.items():
-            if isinstance(field_data, dict):
-                conf = field_data.get('confidence', 0.0)
-                all_confidences.append(float(conf))
-    
-    return min(all_confidences) if all_confidences else 0.0
+class AzureBlobManager:
+    def __init__(self, connection_string: str, input_container: str, output_container: str):
+        self.blob_service_client = BlobServiceClient.from_connection_string(connection_string)
+        self.input_container = input_container
+        self.output_container = output_container
+        self.supported_extensions = {'.pdf', '.doc', '.docx', '.png', '.jpg', '.jpeg', '.tiff', '.tif'}
+
+    def get_providers(self) -> List[str]:
+        container_client = self.blob_service_client.get_container_client(self.input_container)
+        blobs = container_client.list_blobs()
+        providers = set()
+        for blob in blobs:
+            parts = blob.name.split('/')
+            if parts[0]:
+                providers.add(parts[0])
+        return sorted(list(providers))
+
+    def get_provider_files(self, provider: str) -> List[Dict[str, str]]:
+        container_client = self.blob_service_client.get_container_client(self.input_container)
+        blobs = container_client.list_blobs(name_starts_with=f"{provider}/")
+        files = []
+        for blob in blobs:
+            ext = os.path.splitext(blob.name)[1].lower()
+            if ext in self.supported_extensions:
+                files.append({
+                    'name': blob.name,
+                    'filename': os.path.basename(blob.name),
+                    'provider': provider,
+                    'size': blob.size,
+                    'extension': ext
+                })
+        return files
+
+    @retry(stop=stop_after_attempt(3), wait=wait_exponential(min=2, max=10))
+    def download_blob_as_base64(self, blob_name: str) -> str:
+        blob_client = self.blob_service_client.get_blob_client(self.input_container, blob_name)
+        data = blob_client.download_blob().readall()
+        return base64.b64encode(data).decode('utf-8')
+
+    def upload_to_blob(self, data, blob_path: str, content_type: str = 'text/plain'):
+        """Upload data to blob storage"""
+        blob_client = self.blob_service_client.get_blob_client(self.output_container, blob_path)
+        content_settings = ContentSettings(content_type=content_type)
+        if isinstance(data, str):
+            data = data.encode('utf-8')
+        blob_client.upload_blob(data, overwrite=True, content_settings=content_settings)
+        logger.info(f"Uploaded to blob: {blob_path}")
+
+    def upload_dataframe_as_csv(self, df: pd.DataFrame, blob_path: str):
+        csv_buffer = BytesIO()
+        df.to_csv(csv_buffer, index=False, encoding='utf-8')
+        csv_data = csv_buffer.getvalue()
+        blob_client = self.blob_service_client.get_blob_client(self.output_container, blob_path)
+        content_settings = ContentSettings(content_type='text/csv')
+        blob_client.upload_blob(csv_data, overwrite=True, content_settings=content_settings)
+        logger.info(f"Uploaded CSV to blob: {blob_path}")
 
 
-def calculate_avg_confidence(results: List[Dict]) -> float:
-    """Calculate average confidence for reporting"""
-    all_confidences = []
-    
-    for doc in results:
-        extracted = doc.get('extracted_fields', {})
-        for field_name, field_data in extracted.items():
-            if isinstance(field_data, dict):
-                conf = field_data.get('confidence', 0.0)
-                all_confidences.append(float(conf))
-    
-    return sum(all_confidences) / len(all_confidences) if all_confidences else 0.0
+class DocumentIntelligenceManager:
+    def __init__(self, endpoint: str, key: str):
+        self.client = DocumentIntelligenceClient(endpoint=endpoint, credential=AzureKeyCredential(key))
 
-
-def main():
-    """
-    MAIN PIPELINE
-    
-    WORKFLOW EXAMPLE (Provider1 with 20 documents):
-    ================================================
-    
-    1. Load config.json
-       - fields: ["name", "nationality"]
-       - confidence_threshold: 0.50
-       - mode: "text" or "multimodal"
-    
-    2. List documents from inputcontainer/Provider1/
-       - document_001.pdf
-       - document_002.pdf
-       - ... (20 files total)
-    
-    3. For EACH document:
-       a) OCR extraction → Get text
-       b) Generate embeddings → Vector (3072 dims)
-       c) Store in Azure AI Search
-       d) Extract fields:
-          - If mode="text": Use TextRAGExtractor
-          - If mode="multimodal": Use MultimodalRAGExtractor
-       e) Get extraction:
-          {
-            "name": {"value": "JOHN DOE", "confidence": 0.95},
-            "nationality": {"value": "USA", "confidence": 0.98}
-          }
-    
-    4. After ALL 20 documents processed:
-       - Calculate MIN confidence across ALL fields
-       - Example: doc1 has 0.95, doc2 has 0.96, doc15 has 0.52
-       - MIN = 0.52 (the lowest)
-    
-    5. Compare MIN confidence to threshold:
-       - If MIN >= threshold → highconfidence/
-       - If MIN < threshold → lowconfidence/
-       
-       Example: 0.52 >= 0.50 → highconfidence/ ✅
-    
-    6. Save outputs to:
-       outputcontainer/highconfidence/provider1_20250219_120000/
-       ├── provider1_20250219_120000.csv (1 row with all fields)
-       ├── provider1_20250219_120000_detailed.json (20 docs details)
-       └── provider1_20250219_120000_costs.json (cost breakdown)
-    """
-    
-    print("="*80)
-    print("  AZURE RAG DOCUMENT EXTRACTION PIPELINE")
-    print("="*80)
-    
-    # Load configuration
-    cfg = ConfigManager('config.json')
-    
-    # Extract configuration
-    blob_config = cfg.get("AzureBlob")
-    openai_config = cfg.get("AzureOpenAI")
-    embedding_config = cfg.get("AzureEmbedding")
-    doc_intel_config = cfg.get("DocumentIntelligence")
-    search_config = cfg.get("AzureAISearch")
-    
-    fields = cfg.get("fields")
-    confidence_threshold = cfg.get("confidence_threshold")
-    rag_config = cfg.get("rag")
-    costs_config = cfg.get("costs")
-    
-    mode = rag_config.get("mode", "text")
-    top_k = rag_config.get("top_k", 5)
-    similarity_threshold = rag_config.get("similarity_threshold", 0.70)
-    
-    print(f"\n✓ Configuration loaded")
-    print(f"  Mode: {mode}")
-    print(f"  Fields: {', '.join(fields)}")
-    print(f"  Confidence Threshold: {confidence_threshold} ({int(confidence_threshold*100)}%)")
-    print(f"  RAG: top_k={top_k}, similarity={similarity_threshold}")
-    
-    # Initialize Azure services
-    input_container = blob_config['inputcontainer']
-    output_container = blob_config['outputcontainer']
-    
-    blob_manager = AzureBlobManager(
-        blob_config['connection_string'],
-        input_container,
-        output_container
-    )
-    doc_intel_manager = DocumentIntelligenceManager(
-        doc_intel_config['endpoint'],
-        doc_intel_config['key']
-    )
-    openai_manager = AzureOpenAIManager(
-        gpt_endpoint=openai_config['endpoint'],
-        gpt_api_key=openai_config['api_key'],
-        gpt_api_version=openai_config['api_version'],
-        gpt_deployment=openai_config['deployment_name'],
-        embedding_endpoint=embedding_config['endpoint'],
-        embedding_api_key=embedding_config['api_key'],
-        embedding_api_version=embedding_config['api_version'],
-        embedding_deployment=embedding_config['deployment_name'],
-        embedding_dimension=embedding_config['dimension']
-    )
-    search_manager = AzureAISearchManager(
-        search_config['endpoint'],
-        search_config['api_key']
-    )
-    
-    print(f"✓ Azure services initialized")
-    
-    # List providers and their documents using YOUR helper.py methods
-    provider_list = blob_manager.get_providers()
-    
-    if not provider_list:
-        print(f"\n❌ No providers found in {input_container}")
-        return
-    
-    # Get documents for each provider
-    SUPPORTED_EXTENSIONS = {'.pdf', '.jpg', '.jpeg', '.png', '.doc', '.docx', '.tiff', '.tif', '.bmp'}
-    
-    providers = {}
-    total_docs = 0
-    for provider_name in provider_list:
-        files = blob_manager.get_provider_files(provider_name)
-        if files:
-            # Filter for supported file types only
-            supported_files = [
-                f['name'] for f in files 
-                if os.path.splitext(f['name'])[1].lower() in SUPPORTED_EXTENSIONS
-            ]
-            
-            if supported_files:
-                providers[provider_name] = supported_files
-                total_docs += len(supported_files)
-                print(f"  {provider_name}: {len(supported_files)} supported documents")
-            else:
-                print(f"  ⚠️  {provider_name}: No supported documents (only supports: PDF, JPG, PNG, DOC, DOCX)")
-    
-    if not providers:
-        print(f"\n❌ No supported documents found!")
-        print(f"   Supported formats: {', '.join(SUPPORTED_EXTENSIONS)}")
-        return
-    
-    print(f"\n✓ Total: {total_docs} supported documents in {len(providers)} providers")
-    print(f"  Providers: {', '.join(providers.keys())}")
-    
-    # Initialize extractors
-    if mode == "text":
-        extractor = TextRAGExtractor(
-            search_endpoint=search_config['endpoint'],
-            search_api_key=search_config['api_key'],
-            openai_manager=openai_manager,
-            fields=fields,
-            top_k=top_k,
-            similarity_threshold=similarity_threshold
-        )
-    else:
-        extractor = MultimodalRAGExtractor(
-            search_endpoint=search_config['endpoint'],
-            search_api_key=search_config['api_key'],
-            openai_manager=openai_manager,
-            blob_manager=blob_manager,
-            fields=fields,
-            top_k=top_k,
-            similarity_threshold=similarity_threshold
-        )
-    
-    print(f"✓ Extractor initialized: {mode.upper()}")
-    
-    # Process each provider
-    for provider_name, provider_docs in providers.items():
-        run_timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-        provider_id = f"{provider_name}_{run_timestamp}"
-        
-        print(f"\n{'='*80}")
-        print(f"Processing Provider: {provider_name} ({len(provider_docs)} documents)")
-        print(f"Provider ID: {provider_id}")
-        print(f"{'='*80}")
-        
-        # Use SINGLE PERMANENT INDEX per provider (NO timestamp, NO cleanup needed!)
-        # Example: "arlenfern_index" - same index used every time for this provider
-        index_name = provider_name.lower().replace(' ', '_').replace('-', '_')
-        index_name = ''.join(c for c in index_name if c.isalnum() or c == '_')
-        index_name = f"{index_name}_index"  # e.g., arlenfern_index
-        
-        print(f"\n📊 Azure AI Search Index: {index_name}")
-        
-        # Create index if doesn't exist, reuse if exists
+    @retry(stop=stop_after_attempt(3), wait=wait_exponential(min=2, max=10))
+    def analyze_document(self, base64_data: str, file_extension: str) -> Dict[str, Any]:
         try:
-            search_manager.create_index(index_name)
-            print(f"   ✓ Index ready (created or reused)\n")
+            # Handle .doc and .docx files - convert to PDF first
+            if file_extension.lower() in ['.doc', '.docx']:
+                logger.info(f"Converting {file_extension} to PDF for OCR processing")
+                try:
+                    from docx2pdf import convert as docx_to_pdf_convert
+                    import tempfile
+                    
+                    # Decode base64 to bytes
+                    document_bytes = base64.b64decode(base64_data)
+                    
+                    # Create temporary files
+                    with tempfile.NamedTemporaryFile(suffix=file_extension, delete=False) as temp_word:
+                        temp_word.write(document_bytes)
+                        temp_word_path = temp_word.name
+                    
+                    temp_pdf_path = temp_word_path.replace(file_extension, '.pdf')
+                    
+                    # Convert to PDF
+                    docx_to_pdf_convert(temp_word_path, temp_pdf_path)
+                    
+                    # Read PDF and convert back to base64
+                    with open(temp_pdf_path, 'rb') as pdf_file:
+                        pdf_bytes = pdf_file.read()
+                        base64_data = base64.b64encode(pdf_bytes).decode('utf-8')
+                    
+                    # Clean up temp files
+                    os.remove(temp_word_path)
+                    os.remove(temp_pdf_path)
+                    
+                    # Process as PDF
+                    file_extension = '.pdf'
+                    logger.info(f"Successfully converted to PDF")
+                    
+                except ImportError:
+                    logger.warning("docx2pdf not installed, trying alternative method with python-docx")
+                    # Alternative: Extract text directly from Word document
+                    try:
+                        from docx import Document
+                        import io
+                        
+                        document_bytes = base64.b64decode(base64_data)
+                        doc = Document(io.BytesIO(document_bytes))
+                        
+                        text = ''
+                        page_count = 1  # Word doesn't have pages in same way, estimate
+                        
+                        for para in doc.paragraphs:
+                            text += para.text + "\n"
+                        
+                        # Also extract text from tables
+                        for table in doc.tables:
+                            for row in table.rows:
+                                for cell in row.cells:
+                                    text += cell.text + " "
+                                text += "\n"
+                        
+                        logger.info(f"Extracted text from Word document: {len(text)} characters")
+                        
+                        return {
+                            'success': True,
+                            'text': text.strip(),
+                            'page_count': max(1, len(text) // 3000)  # Estimate pages
+                        }
+                    except Exception as e:
+                        logger.error(f"Failed to extract text from Word document: {e}")
+                        return {
+                            'success': False,
+                            'text': '',
+                            'page_count': 0,
+                            'error': f'Word document processing failed: {str(e)}'
+                        }
+            
+            # Standard processing for PDF and images
+            content_type_map = {
+                '.pdf': 'application/pdf',
+                '.png': 'image/png',
+                '.jpg': 'image/jpeg',
+                '.jpeg': 'image/jpeg',
+                '.tiff': 'image/tiff',
+                '.tif': 'image/tiff',
+                '.bmp': 'image/bmp'
+            }
+            content_type = content_type_map.get(file_extension.lower(), 'application/pdf')
+            document_bytes = base64.b64decode(base64_data)
+            
+            logger.info(f"Starting OCR for {file_extension}, size: {len(document_bytes)} bytes")
+            
+            poller = self.client.begin_analyze_document(
+                model_id="prebuilt-read",
+                analyze_request=document_bytes,
+                content_type=content_type
+            )
+            
+            result = poller.result()
+            text = ''
+            page_count = 0
+            
+            if hasattr(result, 'pages') and result.pages:
+                page_count = len(result.pages)
+                for page in result.pages:
+                    if hasattr(page, 'lines') and page.lines:
+                        for line in page.lines:
+                            if hasattr(line, 'content'):
+                                text += line.content + "\n"
+            
+            logger.info(f"OCR completed: {page_count} pages, {len(text)} characters")
+            
+            return {
+                'success': True,
+                'text': text.strip(),
+                'page_count': page_count
+            }
+            
         except Exception as e:
-            if "already exists" in str(e).lower():
-                print(f"   ✓ Using existing index\n")
-            else:
-                logger.error(f"Index error: {e}")
-                raise
-        
-        results = []
-        
-        # Process each document
-        for idx, blob_path in enumerate(provider_docs, 1):
-            doc_name = blob_path.split('/')[-1]
-            print(f"\n[{idx}/{len(provider_docs)}] {doc_name}")
-            
-            try:
-                # Step 1: Download blob as base64 (YOUR helper.py method)
-                base64_data = blob_manager.download_blob_as_base64(blob_path)
-                file_extension = os.path.splitext(doc_name)[1]
-                
-                # OCR with DocumentIntelligenceManager (already has base64)
-                ocr_result = doc_intel_manager.analyze_document(base64_data, file_extension)
-                
-                if not ocr_result.get('success', False):
-                    error_msg = ocr_result.get('error', 'Unknown error')
-                    print(f"   ❌ OCR failed: {error_msg}")
-                    logger.error(f"OCR failed for {doc_name}: {error_msg}")
-                    continue
-                
-                # Support both 'text' and 'content' keys (different OCR modules use different keys)
-                document_text = ocr_result.get('text') or ocr_result.get('content', '')
-                
-                if not document_text:
-                    print(f"   ❌ No text extracted from document")
-                    logger.warning(f"No text extracted from {doc_name}")
-                    continue
-                
-                pages = ocr_result.get('page_count', 1) or ocr_result.get('pages', 1)
-                
-                print(f"   🔍 OCR: {len(document_text)} chars | {pages} page(s) | {file_extension}")
-                
-                if len(document_text) < 10:
-                    print(f"   ⚠️  OCR text too short ({len(document_text)} chars), skipping")
-                    continue
-                
-                # Step 2: Generate embeddings
-                embedding = openai_manager.generate_embeddings(document_text)
-                print(f"   📊 Embedding: {len(embedding)} dims")
-                
-                # Step 3: Store in search (for future RAG)
-                doc_id = generate_document_id(provider_name, doc_name)
-                search_manager.upload_document(
-                    index_name=index_name,
-                    doc_id=doc_id,
-                    content=document_text,
-                    document_name=doc_name,
-                    provider=provider_name,
-                    content_vector=embedding,
-                    extracted_fields={},
-                    page_count=pages
-                )
-                print(f"   🗄️  Stored in Azure AI Search")
-                
-                # Step 4: Extract fields
-                if mode == "text":
-                    extraction = extractor.extract_with_rag(
-                        document_text=document_text,
-                        provider=provider_name,
-                        source_document=doc_name
-                    )
-                else:
-                    extraction = extractor.extract_with_rag(
-                        document_text=document_text,
-                        provider=provider_name,
-                        source_document=doc_name,
-                        blob_path=blob_path
-                    )
-                
-                if extraction['success']:
-                    extracted_fields = extraction['extracted_fields']
-                    
-                    # Calculate doc confidence
-                    confidences = [
-                        f.get('confidence', 0.0) 
-                        for f in extracted_fields.values() 
-                        if isinstance(f, dict)
-                    ]
-                    doc_conf = sum(confidences) / len(confidences) if confidences else 0.0
-                    
-                    print(f"   ✓ Extracted: {len(extracted_fields)} fields")
-                    print(f"   📊 Confidence: {doc_conf:.2f} | RAG: {extraction.get('used_rag', False)}")
-                    
-                    # Store result
-                    results.append({
-                        'id': doc_id,
-                        'document_name': doc_name,
-                        'extracted_fields': extracted_fields,
-                        'avg_confidence': doc_conf,
-                        'used_rag': extraction.get('used_rag', False),
-                        'has_vision': extraction.get('has_vision', False),
-                        'system_prompt': extraction.get('system_prompt', ''),
-                        'user_prompt': extraction.get('user_prompt', '')
-                    })
-                    
-                    # Update search with extracted fields
-                    search_manager.upload_document(
-                        index_name=index_name,
-                        doc_id=doc_id,
-                        content=document_text,
-                        document_name=doc_name,
-                        provider=provider_name,
-                        content_vector=embedding,
-                        extracted_fields=json.dumps(extracted_fields),
-                        page_count=pages
-                    )
-                else:
-                    print(f"   ❌ Extraction failed: {extraction.get('error', 'Unknown')}")
-                
-            except Exception as e:
-                logger.error(f"Error processing {doc_name}: {e}", exc_info=True)
-                print(f"   ❌ Error: {e}")
-                continue
-        
-        print(f"\n{'='*80}")
-        print(f"Processed {len(results)}/{len(provider_docs)} documents")
-        print(f"{'='*80}")
-        
-        if not results:
-            print("⚠️  No successful extractions, skipping output")
-            continue
-        
-        # Calculate confidences
-        min_conf = calculate_min_confidence(results)
-        avg_conf = calculate_avg_confidence(results)
-        
-        # Determine category based on MIN confidence
-        if min_conf >= confidence_threshold:
-            category = "highconfidence"
-        else:
-            category = "lowconfidence"
-        
-        print(f"\n📊 CONFIDENCE ANALYSIS:")
-        print(f"   Min Confidence: {min_conf:.2f}")
-        print(f"   Avg Confidence: {avg_conf:.2f}")
-        print(f"   Threshold: {confidence_threshold:.2f}")
-        print(f"   Category: {category}")
-        print(f"   Reason: MIN {min_conf:.2f} {'≥' if min_conf >= confidence_threshold else '<'} {confidence_threshold:.2f}")
-        
-        # Save outputs (output_container already defined at top)
-        output_base_path = f"{category}/{provider_id}"
-        
-        # Build CSV with YOUR format
-        csv_lines = []
-        
-        # Header: provider_id, provider, extraction_datetime, field, field_confidence, field_source_document
-        csv_header = ['provider_id', 'provider', 'extraction_datetime']
-        for field in fields:
-            csv_header.extend([field, f"{field}_confidence", f"{field}_source_document"])
-        csv_lines.append(','.join(csv_header))
-        
-        # Data row
-        extraction_datetime = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-        csv_data = {
-            'provider_id': provider_id,
-            'provider': provider_name,
-            'extraction_datetime': extraction_datetime
-        }
-        
-        # Get HIGHEST CONFIDENCE extraction for each field (not just first!)
-        for field in fields:
-            best_result = None
-            best_confidence = -1
-            
-            # Find result with highest confidence for this field
-            for r in results:
-                if field in r['extracted_fields']:
-                    fd = r['extracted_fields'][field]
-                    if isinstance(fd, dict):
-                        conf = fd.get('confidence', 0.0)
-                        if conf > best_confidence:
-                            best_confidence = conf
-                            best_result = {
-                                'value': fd.get('value', ''),
-                                'confidence': conf,
-                                'document': r.get('document_name', '')
-                            }
-            
-            # Use best result (highest confidence)
-            if best_result:
-                csv_data[field] = best_result['value']
-                csv_data[f"{field}_confidence"] = f"{best_result['confidence']:.2f}"
-                csv_data[f"{field}_source_document"] = best_result['document']
-            else:
-                # If field not found in any document
-                csv_data[field] = ''
-                csv_data[f"{field}_confidence"] = '0.00'
-                csv_data[f"{field}_source_document"] = ''
-        
-        # Build CSV row
-        csv_lines.append(','.join(str(csv_data.get(h, '')) for h in csv_header))
-        
-        # Upload CSV
-        csv_path = f"{output_base_path}/{provider_id}.csv"
-        blob_manager.upload_to_blob(
-            '\n'.join(csv_lines),
-            csv_path,
-            'text/csv',
-            output_container
-        )
-        print(f"✓ CSV saved: {csv_path}")
-        
-        # Build and upload JSON
-        json_output = {
-            'provider': provider_name,
-            'provider_id': provider_id,
-            'timestamp': run_timestamp,
-            'total_documents': len(results),
-            'min_confidence': min_conf,
-            'avg_confidence': avg_conf,
-            'confidence_threshold': confidence_threshold,
-            'category': category,
-            'mode': mode,
-            'results': results
-        }
-        
-        json_path = f"{output_base_path}/{provider_id}_detailed.json"
-        blob_manager.upload_to_blob(
-            json.dumps(json_output, indent=2),
-            json_path,
-            'application/json',
-            output_container
-        )
-        print(f"✓ JSON saved: {json_path}")
-        
-        # Track costs
-        cost_tracker = CostTracker(costs_config)
-        token_usage = {
-            'prompt_tokens': openai_manager.prompt_tokens,
-            'completion_tokens': openai_manager.completion_tokens,
-            'total_tokens': openai_manager.total_tokens
-        }
-        
-        cost_data = cost_tracker.calculate_provider_costs(
-            provider=provider_name,
-            provider_id=provider_id,
-            total_documents=len(results),
-            token_usage=token_usage,
-            avg_pages_per_doc=2.0
-        )
-        
-        cost_path = f"{output_base_path}/{provider_id}_costs.json"
-        blob_manager.upload_to_blob(
-            json.dumps(cost_data, indent=2),
-            cost_path,
-            'application/json',
-            output_container
-        )
-        print(f"✓ Costs saved: {cost_path}")
-        print(f"   Total Cost: ${cost_data['costs']['total_estimated']:.4f}")
+            logger.error(f"OCR failed: {e}", exc_info=True)
+            return {
+                'success': False,
+                'text': '',
+                'page_count': 0,
+                'error': str(e)
+            }
+
+
+class AzureOpenAIManager:
+    """Manages both GPT extraction and embeddings with separate clients"""
     
-    print(f"\n{'='*80}")
-    print("  ✅ PIPELINE COMPLETED SUCCESSFULLY")
-    print(f"{'='*80}\n")
+    def __init__(self, gpt_endpoint: str, gpt_api_key: str, gpt_api_version: str, gpt_deployment: str,
+                 embedding_endpoint: str, embedding_api_key: str, embedding_api_version: str, 
+                 embedding_deployment: str, embedding_dimension: int = 3072):
+        
+        # GPT-4o client for field extraction
+        self.gpt_client = AzureOpenAI(
+            azure_endpoint=gpt_endpoint,
+            api_key=gpt_api_key,
+            api_version=gpt_api_version
+        )
+        self.gpt_deployment = gpt_deployment
+        
+        # Separate embedding client (important for separate deployment)
+        self.embedding_client = AzureOpenAI(
+            azure_endpoint=embedding_endpoint,
+            api_key=embedding_api_key,
+            api_version=embedding_api_version
+        )
+        self.embedding_deployment = embedding_deployment
+        self.embedding_dimension = embedding_dimension
+        
+        # Token tracking
+        self.total_tokens = 0
+        self.prompt_tokens = 0
+        self.completion_tokens = 0
+
+    @retry(stop=stop_after_attempt(3), wait=wait_exponential(min=2, max=10))
+    def extract_fields(self, text: str, fields: List[str], source_document: str) -> Dict[str, Any]:
+        try:
+            system_prompt = f"""You are a document extraction expert. Extract the following fields: {', '.join(fields)}.
+
+Return ONLY a JSON object with this structure:
+{{
+    "field_name": {{"value": "extracted_value", "confidence": 0.95}},
+    ...
+}}
+
+Be precise with confidence scores."""
+            
+            user_prompt = f"Document text:\n\n{text[:8000]}"
+            
+            response = self.gpt_client.chat.completions.create(
+                model=self.gpt_deployment,
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt}
+                ],
+                temperature=0,
+                max_tokens=2000
+            )
+            
+            self.total_tokens += response.usage.total_tokens
+            self.prompt_tokens += response.usage.prompt_tokens
+            self.completion_tokens += response.usage.completion_tokens
+
+            content = response.choices[0].message.content.strip()
+            
+            # Remove markdown code blocks
+            if content.startswith("```"):
+                content = content.replace("```json", "").replace("```", "").strip()
+            
+            data = json.loads(content)
+            
+            # Normalize data format
+            normalized_data = {}
+            for field_name in data:
+                field_value = data[field_name]
+                
+                if isinstance(field_value, dict) and 'value' in field_value:
+                    normalized_data[field_name] = field_value
+                    normalized_data[field_name]['source_document'] = source_document
+                else:
+                    # Wrap direct values
+                    normalized_data[field_name] = {
+                        'value': str(field_value),
+                        'confidence': 0.5,
+                        'source_document': source_document
+                    }
+            
+            logger.info(f"Extracted {len(normalized_data)} fields successfully")
+            
+            return {
+                'success': True,
+                'extracted_fields': normalized_data,
+                'raw_response': content
+            }
+            
+        except Exception as e:
+            logger.error(f"Field extraction failed: {e}", exc_info=True)
+            return {
+                'success': False,
+                'extracted_fields': {},
+                'raw_response': '',
+                'error': str(e)
+            }
+
+    @retry(stop=stop_after_attempt(3), wait=wait_exponential(min=2, max=10))
+    def generate_embeddings(self, text: str) -> List[float]:
+        """Generate embeddings using separate embedding deployment"""
+        try:
+            # Validate input
+            if not text or not isinstance(text, str):
+                logger.warning("Invalid text for embeddings, using placeholder")
+                text = "No content available"
+            
+            text = str(text).strip()
+            
+            if len(text) < 3:
+                logger.warning("Text too short, using placeholder")
+                text = "No content available"
+            
+            # Truncate if needed
+            if len(text) > 30000:
+                text = text[:30000]
+                logger.info("Text truncated for embedding")
+            
+            # Call embedding endpoint (separate from GPT)
+            response = self.embedding_client.embeddings.create(
+                model=self.embedding_deployment,
+                input=text
+            )
+            
+            embeddings = response.data[0].embedding
+            logger.info(f"Generated embeddings: dimension={len(embeddings)}")
+            
+            return embeddings
+            
+        except Exception as e:
+            logger.error(f"Embedding generation failed: {e}", exc_info=True)
+            # Return zero vector as fallback
+            logger.warning(f"Returning zero vector of dimension {self.embedding_dimension}")
+            return [0.0] * self.embedding_dimension
+
+    def get_token_usage(self) -> Dict[str, int]:
+        return {
+            'total_tokens': self.total_tokens,
+            'prompt_tokens': self.prompt_tokens,
+            'completion_tokens': self.completion_tokens
+        }
+
+    def calculate_cost(self, costs_config: Dict[str, float]) -> Dict[str, float]:
+        input_cost = (self.prompt_tokens / 1000) * costs_config.get('gpt4o_input_per_1k', 0)
+        output_cost = (self.completion_tokens / 1000) * costs_config.get('gpt4o_output_per_1k', 0)
+        total_cost = input_cost + output_cost
+        return {
+            'input_cost': input_cost,
+            'output_cost': output_cost,
+            'total_cost': total_cost
+        }
 
 
-if __name__ == "__main__":
-    main()
+class AzureAISearchManager:
+    def __init__(self, endpoint: str, api_key: str):
+        self.endpoint = endpoint
+        self.credential = AzureKeyCredential(api_key)
+        self.index_client = SearchIndexClient(endpoint=endpoint, credential=self.credential)
+
+    def get_index_name(self, provider: str, timestamp: str = None) -> str:
+        """
+        Sanitize provider name for Azure AI Search index
+        
+        If timestamp provided: Returns providername_timestamp (e.g., "anand_20240211_143022")
+        If no timestamp: Returns providername only (e.g., "anand")
+        
+        Args:
+            provider: Provider name
+            timestamp: Optional timestamp string (YYYYMMDD_HHMMSS)
+        
+        Returns:
+            Sanitized index name
+        """
+        # Sanitize provider name
+        sanitized = provider.lower().replace(' ', '-').replace('_', '-')
+        sanitized = ''.join(c for c in sanitized if c.isalnum() or c == '-')
+        sanitized = sanitized.strip('-')
+        
+        # Add timestamp if provided (for unique index per run)
+        if timestamp:
+            # Replace underscores with hyphens for index name
+            clean_timestamp = timestamp.replace('_', '')  # Remove underscores: 20240211143022
+            index_name = f"{sanitized}-{clean_timestamp}"
+        else:
+            index_name = sanitized
+        
+        return index_name
+
+    def create_index(self, provider: str, embedding_dimension: int = 3072, timestamp: str = None):
+        """
+        Create search index with vector field and all required fields
+        
+        Args:
+            provider: Provider name
+            embedding_dimension: Vector dimension (default 3072)
+            timestamp: Optional timestamp for unique index name (YYYYMMDD_HHMMSS)
+        """
+        index_name = self.get_index_name(provider, timestamp)
+        
+        logger.info(f"Creating index '{index_name}' with vector dimension {embedding_dimension}")
+        
+        # Define fields including vector field using SearchField
+        fields = [
+            SimpleField(name="id", type=SearchFieldDataType.String, key=True),
+            SearchableField(name="provider_id", type=SearchFieldDataType.String, filterable=True, sortable=True),
+            SearchableField(name="provider", type=SearchFieldDataType.String, filterable=True),
+            SearchableField(name="document_name", type=SearchFieldDataType.String, filterable=True),
+            SimpleField(name="document_type", type=SearchFieldDataType.String, filterable=True),
+            SimpleField(name="file_extension", type=SearchFieldDataType.String, filterable=True),
+            SearchableField(name="content", type=SearchFieldDataType.String),
+            SimpleField(name="page_count", type=SearchFieldDataType.Int32, filterable=True),
+            SimpleField(name="total_documents", type=SearchFieldDataType.Int32, filterable=True),
+            SimpleField(name="extraction_datetime", type=SearchFieldDataType.String, sortable=True),
+            SearchableField(name="extracted_fields", type=SearchFieldDataType.String),
+            SimpleField(name="avg_confidence", type=SearchFieldDataType.Double, filterable=True, sortable=True),
+            # MULTIMODAL FIELDS
+            SearchableField(name="visual_description", type=SearchFieldDataType.String),
+            SimpleField(name="is_multimodal", type=SearchFieldDataType.Boolean, filterable=True),
+            SimpleField(name="modality", type=SearchFieldDataType.String, filterable=True),
+            # CRITICAL: Use SearchField for vector field
+            SearchField(
+                name="content_vector",
+                type=SearchFieldDataType.Collection(SearchFieldDataType.Single),
+                searchable=True,
+                vector_search_dimensions=embedding_dimension,
+                vector_search_profile_name="vector-profile"
+            )
+        ]
+        
+        # Vector search configuration
+        vector_search = VectorSearch(
+            algorithms=[HnswAlgorithmConfiguration(name="hnsw-config")],
+            profiles=[VectorSearchProfile(name="vector-profile", algorithm_configuration_name="hnsw-config")]
+        )
+        
+        # Create index
+        index = SearchIndex(name=index_name, fields=fields, vector_search=vector_search)
+        self.index_client.create_or_update_index(index)
+        
+        logger.info(f"Index '{index_name}' created successfully with multimodal fields")
+        return index_name
+
+    def upload_document(
+        self, 
+        index_name: str,
+        doc_id: str,
+        content: str,
+        document_name: str,
+        provider: str,
+        content_vector: List[float],
+        extracted_fields: Any = None,
+        page_count: int = 1
+    ):
+        """
+        Upload a single document to search index
+        
+        Args:
+            index_name: Index name to upload to
+            doc_id: Unique document ID
+            content: Document text content
+            document_name: Original document filename
+            provider: Provider name
+            content_vector: Embedding vector
+            extracted_fields: Extracted fields (dict or JSON string)
+            page_count: Number of pages
+        """
+        # Convert extracted_fields to string if dict
+        if isinstance(extracted_fields, dict):
+            extracted_fields_str = json.dumps(extracted_fields)
+        else:
+            extracted_fields_str = str(extracted_fields) if extracted_fields else '{}'
+        
+        # Create document
+        document = {
+            'id': doc_id,
+            'content': content,
+            'content_vector': content_vector,
+            'document_name': document_name,
+            'provider': provider,
+            'extracted_fields': extracted_fields_str,
+            'page_count': page_count
+        }
+        
+        try:
+            client = SearchClient(
+                endpoint=self.endpoint,
+                index_name=index_name,
+                credential=self.credential
+            )
+            
+            result = client.upload_documents(documents=[document])
+            
+            if result and result[0].succeeded:
+                logger.info(f"Uploaded document {doc_id} to index {index_name}")
+            else:
+                error_msg = result[0].error_message if result else "Unknown error"
+                logger.error(f"Failed to upload document {doc_id}: {error_msg}")
+                
+        except Exception as e:
+            logger.error(f"Document upload failed for {doc_id}: {e}")
+            raise
+    
+    def upload_documents(self, provider: str, documents: List[Dict[str, Any]], timestamp: str = None):
+        """
+        Upload documents to search index
+        
+        Args:
+            provider: Provider name
+            documents: List of documents to upload
+            timestamp: Optional timestamp to match index name
+        """
+        if not documents:
+            logger.warning("No documents to upload")
+            return
+        
+        index_name = self.get_index_name(provider, timestamp)
+        
+        logger.info(f"Uploading {len(documents)} documents to index '{index_name}'")
+        
+        try:
+            client = SearchClient(
+                endpoint=self.endpoint,
+                index_name=index_name,
+                credential=self.credential
+            )
+            
+            result = client.upload_documents(documents=documents)
+            
+            # Check results
+            success_count = sum(1 for r in result if r.succeeded)
+            logger.info(f"Uploaded {success_count}/{len(documents)} documents successfully")
+            
+            if success_count < len(documents):
+                failed = [r for r in result if not r.succeeded]
+                for fail in failed:
+                    logger.error(f"Failed to upload document: {fail.key} - {fail.error_message}")
+            
+        except Exception as e:
+            logger.error(f"Document upload failed: {e}", exc_info=True)
+            raise
