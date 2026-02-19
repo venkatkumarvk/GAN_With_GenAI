@@ -183,24 +183,24 @@ def main():
     
     print(f"✓ Azure services initialized")
     
-    # List documents (input_container already defined above)
-    documents = blob_manager.list_blobs(input_container)
+    # List providers and their documents using YOUR helper.py methods
+    provider_list = blob_manager.get_providers()
     
-    if not documents:
-        print(f"\n❌ No documents found in {input_container}")
+    if not provider_list:
+        print(f"\n❌ No providers found in {input_container}")
         return
     
-    # Group by provider (folder name)
+    # Get documents for each provider
     providers = {}
-    for doc in documents:
-        parts = doc.split('/')
-        if len(parts) >= 2:
-            provider = parts[0]
-            if provider not in providers:
-                providers[provider] = []
-            providers[provider].append(doc)
+    total_docs = 0
+    for provider_name in provider_list:
+        files = blob_manager.get_provider_files(provider_name)
+        if files:
+            # Extract just the blob names
+            providers[provider_name] = [f['name'] for f in files]
+            total_docs += len(files)
     
-    print(f"\n✓ Found {len(documents)} documents in {len(providers)} providers")
+    print(f"\n✓ Found {total_docs} documents in {len(providers)} providers")
     print(f"  Providers: {', '.join(providers.keys())}")
     
     # Initialize extractors
@@ -261,15 +261,11 @@ def main():
             print(f"\n[{idx}/{len(provider_docs)}] {doc_name}")
             
             try:
-                # Step 1: Download blob and OCR
-                blob_content = blob_manager.download_blob(blob_path)
+                # Step 1: Download blob as base64 (YOUR helper.py method)
+                base64_data = blob_manager.download_blob_as_base64(blob_path)
                 file_extension = os.path.splitext(doc_name)[1]
                 
-                # Convert to base64
-                import base64
-                base64_data = base64.b64encode(blob_content).decode('utf-8')
-                
-                # OCR with DocumentIntelligenceManager
+                # OCR with DocumentIntelligenceManager (already has base64)
                 ocr_result = doc_intel_manager.analyze_document(base64_data, file_extension)
                 
                 if not ocr_result.get('success', False):
