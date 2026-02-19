@@ -1,4 +1,649 @@
 """
+FIELD CONFIGURATIONS FOR DOCUMENT EXTRACTION
+============================================
+
+USERS: Edit this file to add/modify field configurations
+DEVELOPERS: Don't edit this file - edit prompt_builder.py instead
+
+To add a new field:
+1. Add field name to config.json
+2. Add field configuration below in FIELD_LIBRARY
+3. Run main.py - that's it!
+"""
+
+# ============================================================================
+# FIELD LIBRARY - EDIT THIS TO ADD/MODIFY FIELDS
+# ============================================================================
+
+FIELD_LIBRARY = {
+    "name": {
+        "description": "Full name as it appears on the document",
+        "examples": ["JOHN MICHAEL DOE", "Jane Smith", "李明"],
+        "format": "First Middle Last or Last First format",
+        "extraction_hints": [
+            "May be split across multiple lines",
+            "Check for 'Surname' and 'Given Names' labels",
+            "Look for 'Full Name' or 'Name of Holder' sections"
+        ],
+        "confidence_factors": [
+            "Clear text with proper spacing",
+            "Consistent formatting across document",
+            "Matches expected name pattern"
+        ]
+    },
+    
+    "passport_number": {
+        "description": "Official passport identification number",
+        "examples": ["AB123456", "P12345678", "N1234567890"],
+        "format": "Alphanumeric, typically 7-10 characters",
+        "extraction_hints": [
+            "Usually labeled 'Passport No.', 'No. du Passeport'",
+            "May appear multiple times (bio page and MRZ)",
+            "Verify against MRZ if present"
+        ],
+        "confidence_factors": [
+            "Clearly labeled as passport number",
+            "Matches expected format for issuing country",
+            "No OCR errors visible"
+        ]
+    },
+    
+    "date_of_birth": {
+        "description": "Person's date of birth",
+        "examples": ["15 JAN 1985", "1985-01-15", "01/15/1985"],
+        "format": "Various date formats (DD MMM YYYY, YYYY-MM-DD, MM/DD/YYYY)",
+        "extraction_hints": [
+            "Look for 'Date of Birth', 'DOB', 'Born'",
+            "May be in different formats based on country",
+            "Cross-check with MRZ if available"
+        ],
+        "confidence_factors": [
+            "Date is clearly labeled",
+            "Consistent with other documents",
+            "Reasonable age range"
+        ]
+    },
+    
+    "nationality": {
+        "description": "Country of citizenship",
+        "examples": ["USA", "United States of America", "GBR", "United Kingdom"],
+        "format": "Full country name or ISO 3166-1 alpha-3 code",
+        "extraction_hints": [
+            "Look for 'Nationality', 'Country', 'País'",
+            "May match issuing country",
+            "Can be in native language or English"
+        ],
+        "confidence_factors": [
+            "Clearly stated on document",
+            "Matches document issuing country",
+            "Valid country name/code"
+        ]
+    },
+    
+    "issue_date": {
+        "description": "Date when document was issued",
+        "examples": ["01 MAR 2020", "2020-03-01", "March 1, 2020"],
+        "format": "Various date formats accepted",
+        "extraction_hints": [
+            "Look for 'Date of Issue', 'Issued', 'Date délivrance'",
+            "Should be in the past",
+            "Usually 10 years before expiry for passports"
+        ],
+        "confidence_factors": [
+            "Clearly labeled as issue date",
+            "Before expiry date",
+            "Reasonable time frame"
+        ]
+    },
+    
+    "expiry_date": {
+        "description": "Date when document expires",
+        "examples": ["01 MAR 2030", "2030-03-01", "March 1, 2030"],
+        "format": "Various date formats accepted",
+        "extraction_hints": [
+            "Look for 'Date of Expiry', 'Valid Until', 'Expiry'",
+            "Usually 10 years after issue for passports",
+            "May be emphasized or highlighted"
+        ],
+        "confidence_factors": [
+            "Clearly labeled as expiry date",
+            "After issue date",
+            "Standard validity period"
+        ]
+    },
+    
+    "id_number": {
+        "description": "National ID card number",
+        "examples": ["ID123456789", "987654321", "AB-1234567"],
+        "format": "Varies by country, may be alphanumeric",
+        "extraction_hints": [
+            "Look for 'ID Number', 'Identity Number', 'National ID'",
+            "Format varies significantly by country",
+            "Usually prominently displayed"
+        ],
+        "confidence_factors": [
+            "Clearly labeled",
+            "Matches expected format for country",
+            "No OCR errors visible"
+        ]
+    },
+    
+    "license_number": {
+        "description": "Driver's license number",
+        "examples": ["DL123456", "A1234567890123", "AB-123-456"],
+        "format": "Varies by state/country, alphanumeric",
+        "extraction_hints": [
+            "Look for 'License Number', 'DL No.', 'Permit Number'",
+            "Format varies by state/country",
+            "Often has specific pattern based on issuing region"
+        ],
+        "confidence_factors": [
+            "Clearly labeled",
+            "Matches known format for jurisdiction",
+            "Consistent length and pattern"
+        ]
+    },
+    
+    "address": {
+        "description": "Full residential address",
+        "examples": [
+            "123 Main Street, New York, NY 10001",
+            "Flat 5, 10 Downing Street, London",
+            "北京市朝阳区建国路1号"
+        ],
+        "format": "Street, City, State/Province, Postal Code",
+        "extraction_hints": [
+            "May span multiple lines",
+            "Look for 'Address', 'Residence', 'Domicile'",
+            "Can be in various formats based on country"
+        ],
+        "confidence_factors": [
+            "Clearly labeled as address",
+            "Complete address components",
+            "Proper formatting"
+        ]
+    },
+    
+    "place_of_birth": {
+        "description": "Location where person was born",
+        "examples": ["New York, USA", "London, United Kingdom", "Paris, France"],
+        "format": "City, Country or City, State, Country",
+        "extraction_hints": [
+            "Look for 'Place of Birth', 'Born in', 'Lieu de naissance'",
+            "Usually city and country",
+            "Can be in native language"
+        ],
+        "confidence_factors": [
+            "Clearly labeled",
+            "Valid location name",
+            "Consistent format"
+        ]
+    },
+    
+    "sex": {
+        "description": "Biological sex or gender",
+        "examples": ["M", "F", "Male", "Female"],
+        "format": "Usually M/F or Male/Female",
+        "extraction_hints": [
+            "Look for 'Sex', 'Gender', 'Sexe'",
+            "Usually single letter (M/F)",
+            "Check MRZ for verification"
+        ],
+        "confidence_factors": [
+            "Clearly labeled",
+            "Standard format",
+            "Unambiguous"
+        ]
+    },
+    
+    # ========================================================================
+    # ADD YOUR CUSTOM FIELDS BELOW
+    # ========================================================================
+    # 
+    # Template:
+    # "your_field_name": {
+    #     "description": "Brief description of what this field is",
+    #     "examples": ["Example 1", "Example 2", "Example 3"],
+    #     "format": "Expected format description",
+    #     "extraction_hints": [
+    #         "Hint 1: What to look for",
+    #         "Hint 2: Common labels",
+    #         "Hint 3: Special considerations"
+    #     ],
+    #     "confidence_factors": [
+    #         "Factor 1: When to be confident",
+    #         "Factor 2: What increases confidence",
+    #         "Factor 3: What confirms correctness"
+    #     ]
+    # },
+}
+
+
+# ============================================================================
+# SYSTEM PROMPT CONFIGURATION
+# ============================================================================
+
+SYSTEM_PROMPT_CONFIG = {
+    "role": "You are an expert document extraction system specialized in identity documents, passports, licenses, and official records.",
+    
+    "extraction_rules": [
+        "Extract EXACT values as they appear in the document",
+        "For each field, provide: value (extracted text or null) and confidence (0.0 to 1.0)",
+        "Use similar document examples provided to improve accuracy",
+        "If a field is not present, return null for value and 0.0 for confidence",
+        "Be conservative with confidence scores - only use >0.9 when certain"
+    ],
+    
+    "confidence_guide": {
+        "0.95-1.0": "Clear, unambiguous text that exactly matches expected format",
+        "0.80-0.94": "Text is clear but format slightly unusual",
+        "0.60-0.79": "Text is readable but context suggests some uncertainty",
+        "0.40-0.59": "Partial match or low quality OCR",
+        "0.20-0.39": "Very uncertain, possibly misread",
+        "0.0-0.19": "Field not found or illegible"
+    },
+    
+    "output_format": "Return ONLY a JSON object: {field_name: {value: '...', confidence: 0.95}, ...}",
+    
+    "restrictions": "Do NOT include any explanations, markdown formatting, or additional text. Just the pure JSON object."
+}
+
+
+# ============================================================================
+# DOCUMENT TYPE SPECIFIC HINTS
+# ============================================================================
+
+DOCUMENT_TYPE_HINTS = {
+    "passport": {
+        "title": "PASSPORT DOCUMENT EXTRACTION",
+        "special_considerations": [
+            "Passport numbers may include letters and numbers",
+            "Dates are often in DD MMM YYYY format (e.g., 15 JAN 1990)",
+            "Look for MRZ (Machine Readable Zone) at bottom",
+            "Names may be split (Surname / Given Names)"
+        ]
+    },
+    
+    "license": {
+        "title": "DRIVER'S LICENSE EXTRACTION",
+        "special_considerations": [
+            "License numbers vary by state/country",
+            "May contain multiple date fields",
+            "Address may span multiple lines",
+            "License class indicates vehicle types"
+        ]
+    },
+    
+    "id_card": {
+        "title": "ID CARD EXTRACTION",
+        "special_considerations": [
+            "ID formats vary significantly by country",
+            "May have both front and back text",
+            "Look for official stamps or holograms",
+            "National ID numbers follow country-specific patterns"
+        ]
+    }
+}
+
+
+# ============================================================================
+# RAG PROMPT TEMPLATES
+# ============================================================================
+
+RAG_PROMPT_TEMPLATE = {
+    "intro": "You have access to {num_docs} similar documents that have already been processed. Use these as reference examples to improve extraction accuracy.",
+    "example_header": "SIMILAR DOCUMENT EXAMPLES:",
+    "transition": "---\n\nNOW EXTRACT FROM THIS NEW DOCUMENT:",
+    "instructions": [
+        "Use the similar documents above as examples of:",
+        "- How fields typically appear in this type of document",
+        "- Expected formats and patterns",
+        "- Typical confidence levels based on text quality"
+    ],
+    "reminder": "Remember to return ONLY the JSON object with extracted fields and confidence scores."
+}
+
+
+STANDARD_PROMPT_TEMPLATE = {
+    "header": "Extract the required fields from this document:",
+    "reminder": "Remember to return ONLY the JSON object with extracted fields and confidence scores."
+}
+
+
+-----
+
+
+"""
+PROMPT BUILDER - STABLE CODE (DON'T EDIT!)
+============================================
+
+This file contains the prompt building logic.
+Users should NOT edit this file.
+
+To add/modify fields: Edit prompt_config.py instead
+"""
+
+import json
+from typing import List, Dict, Any
+
+# Import configurations from prompt_config.py
+from prompt_config import (
+    FIELD_LIBRARY,
+    SYSTEM_PROMPT_CONFIG,
+    DOCUMENT_TYPE_HINTS,
+    RAG_PROMPT_TEMPLATE,
+    STANDARD_PROMPT_TEMPLATE
+)
+
+
+class ExtractionPromptBuilder:
+    """
+    Builds prompts dynamically from prompt_config.py
+    
+    STABLE CLASS - Users should not modify this
+    All configurations come from prompt_config.py
+    """
+    
+    def __init__(self, fields: List[str]):
+        """
+        Initialize with list of fields to extract
+        
+        Args:
+            fields: List of field names (from config.json)
+        """
+        self.fields = fields
+        self._validate_fields()
+    
+    def _validate_fields(self):
+        """Validate that all fields have configurations"""
+        missing = [f for f in self.fields if f not in FIELD_LIBRARY]
+        if missing:
+            print(f"⚠️  Warning: Missing configurations for fields: {', '.join(missing)}")
+            print(f"   Add them to FIELD_LIBRARY in prompt_config.py")
+    
+    def build_system_prompt(
+        self, 
+        document_type: str = None,
+        ocr_quality: str = "high"
+    ) -> str:
+        """
+        Build system prompt dynamically
+        
+        Args:
+            document_type: Type of document (passport, license, id_card)
+            ocr_quality: OCR quality level (low, medium, high)
+        
+        Returns:
+            Complete system prompt string
+        """
+        parts = []
+        
+        # Role
+        parts.append(SYSTEM_PROMPT_CONFIG['role'])
+        parts.append("")
+        
+        # Task
+        field_list = ", ".join(self.fields)
+        parts.append(f"Your task is to extract the following fields from documents:")
+        parts.append(field_list)
+        parts.append("")
+        
+        # Extraction rules
+        parts.append("EXTRACTION RULES:")
+        for idx, rule in enumerate(SYSTEM_PROMPT_CONFIG['extraction_rules'], 1):
+            parts.append(f"{idx}. {rule}")
+        parts.append("")
+        
+        # Confidence guide
+        parts.append("CONFIDENCE SCORING GUIDE:")
+        for range_str, description in SYSTEM_PROMPT_CONFIG['confidence_guide'].items():
+            parts.append(f"- {range_str}: {description}")
+        parts.append("")
+        
+        # Document type hints
+        if document_type and document_type in DOCUMENT_TYPE_HINTS:
+            hints = DOCUMENT_TYPE_HINTS[document_type]
+            parts.append(hints['title'])
+            parts.append("Special considerations:")
+            for consideration in hints['special_considerations']:
+                parts.append(f"- {consideration}")
+            parts.append("")
+        
+        # OCR quality adjustments
+        if ocr_quality == "low":
+            parts.append("OCR QUALITY NOTE: This text may contain OCR errors.")
+            parts.append("- Be more conservative with confidence scores")
+            parts.append("- Look for context clues to verify values")
+            parts.append("- Consider common OCR mistakes (0/O, 1/I, 5/S, 8/B)")
+            parts.append("")
+        
+        # Field details
+        parts.append("DETAILED FIELD INFORMATION:")
+        parts.append("")
+        for field in self.fields:
+            if field in FIELD_LIBRARY:
+                info = FIELD_LIBRARY[field]
+                parts.append(f"**{field}**:")
+                parts.append(f"  Description: {info['description']}")
+                parts.append(f"  Examples: {', '.join(info['examples'])}")
+                parts.append(f"  Format: {info['format']}")
+                
+                if info.get('extraction_hints'):
+                    parts.append("  Extraction Hints:")
+                    for hint in info['extraction_hints']:
+                        parts.append(f"    - {hint}")
+                
+                parts.append("")
+        
+        # Output format
+        parts.append("OUTPUT FORMAT:")
+        parts.append(SYSTEM_PROMPT_CONFIG['output_format'])
+        parts.append("")
+        parts.append(SYSTEM_PROMPT_CONFIG['restrictions'])
+        
+        return "\n".join(parts)
+    
+    def build_extraction_prompt_without_rag(self, document_text: str) -> str:
+        """
+        Build extraction prompt WITHOUT RAG (fallback)
+        
+        Args:
+            document_text: The text to extract from
+        
+        Returns:
+            User prompt string
+        """
+        parts = []
+        
+        parts.append(STANDARD_PROMPT_TEMPLATE['header'])
+        parts.append("")
+        parts.append(f"Fields to extract: {', '.join(self.fields)}")
+        parts.append("")
+        parts.append("DOCUMENT TEXT:")
+        parts.append(document_text[:8000])
+        parts.append("")
+        parts.append(STANDARD_PROMPT_TEMPLATE['reminder'])
+        
+        return "\n".join(parts)
+    
+    def build_extraction_prompt_with_rag(
+        self,
+        document_text: str,
+        similar_documents: List[Dict[str, Any]],
+        top_k: int = 3
+    ) -> str:
+        """
+        Build extraction prompt WITH RAG context
+        
+        Args:
+            document_text: The text to extract from
+            similar_documents: List of similar documents from vector search
+            top_k: Number of similar documents to include
+        
+        Returns:
+            User prompt string
+        """
+        parts = []
+        
+        # Limit to top K
+        similar_docs = similar_documents[:top_k]
+        num_docs = len(similar_docs)
+        
+        # Intro
+        intro = RAG_PROMPT_TEMPLATE['intro'].format(num_docs=num_docs)
+        parts.append(intro)
+        parts.append("")
+        
+        # Examples header
+        parts.append(RAG_PROMPT_TEMPLATE['example_header'])
+        parts.append("")
+        
+        # Format each similar document
+        for idx, doc in enumerate(similar_docs, 1):
+            example = self._format_similar_document(doc, idx)
+            parts.append(example)
+        
+        # Transition
+        parts.append(RAG_PROMPT_TEMPLATE['transition'])
+        parts.append("")
+        
+        # Fields
+        parts.append(f"Fields to extract: {', '.join(self.fields)}")
+        parts.append("")
+        
+        # Document text
+        parts.append("DOCUMENT TEXT:")
+        parts.append(document_text[:8000])
+        parts.append("")
+        
+        # Instructions
+        for instruction in RAG_PROMPT_TEMPLATE['instructions']:
+            parts.append(instruction)
+        parts.append("")
+        
+        # Reminder
+        parts.append(RAG_PROMPT_TEMPLATE['reminder'])
+        
+        return "\n".join(parts)
+    
+    def _format_similar_document(self, doc: Dict[str, Any], index: int) -> str:
+        """Format a single similar document as an example"""
+        
+        # Get extracted fields
+        extracted_fields_str = doc.get('extracted_fields', '{}')
+        if isinstance(extracted_fields_str, str):
+            try:
+                extracted_fields = json.loads(extracted_fields_str)
+            except:
+                extracted_fields = {}
+        else:
+            extracted_fields = extracted_fields_str
+        
+        # Get metadata
+        doc_name = doc.get('document_name', f'Document {index}')
+        similarity = doc.get('@search.score', 0.0)
+        content_preview = doc.get('content', '')[:200]
+        
+        # Format example
+        return f"""
+EXAMPLE {index} (Similarity: {similarity:.2f})
+Document: {doc_name}
+Content Preview: {content_preview}...
+
+Extracted Fields:
+{json.dumps(extracted_fields, indent=2)}
+"""
+    
+    def get_field_info(self, field_name: str) -> Dict[str, Any]:
+        """Get configuration for a specific field"""
+        return FIELD_LIBRARY.get(field_name, {})
+    
+    @staticmethod
+    def get_available_fields() -> List[str]:
+        """Get list of all available fields"""
+        return list(FIELD_LIBRARY.keys())
+    
+    @staticmethod
+    def validate_fields(fields: List[str]) -> Dict[str, Any]:
+        """Validate that all fields have configurations"""
+        missing = [f for f in fields if f not in FIELD_LIBRARY]
+        configured = [f for f in fields if f in FIELD_LIBRARY]
+        
+        return {
+            'valid': len(missing) == 0,
+            'configured': configured,
+            'missing': missing,
+            'message': f"Missing: {', '.join(missing)}" if missing else "All fields configured ✓"
+        }
+
+
+# ============================================================================
+# HELPER FUNCTIONS
+# ============================================================================
+
+def print_available_fields():
+    """Print all available fields"""
+    print("\n" + "="*70)
+    print("AVAILABLE FIELDS IN LIBRARY")
+    print("="*70)
+    for idx, field in enumerate(FIELD_LIBRARY.keys(), 1):
+        info = FIELD_LIBRARY[field]
+        print(f"\n{idx}. {field}")
+        print(f"   Description: {info['description']}")
+        print(f"   Examples: {', '.join(info['examples'][:2])}")
+    print("\n" + "="*70)
+
+
+def validate_configuration(fields: List[str]) -> None:
+    """Validate field configuration and print results"""
+    validation = ExtractionPromptBuilder.validate_fields(fields)
+    
+    print("\n" + "="*70)
+    print("FIELD VALIDATION")
+    print("="*70)
+    print(f"Status: {'✓ Valid' if validation['valid'] else '✗ Invalid'}")
+    print(f"Configured: {', '.join(validation['configured'])}")
+    if validation['missing']:
+        print(f"Missing: {', '.join(validation['missing'])}")
+        print("\nTo fix: Add missing fields to FIELD_LIBRARY in prompt_config.py")
+    print("="*70)
+
+
+# ============================================================================
+# EXAMPLE USAGE (for testing)
+# ============================================================================
+
+if __name__ == "__main__":
+    print("="*70)
+    print("PROMPT BUILDER TEST")
+    print("="*70)
+    
+    # Show available fields
+    print_available_fields()
+    
+    # Test fields
+    fields = ["name", "passport_number", "date_of_birth"]
+    
+    # Validate
+    validate_configuration(fields)
+    
+    # Create builder
+    builder = ExtractionPromptBuilder(fields)
+    
+    # Build system prompt
+    system_prompt = builder.build_system_prompt(document_type="passport")
+    
+    print("\n" + "="*70)
+    print("SYSTEM PROMPT SAMPLE:")
+    print("="*70)
+    print(system_prompt[:500] + "...")
+    print("\n✓ Prompt builder working correctly!")
+
+
+
+------------
+
+"""
 TEXT RAG - Text-Only Document Extraction
 =========================================
 
@@ -104,20 +749,18 @@ class TextRAGExtractor:
         if similar_docs:
             print(f"    ✓ RAG context  : {len(similar_docs)} similar documents found")
             logger.info(f"  ✓ {len(similar_docs)} similar docs retrieved")
-            # Use prompt_builder to build RAG prompt from prompt.py
-            user_prompt = self.prompt_builder.build_rag_user_prompt(
+            # Use YOUR working prompt method
+            user_prompt = self.prompt_builder.build_extraction_prompt_with_rag(
                 document_text=document_text,
-                visual_description="",
-                similar_examples=similar_docs
+                similar_documents=similar_docs,
+                top_k=min(len(similar_docs), self.top_k)
             )
         else:
             print(f"    ⚠ RAG context  : No similar documents (first doc or below threshold)")
             logger.info("  ⚠ No similar docs — standard extraction")
-            # Use prompt_builder to build standard prompt from prompt.py
-            user_prompt = self.prompt_builder.build_rag_user_prompt(
-                document_text=document_text,
-                visual_description="",
-                similar_examples=None
+            # Use YOUR working prompt method
+            user_prompt = self.prompt_builder.build_extraction_prompt_without_rag(
+                document_text=document_text
             )
 
         # Step 4 — GPT-4o extraction
@@ -179,11 +822,9 @@ class TextRAGExtractor:
         logger.info(f"Text extraction (no RAG) | doc={source_document}")
 
         embedding   = self.openai_manager.generate_embeddings(document_text)
-        # Use prompt_builder to build prompt from prompt.py
-        user_prompt = self.prompt_builder.build_rag_user_prompt(
-            document_text=document_text,
-            visual_description="",
-            similar_examples=None
+        # Use YOUR working prompt method
+        user_prompt = self.prompt_builder.build_extraction_prompt_without_rag(
+            document_text=document_text
         )
         extracted_fields, system_prompt = self._call_gpt(user_prompt, document_type)
         
@@ -452,11 +1093,10 @@ class TextRAGExtractor:
             return json.loads(clean.strip())
         except json.JSONDecodeError as e:
             logger.error(f"JSON parse error: {e} | text: {text[:300]}")
-            return {}
+    
 
 
-
---------------
+---------------
 
 
 """
@@ -600,11 +1240,11 @@ class MultimodalRAGExtractor:
         if similar_docs:
             print(f"    ✓ RAG context  : {len(similar_docs)} similar documents found")
             logger.info(f"  ✓ {len(similar_docs)} similar docs retrieved")
-            user_prompt = self.prompt_builder.build_rag_user_prompt(document_text=document_text, visual_description=visual_description, similar_examples=similar_docs)
+            user_prompt = self.prompt_builder.build_extraction_prompt_with_rag(document_text=document_text, similar_documents=similar_docs, top_k=min(len(similar_docs), self.top_k))
         else:
             print(f"    ⚠ RAG context  : No similar documents (first doc or below threshold)")
             logger.info("  ⚠ No similar docs — standard extraction")
-            user_prompt = self.prompt_builder.build_rag_user_prompt(document_text=document_text, visual_description=visual_description, similar_examples=None)
+            user_prompt = self.prompt_builder.build_extraction_prompt_without_rag(document_text=document_text)
 
         # Step 5 — GPT-4o extraction
         extracted_fields, system_prompt = self._call_gpt(user_prompt, document_type)
@@ -674,7 +1314,7 @@ class MultimodalRAGExtractor:
             document_text, visual_description
         )
 
-        user_prompt = self.prompt_builder.build_rag_user_prompt(document_text=document_text, visual_description=visual_description, similar_examples=None)
+        user_prompt = self.prompt_builder.build_extraction_prompt_without_rag(document_text=document_text)
         extracted_fields, system_prompt = self._call_gpt(user_prompt, document_type)
         
         # Store in index for future RAG (if provider/index provided)
@@ -1061,114 +1701,65 @@ class MultimodalRAGExtractor:
             logger.error(f"JSON parse error: {e} | text: {text[:300]}")
             return {}
 
+------------
 
--------
 
-"""
-USER-EDITABLE FIELD LIBRARY
-============================
+{
+  "AzureBlob": {
+    "connection_string": "YOUR_BLOB_CONNECTION_STRING",
+    "inputcontainer": "inputcontainer",
+    "outputcontainer": "outputcontainer"
+  },
 
-ONLY EDIT THIS FILE TO ADD/MODIFY FIELDS
+  "AzureOpenAI": {
+    "endpoint": "https://YOUR-GPT.openai.azure.com/",
+    "api_key": "YOUR_GPT_KEY",
+    "api_version": "2024-02-15-preview",
+    "deployment_name": "gpt-4o"
+  },
 
-DO NOT EDIT prompt_builder.py - it contains system functions!
-"""
+  "AzureEmbedding": {
+    "endpoint": "https://YOUR-EMBEDDING.openai.azure.com/",
+    "api_key": "YOUR_EMBEDDING_KEY",
+    "api_version": "2024-02-15-preview",
+    "deployment_name": "text-embedding-3-large",
+    "dimension": 3072
+  },
 
-# ============================================================================
-# FIELD LIBRARY - EDIT THIS TO ADD NEW FIELDS
-# ============================================================================
+  "DocumentIntelligence": {
+    "endpoint": "https://YOUR_DOC_INTEL.cognitiveservices.azure.com/",
+    "key": "YOUR_DOC_INTEL_KEY"
+  },
 
-FIELD_LIBRARY = {
-    "name": {
-        "description": "Full name of the person",
-        "examples": ["JOHN DOE", "Jane Smith"],
-        "format": "First and Last name",
-        "extraction_hints": [
-            "Look for 'Name', 'Surname', 'Given Names'",
-            "Usually at the top of the document"
-        ],
-        "confidence_factors": [
-            "Clear text",
-            "Properly formatted"
-        ]
-    },
-    
-    "nationality": {
-        "description": "Country of citizenship",
-        "examples": ["USA", "United States", "GBR"],
-        "format": "Full country name or 3-letter code",
-        "extraction_hints": [
-            "Look for 'Nationality', 'Country', 'Citizenship'",
-            "May be abbreviated (USA, GBR, etc.)"
-        ],
-        "confidence_factors": [
-            "Clearly stated",
-            "Valid country"
-        ]
-    }
+  "AzureAISearch": {
+    "endpoint": "https://YOUR_SEARCH_SERVICE.search.windows.net",
+    "api_key": "YOUR_SEARCH_KEY"
+  },
+
+  "fields": [
+    "name",
+    "nationality"
+  ],
+
+  "confidence_threshold": 0.50,
+
+  "rag": {
+    "mode": "text",
+    "top_k": 5,
+    "similarity_threshold": 0.70,
+    "text_weight": 0.70,
+    "visual_weight": 0.30
+  },
+
+  "costs": {
+    "gpt4o_input_per_1k": 0.0025,
+    "gpt4o_output_per_1k": 0.01,
+    "embedding_per_1k": 0.00013,
+    "doc_intel_per_page": 0.01
+  },
+
+  "logging": {
+    "log_dir": "logs",
+    "log_level": "INFO"
+  }
 }
-
-
-# ============================================================================
-# SYSTEM PROMPT CONFIGURATION
-# ============================================================================
-
-SYSTEM_PROMPT_CONFIG = {
-    "role": "You are an expert at extracting name and nationality from identity documents.",
-    
-    "extraction_rules": [
-        "Extract the person's full name and their nationality",
-        "Return ONLY a JSON object",
-        "If a field is not found, return empty string",
-        "Provide confidence score 0.0 to 1.0 for each field"
-    ],
-    
-    "confidence_guide": {
-        "0.9-1.0": "Text is perfectly clear",
-        "0.7-0.89": "Text is readable but slightly unclear",
-        "0.5-0.69": "Text is partially visible",
-        "0.0-0.49": "Text is unclear or not found"
-    },
-    
-    "output_format": 'RETURN ONLY: {"name": {"value": "...", "confidence": 0.95}, "nationality": {"value": "...", "confidence": 0.95}}',
-    
-    "restrictions": "NO explanations. NO markdown. ONLY the JSON object."
-}
-
-
-# ============================================================================
-# DOCUMENT TYPE HINTS
-# ============================================================================
-
-DOCUMENT_TYPE_HINTS = {
-    "passport": {
-        "title": "PASSPORT DOCUMENT EXTRACTION",
-        "special_considerations": [
-            "Passport numbers may include letters and numbers",
-            "Dates are often in DD MMM YYYY format (e.g., 15 JAN 1990)",
-            "Look for MRZ (Machine Readable Zone) at bottom",
-            "Names may be split (Surname / Given Names)"
-        ]
-    },
-    
-    "license": {
-        "title": "DRIVER'S LICENSE EXTRACTION",
-        "special_considerations": [
-            "License numbers vary by state/country",
-            "May contain multiple date fields",
-            "Address may span multiple lines",
-            "License class indicates vehicle types"
-        ]
-    },
-    
-    "id_card": {
-        "title": "ID CARD EXTRACTION",
-        "special_considerations": [
-            "ID formats vary significantly by country",
-            "May have both front and back text",
-            "Look for official stamps or holograms",
-            "National ID numbers follow country-specific patterns"
-        ]
-    }
-}
-
------
