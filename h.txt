@@ -38,14 +38,25 @@ class ConfigManager:
             cfg = json.load(f)
         return cfg
 
-    def get(self, section: str, key: str = None, default=None) -> Any:
-        """Get config value with optional default"""
-        if key:
-            # Getting nested value: cfg.get("AzureBlob", "connection_string")
-            return self.config.get(section, {}).get(key, default)
-        else:
-            # Getting top-level value: cfg.get("confidence_threshold", 0.50)
-            return self.config.get(section, default)
+    def get(self, key: str, default=None) -> Any:
+        """
+        Get configuration value by key path.
+        
+        Examples:
+            cfg.get("confidence_threshold", 0.50) -> returns value or default
+            cfg.get("fields") -> returns value or None
+            cfg.get("AzureBlob") -> returns dict section
+        """
+        return self.config.get(key, default)
+    
+    def get_nested(self, section: str, key: str, default=None) -> Any:
+        """
+        Get nested configuration value.
+        
+        Example:
+            cfg.get_nested("AzureBlob", "connection_string") -> returns nested value
+        """
+        return self.config.get(section, {}).get(key, default)
 
 
 class AzureBlobManager:
@@ -581,8 +592,6 @@ class AzureAISearchManager:
 
 ------
 
-main.py
-
 """
 MAIN PIPELINE - COMPLETE AZURE RAG DOCUMENT EXTRACTION
 =======================================================
@@ -717,17 +726,34 @@ def main():
     cfg = ConfigManager('config.json')
     
     # Extract configuration
+    # Load configuration
     blob_config = cfg.get("AzureBlob")
     openai_config = cfg.get("AzureOpenAI")
     embedding_config = cfg.get("AzureEmbedding")
     doc_intel_config = cfg.get("DocumentIntelligence")
     search_config = cfg.get("AzureAISearch")
     
+    # Validate required sections exist
+    if not blob_config:
+        raise ValueError("Missing 'AzureBlob' section in config.json")
+    if not openai_config:
+        raise ValueError("Missing 'AzureOpenAI' section in config.json")
+    if not embedding_config:
+        raise ValueError("Missing 'AzureEmbedding' section in config.json")
+    if not doc_intel_config:
+        raise ValueError("Missing 'DocumentIntelligence' section in config.json")
+    if not search_config:
+        raise ValueError("Missing 'AzureAISearch' section in config.json")
+    
     fields = cfg.get("fields")
+    if not fields:
+        raise ValueError("Missing 'fields' in config.json")
+    
+    # Get config values with defaults
     confidence_threshold = cfg.get("confidence_threshold", 0.50)
-    min_text_length = cfg.get("min_text_length", 10)  # Default 10 chars (was 50)
-    rag_config = cfg.get("rag")
-    costs_config = cfg.get("costs")
+    min_text_length = cfg.get("min_text_length", 10)
+    rag_config = cfg.get("rag", {})
+    costs_config = cfg.get("costs", {})
     
     mode = rag_config.get("mode", "text")
     top_k = rag_config.get("top_k", 5)
@@ -1164,56 +1190,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
-
------
-
-{
-  "AzureBlob": {
-    "connection_string": "YOUR_BLOB_CONNECTION_STRING",
-    "inputcontainer": "inputcontainer",
-    "outputcontainer": "outputcontainer"
-  },
-  "AzureOpenAI": {
-    "endpoint": "https://YOUR-GPT.openai.azure.com/",
-    "api_key": "YOUR_GPT_KEY",
-    "api_version": "2024-02-15-preview",
-    "deployment_name": "gpt-4o"
-  },
-  "AzureEmbedding": {
-    "endpoint": "https://YOUR-EMBEDDING.openai.azure.com/",
-    "api_key": "YOUR_EMBEDDING_KEY",
-    "api_version": "2024-02-15-preview",
-    "deployment_name": "text-embedding-3-large",
-    "dimension": 3072
-  },
-  "DocumentIntelligence": {
-    "endpoint": "https://YOUR_DOC_INTEL.cognitiveservices.azure.com/",
-    "key": "YOUR_DOC_INTEL_KEY"
-  },
-  "AzureAISearch": {
-    "endpoint": "https://YOUR_SEARCH.search.windows.net",
-    "api_key": "YOUR_SEARCH_KEY"
-  },
-  "fields": [
-    "name",
-    "nationality"
-  ],
-  "confidence_threshold": 0.50,
-  "min_text_length": 10,
-  "rag": {
-    "mode": "text",
-    "top_k": 5,
-    "similarity_threshold": 0.70
-  },
-  "costs": {
-    "gpt4o_input_per_1k": 0.0025,
-    "gpt4o_output_per_1k": 0.01,
-    "embedding_per_1k": 0.00013,
-    "doc_intel_per_page": 0.01
-  },
-  "logging": {
-    "log_dir": "logs",
-    "log_level": "INFO"
-  }
-}
