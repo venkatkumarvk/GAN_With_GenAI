@@ -191,16 +191,32 @@ def main():
         return
     
     # Get documents for each provider
+    SUPPORTED_EXTENSIONS = {'.pdf', '.jpg', '.jpeg', '.png', '.doc', '.docx', '.tiff', '.tif', '.bmp'}
+    
     providers = {}
     total_docs = 0
     for provider_name in provider_list:
         files = blob_manager.get_provider_files(provider_name)
         if files:
-            # Extract just the blob names
-            providers[provider_name] = [f['name'] for f in files]
-            total_docs += len(files)
+            # Filter for supported file types only
+            supported_files = [
+                f['name'] for f in files 
+                if os.path.splitext(f['name'])[1].lower() in SUPPORTED_EXTENSIONS
+            ]
+            
+            if supported_files:
+                providers[provider_name] = supported_files
+                total_docs += len(supported_files)
+                print(f"  {provider_name}: {len(supported_files)} supported documents")
+            else:
+                print(f"  ⚠️  {provider_name}: No supported documents (only supports: PDF, JPG, PNG, DOC, DOCX)")
     
-    print(f"\n✓ Found {total_docs} documents in {len(providers)} providers")
+    if not providers:
+        print(f"\n❌ No supported documents found!")
+        print(f"   Supported formats: {', '.join(SUPPORTED_EXTENSIONS)}")
+        return
+    
+    print(f"\n✓ Total: {total_docs} supported documents in {len(providers)} providers")
     print(f"  Providers: {', '.join(providers.keys())}")
     
     # Initialize extractors
@@ -271,16 +287,25 @@ def main():
                 ocr_result = doc_intel_manager.analyze_document(base64_data, file_extension)
                 
                 if not ocr_result.get('success', False):
-                    print(f"   ❌ OCR failed: {ocr_result.get('error', 'Unknown error')}")
+                    error_msg = ocr_result.get('error', 'Unknown error')
+                    print(f"   ❌ OCR failed: {error_msg}")
+                    logger.error(f"OCR failed for {doc_name}: {error_msg}")
                     continue
                 
-                document_text = ocr_result['text']
-                pages = ocr_result['page_count']  # Changed from 'pages' to 'page_count'
+                # Support both 'text' and 'content' keys (different OCR modules use different keys)
+                document_text = ocr_result.get('text') or ocr_result.get('content', '')
                 
-                print(f"   🔍 OCR: {len(document_text)} chars | pages: {pages}")
+                if not document_text:
+                    print(f"   ❌ No text extracted from document")
+                    logger.warning(f"No text extracted from {doc_name}")
+                    continue
+                
+                pages = ocr_result.get('page_count', 1) or ocr_result.get('pages', 1)
+                
+                print(f"   🔍 OCR: {len(document_text)} chars | {pages} page(s) | {file_extension}")
                 
                 if len(document_text) < 10:
-                    print(f"   ⚠️  OCR text too short, skipping")
+                    print(f"   ⚠️  OCR text too short ({len(document_text)} chars), skipping")
                     continue
                 
                 # Step 2: Generate embeddings
