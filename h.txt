@@ -153,7 +153,14 @@ def main():
     print(f"  RAG: top_k={top_k}, similarity={similarity_threshold}")
     
     # Initialize Azure services
-    blob_manager = AzureBlobManager(blob_config['connection_string'])
+    input_container = blob_config['inputcontainer']
+    output_container = blob_config['outputcontainer']
+    
+    blob_manager = AzureBlobManager(
+        blob_config['connection_string'],
+        input_container,
+        output_container
+    )
     doc_intel_manager = DocumentIntelligenceManager(
         doc_intel_config['endpoint'],
         doc_intel_config['key']
@@ -177,8 +184,7 @@ def main():
     
     print(f"✓ Azure services initialized")
     
-    # List documents
-    input_container = blob_config['inputcontainer']
+    # List documents (input_container already defined above)
     documents = blob_manager.list_blobs(input_container)
     
     if not documents:
@@ -383,8 +389,7 @@ def main():
         print(f"   Category: {category}")
         print(f"   Reason: MIN {min_conf:.2f} {'≥' if min_conf >= confidence_threshold else '<'} {confidence_threshold:.2f}")
         
-        # Save outputs
-        output_container = blob_config['outputcontainer']
+        # Save outputs (output_container already defined at top)
         output_base_path = f"{category}/{provider_id}"
         
         # Build CSV with YOUR format
