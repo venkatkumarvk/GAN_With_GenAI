@@ -163,31 +163,149 @@ class MultimodalRAGExtractor:
             }
     
     def _get_document_image(self, blob_path: str) -> Optional[str]:
-        """Get base64-encoded image from blob storage with validation"""
+        """Get base64-encoded image from blob storage with document conversion"""
         try:
-            # Download from blob as base64
-            base64_image = self.blob_manager.download_blob_as_base64(blob_path)
+            # Download from blob
+            blob_data = self.blob_manager.download_blob_as_base64(blob_path)
+            file_ext = blob_path.lower()
+            
+            # Check if document needs conversion (PDF, DOC, DOCX)
+            if file_ext.endswith('.pdf'):
+                logger.info(f"Converting PDF to PNG: {blob_path}")
+                base64_image = self._convert_pdf_to_image(blob_data)
+                
+            elif file_ext.endswith(('.doc', '.docx')):
+                logger.info(f"Converting Word document to PNG: {blob_path}")
+                base64_image = self._convert_word_to_image(blob_data, file_ext)
+                
+            elif file_ext.endswith(('.jpg', '.jpeg', '.png', '.gif', '.webp')):
+                # Already an image - use directly!
+                logger.info(f"Using image directly: {blob_path}")
+                base64_image = blob_data
+                
+            else:
+                logger.warning(f"Unsupported file type: {blob_path}")
+                return None
             
             # Validate base64 string
             if not base64_image or len(base64_image) < 100:
                 logger.error(f"Invalid base64: too short ({len(base64_image)} chars)")
                 return None
             
-            # Check if it's valid base64
-            try:
-                # Try to decode to verify it's valid base64
-                import base64
-                base64.b64decode(base64_image)
-            except Exception as decode_error:
-                logger.error(f"Invalid base64 encoding: {decode_error}")
-                return None
-            
-            logger.info(f"Retrieved valid image | size={len(base64_image)} chars")
+            logger.info(f"Image ready | size={len(base64_image)} chars")
             return base64_image
             
         except Exception as e:
-            logger.error(f"Failed to get image: {e}")
+            logger.error(f"Failed to get/convert image: {e}")
+            import traceback
+            logger.error(f"Traceback: {traceback.format_exc()}")
             return None
+    
+    def _convert_pdf_to_image(self, pdf_base64: str) -> str:
+        """Convert PDF to PNG image"""
+        import base64
+        import io
+        from PIL import Image
+        import fitz  # PyMuPDF
+        
+        # Decode base64 to bytes
+        pdf_bytes = base64.b64decode(pdf_base64)
+        
+        # Open PDF
+        pdf_document = fitz.open(stream=pdf_bytes, filetype="pdf")
+        
+        # Convert first page to image with high resolution
+        page = pdf_document[0]
+        pix = page.get_pixmap(matrix=fitz.Matrix(2, 2))  # 2x zoom
+        
+        # Convert to PIL Image
+        img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
+        
+        # Convert to PNG base64 (lossless, better quality than JPEG)
+        buffer = io.BytesIO()
+        img.save(buffer, format="PNG", optimize=True)
+        base64_image = base64.b64encode(buffer.getvalue()).decode('utf-8')
+        
+        pdf_document.close()
+        logger.info(f"PDF converted to PNG | size={len(base64_image)} chars")
+        return base64_image
+    
+    def _convert_word_to_image(self, doc_base64: str, file_ext: str) -> str:
+        """Convert Word document (DOC/DOCX) to PNG image"""
+        import base64
+        import io
+        from PIL import Image
+        import docx2pdf
+        import fitz  # PyMuPDF
+        import tempfile
+        import os
+        
+        # Decode base64 to bytes
+        doc_bytes = base64.b64decode(doc_base64)
+        
+        # Create temp files
+        with tempfile.TemporaryDirectory() as temp_dir:
+            # Save Word document
+            if file_ext.endswith('.docx'):
+                doc_path = os.path.join(temp_dir, "document.docx")
+            else:
+                doc_path = os.path.join(temp_dir, "document.doc")
+            
+            with open(doc_path, 'wb') as f:
+                f.write(doc_bytes)
+            
+            # Convert Word to PDF first (docx2pdf works well)
+            pdf_path = os.path.join(temp_dir, "document.pdf")
+            
+            try:
+                # Try using docx2pdf (Windows/Mac)
+                import docx2pdf
+                docx2pdf.convert(doc_path, pdf_path)
+            except:
+                # Fallback: Use python-docx to extract text and create simple PDF
+                logger.warning("docx2pdf not available, using fallback method")
+                from docx import Document
+                import reportlab
+                from reportlab.lib.pagesizes import letter
+                from reportlab.pdfgen import canvas
+                
+                # Read Word document
+                doc = Document(doc_path)
+                
+                # Create simple PDF with text
+                c = canvas.Canvas(pdf_path, pagesize=letter)
+                y = 750
+                for para in doc.paragraphs:
+                    if para.text.strip():
+                        c.drawString(50, y, para.text[:80])  # Truncate long lines
+                        y -= 20
+                        if y < 50:  # New page if needed
+                            c.showPage()
+                            y = 750
+                c.save()
+            
+            # Now convert PDF to PNG
+            with open(pdf_path, 'rb') as f:
+                pdf_bytes = f.read()
+            
+            # Open PDF
+            pdf_document = fitz.open(stream=pdf_bytes, filetype="pdf")
+            
+            # Convert first page to image
+            page = pdf_document[0]
+            pix = page.get_pixmap(matrix=fitz.Matrix(2, 2))
+            
+            # Convert to PIL Image
+            img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
+            
+            # Convert to PNG base64
+            buffer = io.BytesIO()
+            img.save(buffer, format="PNG", optimize=True)
+            base64_image = base64.b64encode(buffer.getvalue()).decode('utf-8')
+            
+            pdf_document.close()
+            logger.info(f"Word document converted to PNG | size={len(base64_image)} chars")
+            return base64_image
     
     def _search_similar_documents(
         self,
@@ -244,17 +362,21 @@ class MultimodalRAGExtractor:
         """Call GPT-4o Vision API"""
         
         try:
-            # Detect image type from file extension (simpler approach)
-            if source_document.lower().endswith('.png'):
-                image_type = "image/png"
+            # Detect image type
+            # PDFs and Word docs are converted to PNG
+            # Direct images use their original format
+            if source_document.lower().endswith(('.pdf', '.doc', '.docx')):
+                image_type = "image/png"  # Documents converted to PNG
+            elif source_document.lower().endswith('.png'):
+                image_type = "image/png"  # Direct PNG
             elif source_document.lower().endswith(('.jpg', '.jpeg')):
-                image_type = "image/jpeg"
+                image_type = "image/jpeg"  # Direct JPEG
             elif source_document.lower().endswith('.gif'):
-                image_type = "image/gif"
+                image_type = "image/gif"  # Direct GIF
             elif source_document.lower().endswith('.webp'):
-                image_type = "image/webp"
+                image_type = "image/webp"  # Direct WEBP
             else:
-                image_type = "image/jpeg"  # default
+                image_type = "image/png"  # default PNG
             
             # Build vision message (simplified, matching reference code)
             messages = [
