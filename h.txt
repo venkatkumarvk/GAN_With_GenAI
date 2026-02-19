@@ -104,13 +104,21 @@ class TextRAGExtractor:
         if similar_docs:
             print(f"    ✓ RAG context  : {len(similar_docs)} similar documents found")
             logger.info(f"  ✓ {len(similar_docs)} similar docs retrieved")
-            # Use OLD simple prompt method
-            user_prompt = self._build_rag_prompt(document_text, similar_docs)
+            # Use prompt_builder to build RAG prompt from prompt.py
+            user_prompt = self.prompt_builder.build_rag_user_prompt(
+                document_text=document_text,
+                visual_description="",
+                similar_examples=similar_docs
+            )
         else:
             print(f"    ⚠ RAG context  : No similar documents (first doc or below threshold)")
             logger.info("  ⚠ No similar docs — standard extraction")
-            # Use OLD simple prompt method
-            user_prompt = self._build_standard_prompt(document_text)
+            # Use prompt_builder to build standard prompt from prompt.py
+            user_prompt = self.prompt_builder.build_rag_user_prompt(
+                document_text=document_text,
+                visual_description="",
+                similar_examples=None
+            )
 
         # Step 4 — GPT-4o extraction
         extracted_fields, system_prompt = self._call_gpt(user_prompt, document_type)
@@ -171,8 +179,12 @@ class TextRAGExtractor:
         logger.info(f"Text extraction (no RAG) | doc={source_document}")
 
         embedding   = self.openai_manager.generate_embeddings(document_text)
-        # Use OLD simple prompt method
-        user_prompt = self._build_standard_prompt(document_text)
+        # Use prompt_builder to build prompt from prompt.py
+        user_prompt = self.prompt_builder.build_rag_user_prompt(
+            document_text=document_text,
+            visual_description="",
+            similar_examples=None
+        )
         extracted_fields, system_prompt = self._call_gpt(user_prompt, document_type)
         
         # Store in index for future RAG (if provider/index provided)
@@ -402,22 +414,10 @@ class TextRAGExtractor:
     ) -> tuple[Dict[str, Any], str]:
         """Call GPT-4o and return parsed extraction result + system prompt"""
         try:
-            # SIMPLE DIRECT SYSTEM PROMPT - No prompt_builder complexity
-            system_prompt = f"""You are an expert at extracting information from documents.
-
-Extract ONLY these fields: {', '.join(self.fields)}
-
-For each field, return:
-- "value": the extracted text (or empty string if not found)
-- "confidence": a number from 0.0 to 1.0
-
-Return ONLY a JSON object like this:
-{{
-  "name": {{"value": "JOHN DOE", "confidence": 0.95}},
-  "nationality": {{"value": "USA", "confidence": 0.98}}
-}}
-
-NO explanations. NO markdown. ONLY JSON."""
+            # Use prompt_builder to build system prompt from prompt.py
+            system_prompt = self.prompt_builder.build_system_prompt(
+                document_type=document_type
+            )
 
             response = self.openai_manager.gpt_client.chat.completions.create(
                 model=self.openai_manager.gpt_deployment,
@@ -456,8 +456,7 @@ NO explanations. NO markdown. ONLY JSON."""
 
 
 
-----------------
-
+--------------
 
 
 """
@@ -601,11 +600,11 @@ class MultimodalRAGExtractor:
         if similar_docs:
             print(f"    ✓ RAG context  : {len(similar_docs)} similar documents found")
             logger.info(f"  ✓ {len(similar_docs)} similar docs retrieved")
-            user_prompt = self._build_rag_prompt(document_text, visual_description, similar_docs)
+            user_prompt = self.prompt_builder.build_rag_user_prompt(document_text=document_text, visual_description=visual_description, similar_examples=similar_docs)
         else:
             print(f"    ⚠ RAG context  : No similar documents (first doc or below threshold)")
             logger.info("  ⚠ No similar docs — standard extraction")
-            user_prompt = self._build_standard_prompt(document_text, visual_description)
+            user_prompt = self.prompt_builder.build_rag_user_prompt(document_text=document_text, visual_description=visual_description, similar_examples=None)
 
         # Step 5 — GPT-4o extraction
         extracted_fields, system_prompt = self._call_gpt(user_prompt, document_type)
@@ -675,7 +674,7 @@ class MultimodalRAGExtractor:
             document_text, visual_description
         )
 
-        user_prompt = self._build_standard_prompt(document_text, visual_description)
+        user_prompt = self.prompt_builder.build_rag_user_prompt(document_text=document_text, visual_description=visual_description, similar_examples=None)
         extracted_fields, system_prompt = self._call_gpt(user_prompt, document_type)
         
         # Store in index for future RAG (if provider/index provided)
@@ -1023,23 +1022,11 @@ class MultimodalRAGExtractor:
     ) -> tuple[Dict[str, Any], str]:
         """Call GPT-4o and return parsed extraction + system prompt"""
         try:
-            # SIMPLE DIRECT SYSTEM PROMPT
-            system_prompt = f"""You are an expert at extracting information from documents.
-
-Extract ONLY these fields: {', '.join(self.fields)}
-
-For each field, return:
-- "value": the extracted text (or empty string if not found)
-- "confidence": a number from 0.0 to 1.0
-
-Return ONLY a JSON object like this:
-{{
-  "name": {{"value": "JOHN DOE", "confidence": 0.95}},
-  "nationality": {{"value": "USA", "confidence": 0.98}}
-}}
-
-NO explanations. NO markdown. ONLY JSON."""
-
+            # Use prompt_builder to build system prompt from prompt.py
+            system_prompt = self.prompt_builder.build_system_prompt(
+                document_type=document_type
+            )
+            
             response = self.openai_manager.gpt_client.chat.completions.create(
                 model=self.openai_manager.gpt_deployment,
                 messages=[
@@ -1075,8 +1062,7 @@ NO explanations. NO markdown. ONLY JSON."""
             return {}
 
 
-
-------------
+-------
 
 """
 USER-EDITABLE FIELD LIBRARY
@@ -1184,3 +1170,5 @@ DOCUMENT_TYPE_HINTS = {
         ]
     }
 }
+
+-----
