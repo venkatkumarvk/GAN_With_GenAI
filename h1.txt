@@ -296,8 +296,8 @@ class TextRAGExtractor:
             }
 
 
+------
 
-----
 
 """
 MULTIMODAL RAG EXTRACTION  
@@ -646,8 +646,9 @@ class MultimodalRAGExtractor:
         )
 
 
------
 
+
+------
 
 """
 Unified RAG Extractor
@@ -784,6 +785,3 @@ class UnifiedRAGExtractor:
             source_document=source_document,
             document_type=document_type
         )
-
-
-------
