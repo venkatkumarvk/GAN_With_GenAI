@@ -22,7 +22,7 @@ from helper import (
     AzureOpenAIManager,
     AzureAISearchManager
 )
-from documentintelligence_ocr import extract_text_from_document
+# Note: No separate OCR import needed - using DocumentIntelligenceManager from helper
 from text_rag import TextRAGExtractor
 from multimodal_rag import MultimodalRAGExtractor
 from costtracking import CostTracker
@@ -256,16 +256,23 @@ def main():
             print(f"\n[{idx}/{len(provider_docs)}] {doc_name}")
             
             try:
-                # Step 1: OCR
-                blob_url = blob_manager.get_blob_url(input_container, blob_path)
-                ocr_result = extract_text_from_document(
-                    doc_intel_config['endpoint'],
-                    doc_intel_config['key'],
-                    blob_url
-                )
+                # Step 1: Download blob and OCR
+                blob_content = blob_manager.download_blob(blob_path)
+                file_extension = os.path.splitext(doc_name)[1]
+                
+                # Convert to base64
+                import base64
+                base64_data = base64.b64encode(blob_content).decode('utf-8')
+                
+                # OCR with DocumentIntelligenceManager
+                ocr_result = doc_intel_manager.analyze_document(base64_data, file_extension)
+                
+                if not ocr_result.get('success', False):
+                    print(f"   ❌ OCR failed: {ocr_result.get('error', 'Unknown error')}")
+                    continue
                 
                 document_text = ocr_result['text']
-                pages = ocr_result['pages']
+                pages = ocr_result['page_count']  # Changed from 'pages' to 'page_count'
                 
                 print(f"   🔍 OCR: {len(document_text)} chars | pages: {pages}")
                 
