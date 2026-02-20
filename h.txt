@@ -1,0 +1,351 @@
+"""
+PROMPT BUILDER - STABLE CODE (DON'T EDIT!)
+============================================
+
+This file contains the prompt building logic.
+Users should NOT edit this file.
+
+To add/modify fields: Edit prompt_config.py instead
+"""
+
+import json
+from typing import List, Dict, Any
+
+# Import configurations from prompt_config.py
+from prompt_config import (
+    FIELD_LIBRARY,
+    SYSTEM_PROMPT_CONFIG,
+    DOCUMENT_TYPE_HINTS,
+    RAG_PROMPT_TEMPLATE,
+    STANDARD_PROMPT_TEMPLATE
+)
+
+
+class ExtractionPromptBuilder:
+    """
+    Builds prompts dynamically from prompt_config.py
+    
+    STABLE CLASS - Users should not modify this
+    All configurations come from prompt_config.py
+    """
+    
+    def __init__(self, fields: List[str]):
+        """
+        Initialize with list of fields to extract
+        
+        Args:
+            fields: List of field names (from config.json)
+        """
+        self.fields = fields
+        self._validate_fields()
+    
+    def _validate_fields(self):
+        """Validate that all fields have configurations"""
+        missing = [f for f in self.fields if f not in FIELD_LIBRARY]
+        if missing:
+            print(f"⚠️  Warning: Missing configurations for fields: {', '.join(missing)}")
+            print(f"   Add them to FIELD_LIBRARY in prompt_config.py")
+    
+    def build_system_prompt(
+        self, 
+        document_type: str = None,
+        ocr_quality: str = "high"
+    ) -> str:
+        """
+        Build system prompt dynamically
+        
+        Args:
+            document_type: Type of document (passport, license, id_card)
+            ocr_quality: OCR quality level (low, medium, high)
+        
+        Returns:
+            Complete system prompt string
+        """
+        parts = []
+        
+        # Role
+        parts.append(SYSTEM_PROMPT_CONFIG['role'])
+        parts.append("")
+        
+        # Task
+        field_list = ", ".join(self.fields)
+        parts.append(f"Your task is to extract the following fields from documents:")
+        parts.append(field_list)
+        parts.append("")
+        
+        # Extraction rules
+        parts.append("EXTRACTION RULES:")
+        for idx, rule in enumerate(SYSTEM_PROMPT_CONFIG['extraction_rules'], 1):
+            parts.append(f"{idx}. {rule}")
+        parts.append("")
+        
+        # Confidence guide
+        parts.append("CONFIDENCE SCORING GUIDE:")
+        for range_str, description in SYSTEM_PROMPT_CONFIG['confidence_guide'].items():
+            parts.append(f"- {range_str}: {description}")
+        parts.append("")
+        
+        # Document type hints
+        if document_type and document_type in DOCUMENT_TYPE_HINTS:
+            hints = DOCUMENT_TYPE_HINTS[document_type]
+            parts.append(hints['title'])
+            parts.append("Special considerations:")
+            for consideration in hints['special_considerations']:
+                parts.append(f"- {consideration}")
+            parts.append("")
+        
+        # OCR quality adjustments
+        if ocr_quality == "low":
+            parts.append("OCR QUALITY NOTE: This text may contain OCR errors.")
+            parts.append("- Be more conservative with confidence scores")
+            parts.append("- Look for context clues to verify values")
+            parts.append("- Consider common OCR mistakes (0/O, 1/I, 5/S, 8/B)")
+            parts.append("")
+        
+        # Field details
+        parts.append("DETAILED FIELD INFORMATION:")
+        parts.append("")
+        for field in self.fields:
+            if field in FIELD_LIBRARY:
+                info = FIELD_LIBRARY[field]
+                parts.append(f"**{field}**:")
+                parts.append(f"  Description: {info['description']}")
+                parts.append(f"  Examples: {', '.join(info['examples'])}")
+                parts.append(f"  Format: {info['format']}")
+                
+                if info.get('extraction_hints'):
+                    parts.append("  Extraction Hints:")
+                    for hint in info['extraction_hints']:
+                        parts.append(f"    - {hint}")
+                
+                parts.append("")
+        
+        # Output format
+        parts.append("OUTPUT FORMAT:")
+        parts.append(SYSTEM_PROMPT_CONFIG['output_format'])
+        parts.append("")
+        parts.append(SYSTEM_PROMPT_CONFIG['restrictions'])
+        
+        # Filter out None values before joining
+        parts = [str(p) if p is not None else "" for p in parts]
+        
+        return "\n".join(parts)
+    
+    def build_extraction_prompt_without_rag(self, document_text: str) -> str:
+        """
+        Build extraction prompt WITHOUT RAG (fallback)
+        
+        Args:
+            document_text: The text to extract from
+        
+        Returns:
+            User prompt string
+        """
+        # Truncate to prevent context length errors
+        # ~4000 tokens = ~16000 chars
+        MAX_DOC_CHARS = 16000
+        if len(document_text) > MAX_DOC_CHARS:
+            document_text = document_text[:MAX_DOC_CHARS]
+            print(f"⚠️ Document truncated to {MAX_DOC_CHARS} chars (~4000 tokens)")
+        
+        parts = []
+        
+        parts.append(STANDARD_PROMPT_TEMPLATE['header'])
+        parts.append("")
+        parts.append(f"Fields to extract: {', '.join(self.fields)}")
+        parts.append("")
+        parts.append("DOCUMENT TEXT:")
+        parts.append(document_text)
+        parts.append("")
+        parts.append(STANDARD_PROMPT_TEMPLATE['reminder'])
+        
+        # Filter out None values
+        parts = [str(p) if p is not None else "" for p in parts]
+        
+        return "\n".join(parts)
+    
+    def build_extraction_prompt_with_rag(
+        self,
+        document_text: str,
+        similar_documents: List[Dict[str, Any]],
+        top_k: int = 3
+    ) -> str:
+        """
+        Build extraction prompt WITH RAG context
+        
+        Args:
+            document_text: The text to extract from
+            similar_documents: List of similar documents from vector search
+            top_k: Number of similar documents to include
+        
+        Returns:
+            User prompt string
+        """
+        parts = []
+        
+        # Limit to top K
+        similar_docs = similar_documents[:top_k]
+        num_docs = len(similar_docs)
+        
+        # Intro
+        intro = RAG_PROMPT_TEMPLATE['intro'].format(num_docs=num_docs)
+        parts.append(intro)
+        parts.append("")
+        
+        # Examples header
+        parts.append(RAG_PROMPT_TEMPLATE['example_header'])
+        parts.append("")
+        
+        # Format each similar document
+        for idx, doc in enumerate(similar_docs, 1):
+            example = self._format_similar_document(doc, idx)
+            parts.append(example)
+        
+        # Transition
+        parts.append(RAG_PROMPT_TEMPLATE['transition'])
+        parts.append("")
+        
+        # Fields
+        parts.append(f"Fields to extract: {', '.join(self.fields)}")
+        parts.append("")
+        
+        # Document text
+        parts.append("DOCUMENT TEXT:")
+        parts.append(document_text[:8000])
+        parts.append("")
+        
+        # Instructions
+        for instruction in RAG_PROMPT_TEMPLATE['instructions']:
+            parts.append(instruction)
+        parts.append("")
+        
+        # Reminder
+        parts.append(RAG_PROMPT_TEMPLATE['reminder'])
+        
+        # Filter out None values
+        parts = [str(p) if p is not None else "" for p in parts]
+        
+        return "\n".join(parts)
+    
+    def _format_similar_document(self, doc: Dict[str, Any], index: int) -> str:
+        """
+        Format a single similar document as an example
+        
+        OPTIMIZED: Only includes extracted fields, NOT full document text
+        This reduces token usage by ~90% per example!
+        """
+        
+        # Get extracted fields
+        extracted_fields_str = doc.get('extracted_fields', '{}')
+        if isinstance(extracted_fields_str, str):
+            try:
+                extracted_fields = json.loads(extracted_fields_str)
+            except:
+                extracted_fields = {}
+        else:
+            extracted_fields = extracted_fields_str
+        
+        if not extracted_fields:
+            return ""  # Skip empty examples
+        
+        # Get metadata
+        doc_name = doc.get('document_name', f'Document {index}')
+        similarity = doc.get('@search.score', 0.0)
+        
+        # Build compact example with ONLY extracted fields
+        lines = [f"EXAMPLE {index} (Similarity: {similarity:.2f}):"]
+        
+        for field_name, field_data in extracted_fields.items():
+            if isinstance(field_data, dict):
+                value = field_data.get('value', '')
+                confidence = field_data.get('confidence', 0.0)
+                lines.append(f"  {field_name}: \"{value}\" (confidence: {confidence:.2f})")
+            else:
+                lines.append(f"  {field_name}: \"{field_data}\"")
+        
+        return "\n".join(lines)
+    
+    def get_field_info(self, field_name: str) -> Dict[str, Any]:
+        """Get configuration for a specific field"""
+        return FIELD_LIBRARY.get(field_name, {})
+    
+    @staticmethod
+    def get_available_fields() -> List[str]:
+        """Get list of all available fields"""
+        return list(FIELD_LIBRARY.keys())
+    
+    @staticmethod
+    def validate_fields(fields: List[str]) -> Dict[str, Any]:
+        """Validate that all fields have configurations"""
+        missing = [f for f in fields if f not in FIELD_LIBRARY]
+        configured = [f for f in fields if f in FIELD_LIBRARY]
+        
+        return {
+            'valid': len(missing) == 0,
+            'configured': configured,
+            'missing': missing,
+            'message': f"Missing: {', '.join(missing)}" if missing else "All fields configured ✓"
+        }
+
+
+# ============================================================================
+# HELPER FUNCTIONS
+# ============================================================================
+
+def print_available_fields():
+    """Print all available fields"""
+    print("\n" + "="*70)
+    print("AVAILABLE FIELDS IN LIBRARY")
+    print("="*70)
+    for idx, field in enumerate(FIELD_LIBRARY.keys(), 1):
+        info = FIELD_LIBRARY[field]
+        print(f"\n{idx}. {field}")
+        print(f"   Description: {info['description']}")
+        print(f"   Examples: {', '.join(info['examples'][:2])}")
+    print("\n" + "="*70)
+
+
+def validate_configuration(fields: List[str]) -> None:
+    """Validate field configuration and print results"""
+    validation = ExtractionPromptBuilder.validate_fields(fields)
+    
+    print("\n" + "="*70)
+    print("FIELD VALIDATION")
+    print("="*70)
+    print(f"Status: {'✓ Valid' if validation['valid'] else '✗ Invalid'}")
+    print(f"Configured: {', '.join(validation['configured'])}")
+    if validation['missing']:
+        print(f"Missing: {', '.join(validation['missing'])}")
+        print("\nTo fix: Add missing fields to FIELD_LIBRARY in prompt_config.py")
+    print("="*70)
+
+
+# ============================================================================
+# EXAMPLE USAGE (for testing)
+# ============================================================================
+
+if __name__ == "__main__":
+    print("="*70)
+    print("PROMPT BUILDER TEST")
+    print("="*70)
+    
+    # Show available fields
+    print_available_fields()
+    
+    # Test fields
+    fields = ["name", "passport_number", "date_of_birth"]
+    
+    # Validate
+    validate_configuration(fields)
+    
+    # Create builder
+    builder = ExtractionPromptBuilder(fields)
+    
+    # Build system prompt
+    system_prompt = builder.build_system_prompt(document_type="passport")
+    
+    print("\n" + "="*70)
+    print("SYSTEM PROMPT SAMPLE:")
+    print("="*70)
+    print(system_prompt[:500] + "...")
+    print("\n✓ Prompt builder working correctly!")
