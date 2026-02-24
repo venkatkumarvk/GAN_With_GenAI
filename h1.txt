@@ -1,20 +1,23 @@
 """
-MEDICAL CREDENTIALS FIELD LIBRARY - EXACT FORMAT
-================================================
+FLEXIBLE FIELD LIBRARY - Medical Credentials
+=============================================
 
-Following your exact structure with:
-- description
-- examples  
-- format
-- extraction_hints
-- confidence_factors
+EASY TO EXTEND: Just add new fields to FIELD_LIBRARY below
+No need to change anything else - system automatically adapts!
 
-27 fields for medical credentialing
+TO ADD NEW FIELDS:
+1. Add field definition to FIELD_LIBRARY (copy existing format)
+2. Add field name to config.json "fields" list
+3. Done! System automatically uses new fields
 """
+
+# =============================================================================
+# FIELD LIBRARY - Add/Remove Fields Here
+# =============================================================================
 
 FIELD_LIBRARY = {
     # =========================================================================
-    # PERSONAL INFORMATION (1-13)
+    # PERSONAL INFORMATION
     # =========================================================================
     
     "first_name": {
@@ -265,7 +268,7 @@ FIELD_LIBRARY = {
     },
     
     # =========================================================================
-    # STATE LICENSE (14-16)
+    # STATE LICENSE
     # =========================================================================
     
     "state_license_number": {
@@ -326,7 +329,7 @@ FIELD_LIBRARY = {
     },
     
     # =========================================================================
-    # DEA LICENSE (17-19)
+    # DEA LICENSE
     # =========================================================================
     
     "dea_license_number": {
@@ -387,7 +390,7 @@ FIELD_LIBRARY = {
     },
     
     # =========================================================================
-    # CDS LICENSE (20-22)
+    # CDS LICENSE
     # =========================================================================
     
     "cds_license_number": {
@@ -448,7 +451,7 @@ FIELD_LIBRARY = {
     },
     
     # =========================================================================
-    # OTHER CREDENTIALS (23-25)
+    # OTHER CREDENTIALS
     # =========================================================================
     
     "other_credential_type": {
@@ -509,7 +512,7 @@ FIELD_LIBRARY = {
     },
     
     # =========================================================================
-    # BOARD CERTIFICATION (26-27)
+    # BOARD CERTIFICATION
     # =========================================================================
     
     "board_cert_name": {
@@ -558,11 +561,16 @@ FIELD_LIBRARY = {
             "Standard specialty nomenclature"
         ]
     }
+    
+    # =============================================================================
+    # TO ADD MORE FIELDS: Just copy a field block above and modify
+    # System automatically counts and uses all fields in FIELD_LIBRARY
+    # =============================================================================
 }
 
 
 # =============================================================================
-# SYSTEM PROMPT CONFIGURATION
+# SYSTEM PROMPT CONFIGURATION - FULLY DYNAMIC
 # =============================================================================
 
 SYSTEM_PROMPT_CONFIG = {
@@ -590,7 +598,7 @@ SYSTEM_PROMPT_CONFIG = {
     },
     
     "output_format": """
-Return a JSON object with ALL 27 fields. For each field provide:
+Return a JSON object with ALL configured fields. For each field provide:
 {
   "field_name": {
     "value": "extracted value or 'NA'",
@@ -600,7 +608,7 @@ Return a JSON object with ALL 27 fields. For each field provide:
 
 CRITICAL RULES:
 - Return 'NA' with confidence 0.50 for any field not found
-- All 27 fields MUST be present in response
+- ALL configured fields MUST be present in response
 - No field should be null or empty - use 'NA'
 - Dates in MM/DD/YYYY format
 - License numbers: preserve exact format with hyphens/letters
@@ -649,111 +657,183 @@ RAG_PROMPT_TEMPLATE = {
         "Return 'NA' for any field not found (as shown in examples)",
         "Maintain consistent date formatting: MM/DD/YYYY",
         "Match the confidence scoring approach from examples",
-        "Ensure all 27 fields are present in your response",
+        "Ensure ALL configured fields are present in your response",
         "Pay attention to how examples handled missing fields (always 'NA', not null)"
     ],
     
-    "reminder": "Return ONLY the JSON object with all 27 fields. Use 'NA' for missing values. No markdown formatting."
+    "reminder": "Return ONLY the JSON object with all configured fields. Use 'NA' for missing values. No markdown formatting."
 }
 
 STANDARD_PROMPT_TEMPLATE = {
-    "header": "Extract the following 27 fields from this medical credentialing document:",
-    "reminder": "Return ONLY the JSON object with all 27 fields. Use 'NA' for any field not found. No markdown formatting."
+    "header": "Extract the configured fields from this medical credentialing document:",
+    "reminder": "Return ONLY the JSON object with all configured fields. Use 'NA' for any field not found. No markdown formatting."
 }
 
 
 # =============================================================================
-# HELPER FUNCTIONS
+# DYNAMIC HELPER FUNCTIONS - Auto-adapt to field count
 # =============================================================================
 
-def validate_medical_credential_fields():
-    """Validate that all 27 fields are defined"""
-    required_fields = [
-        "first_name", "last_name", "email", "cell",
-        "birth_date", "birth_place", "birth_city", "birth_state_province", "birth_country",
-        "citizenship", "degree", "gender", "ssn",
-        "state_license_number", "state_license_state", "state_license_expiration",
-        "dea_license_number", "dea_license_state", "dea_license_expiration",
-        "cds_license_number", "cds_license_state", "cds_license_expiration",
-        "other_credential_type", "other_credential_state", "other_credential_expiration",
-        "board_cert_name", "board_cert_specialty"
-    ]
+def get_field_count():
+    """Get current number of fields (dynamic)"""
+    return len(FIELD_LIBRARY)
+
+
+def validate_fields():
+    """Validate all fields in FIELD_LIBRARY"""
+    all_valid = True
+    for field_name, field_config in FIELD_LIBRARY.items():
+        required_keys = ['description', 'examples', 'format', 'extraction_hints', 'confidence_factors']
+        missing_keys = [k for k in required_keys if k not in field_config]
+        
+        if missing_keys:
+            print(f"❌ Field '{field_name}' missing: {missing_keys}")
+            all_valid = False
     
-    missing = [f for f in required_fields if f not in FIELD_LIBRARY]
+    field_count = get_field_count()
+    if all_valid:
+        print(f"✅ All {field_count} fields defined correctly")
     
-    if missing:
-        print(f"❌ Missing field definitions: {missing}")
-        return False
-    
-    print(f"✅ All 27 medical credential fields defined correctly")
-    return True
+    return all_valid
 
 
 def print_field_summary():
-    """Print categorized summary of all 27 fields"""
+    """Print summary of all fields (dynamic)"""
+    field_count = get_field_count()
     print("\n" + "="*80)
-    print("MEDICAL CREDENTIALING FIELDS - 27 TOTAL")
+    print(f"MEDICAL CREDENTIALING FIELDS - {field_count} TOTAL")
     print("="*80)
     
-    categories = [
-        ("Personal Information (1-13)", [
-            "first_name", "last_name", "email", "cell", "birth_date",
-            "birth_place", "birth_city", "birth_state_province", 
-            "birth_country", "citizenship", "degree", "gender", "ssn"
-        ]),
-        ("State License (14-16)", [
-            "state_license_number", "state_license_state", "state_license_expiration"
-        ]),
-        ("DEA License (17-19)", [
-            "dea_license_number", "dea_license_state", "dea_license_expiration"
-        ]),
-        ("CDS License (20-22)", [
-            "cds_license_number", "cds_license_state", "cds_license_expiration"
-        ]),
-        ("Other Credentials (23-25)", [
-            "other_credential_type", "other_credential_state", "other_credential_expiration"
-        ]),
-        ("Board Certification (26-27)", [
-            "board_cert_name", "board_cert_specialty"
-        ])
-    ]
-    
-    for category_name, fields in categories:
-        print(f"\n{category_name}:")
-        for field in fields:
-            info = FIELD_LIBRARY[field]
-            print(f"  • {field}: {info['description']}")
+    for idx, (field_name, field_config) in enumerate(FIELD_LIBRARY.items(), 1):
+        print(f"{idx}. {field_name}: {field_config['description']}")
     
     print("\n" + "="*80)
-    print(f"Total: 27 fields configured")
+    print(f"Total: {field_count} fields configured")
     print("="*80)
+
+
+def get_field_names():
+    """Get list of all field names (for config.json)"""
+    return list(FIELD_LIBRARY.keys())
 
 
 # Run validation if executed directly
 if __name__ == "__main__":
     print("="*80)
-    print("MEDICAL CREDENTIAL FIELD LIBRARY - VALIDATION")
+    print("FLEXIBLE FIELD LIBRARY - VALIDATION")
     print("="*80)
     
-    # Validate all 27 fields
-    is_valid = validate_medical_credential_fields()
+    # Validate
+    is_valid = validate_fields()
     
     if is_valid:
         # Print summary
         print_field_summary()
         
-        # Test sample field access
+        # Show how to use
         print("\n" + "="*80)
-        print("SAMPLE FIELD DETAILS: first_name")
+        print("USAGE EXAMPLE")
         print("="*80)
-        sample = FIELD_LIBRARY['first_name']
-        print(f"Description: {sample['description']}")
-        print(f"Examples: {sample['examples']}")
-        print(f"Format: {sample['format']}")
-        print(f"Extraction Hints: {len(sample['extraction_hints'])} hints provided")
-        print(f"Confidence Factors: {len(sample['confidence_factors'])} factors defined")
+        print("\nTo add new fields:")
+        print("1. Copy an existing field block in FIELD_LIBRARY")
+        print("2. Modify the field_name and all values")
+        print("3. Add field_name to config.json 'fields' list")
+        print("4. Done! System automatically uses it")
         
-        print("\n✅ Medical credential field library is production-ready!")
-        print("✅ Exact format matching your structure!")
+        print("\nField names for config.json:")
+        print(get_field_names())
+        
+        print("\n✅ Field library is production-ready and flexible!")
     else:
-        print("\n❌ Validation failed - missing field definitions")
+        print("\n❌ Validation failed!")
+
+
+-----
+
+{
+  "azure_blob": {
+    "connection_string": "YOUR_BLOB_CONNECTION_STRING",
+    "inputcontainer": "inputcontainer",
+    "outputcontainer": "outputcontainer"
+  },
+  "azure_document_intelligence": {
+    "endpoint": "YOUR_DOC_INTEL_ENDPOINT",
+    "key": "YOUR_DOC_INTEL_KEY"
+  },
+  "azure_openai_gpt": {
+    "endpoint": "YOUR_OPENAI_ENDPOINT",
+    "api_key": "YOUR_OPENAI_KEY",
+    "api_version": "2024-02-01",
+    "deployment_name": "gpt-4o"
+  },
+  "azure_openai_embedding": {
+    "endpoint": "YOUR_OPENAI_ENDPOINT",
+    "api_key": "YOUR_OPENAI_KEY",
+    "api_version": "2024-02-01",
+    "deployment_name": "text-embedding-3-large",
+    "dimension": 3072
+  },
+  "azure_search": {
+    "endpoint": "YOUR_SEARCH_ENDPOINT",
+    "api_key": "YOUR_SEARCH_KEY",
+    "index_strategy": "universal",
+    "universal_index_name": "documents_universal",
+    "auto_delete_days": 30,
+    "enable_auto_cleanup": true
+  },
+  "extraction": {
+    "fields": [
+      "first_name",
+      "last_name",
+      "email",
+      "cell",
+      "birth_date",
+      "birth_place",
+      "birth_city",
+      "birth_state_province",
+      "birth_country",
+      "citizenship",
+      "degree",
+      "gender",
+      "ssn",
+      "state_license_number",
+      "state_license_state",
+      "state_license_expiration",
+      "dea_license_number",
+      "dea_license_state",
+      "dea_license_expiration",
+      "cds_license_number",
+      "cds_license_state",
+      "cds_license_expiration",
+      "other_credential_type",
+      "other_credential_state",
+      "other_credential_expiration",
+      "board_cert_name",
+      "board_cert_specialty"
+    ],
+    "confidence_threshold": 0.50,
+    "min_text_length": 10,
+    "na_value": "NA"
+  },
+  "rag": {
+    "mode": "text",
+    "top_k": 3,
+    "similarity_threshold": 0.70,
+    "chunk_size": 1000,
+    "chunk_overlap": 200,
+    "max_chunks_per_doc": 5
+  },
+  "costs": {
+    "ocr_per_page": 0.01,
+    "embedding_per_1k_tokens": 0.0001,
+    "gpt4o_input_per_1k_tokens": 0.0025,
+    "gpt4o_output_per_1k_tokens": 0.01
+  },
+  "processing": {
+    "max_doc_length_chars": 12000,
+    "max_prompt_tokens": 7000,
+    "batch_size": 10,
+    "enable_chunking": true,
+    "enable_logging": true
+  }
+}
