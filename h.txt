@@ -1,6 +1,32 @@
+"first_name",
+      "last_name",
+      "email",
+      "cell",
+      "birth_date",
+      "birth_place",
+      "birth_city",
+      "birth_state_province",
+      "birth_country",
+      "citizenship",
+      "degree",
+      "gender",
+      "ssn",
+      "state_licenses",
+      "dea_licenses",
+      "cds_licenses",
+      "other_credentials",
+      "board_certifications"
+
+
+------------
+
 """
 FLEXIBLE FIELD LIBRARY - Medical Credentials
-UPDATED: Email domain restriction, Multiple licenses with issue dates
+FINAL VERSION: All credentials and certifications as arrays
+- Email: Company domain only
+- Licenses: Multiple with issue_date
+- Other Credentials: Multiple as array
+- Board Certifications: Multiple as array
 """
 
 FIELD_LIBRARY = {
@@ -366,114 +392,78 @@ FIELD_LIBRARY = {
     },
     
     # =========================================================================
-    # OTHER CREDENTIALS
+    # OTHER CREDENTIALS (MULTIPLE SUPPORTED - NEW!)
     # =========================================================================
     
-    "other_credential_type": {
-        "description": "Type of additional credential, certification, or qualification",
-        "examples": ["ACLS", "BLS", "PALS", "NRP", "ATLS", "Board Certified", "Fellow"],
-        "format": "Credential name or abbreviation",
+    "other_credentials": {
+        "description": "Additional credentials, certifications, qualifications - CAN BE MULTIPLE",
+        "examples": [
+            [{"credential_type": "ACLS", "state": "National", "issue_date": "01/10/2024", "expiration_date": "01/10/2026"}],
+            [
+                {"credential_type": "BLS", "state": "AHA", "issue_date": "03/15/2023", "expiration_date": "03/15/2025"},
+                {"credential_type": "PALS", "state": "National", "issue_date": "06/20/2024", "expiration_date": "06/20/2026"},
+                {"credential_type": "ATLS", "state": "National", "issue_date": "09/05/2023", "expiration_date": "09/05/2027"}
+            ]
+        ],
+        "format": "JSON array of objects, each with: credential_type, state, issue_date, expiration_date",
         "extraction_hints": [
-            "Look in 'Other Credentials', 'Certifications', 'Additional Licenses' sections",
+            "Look in 'Other Credentials', 'Certifications', 'Additional Licenses', 'Training' sections",
+            "IMPORTANT: Provider may have MANY credentials (ACLS, BLS, PALS, NRP, ATLS, etc.)",
+            "Extract ALL credentials found in the document",
+            "Each credential must have: credential_type, state, issue_date, expiration_date",
             "Common life support: ACLS, BLS, PALS, NRP, ATLS",
-            "Specialty: Board Certification, Fellowship",
-            "Hospital privileges, teaching credentials",
-            "List primary/most important if multiple present"
+            "Specialty certifications: Hospital privileges, teaching credentials, fellowships",
+            "Format dates as MM/DD/YYYY",
+            "If issue_date not found, use 'NA' for that field only",
+            "State can be: 'National', 'AHA', 'ACEP', state abbreviation, or certifying body",
+            "Some credentials expire (2 years for life support), some don't (use 'NA' if no expiration)",
+            "Return as JSON array: [{cred1}, {cred2}, ...]",
+            "If no credentials found, return empty array: []"
         ],
         "confidence_factors": [
             "Recognized credential name",
             "Found in credentials/certifications section",
-            "Standard abbreviation or full name",
-            "Medical/healthcare related"
-        ]
-    },
-    
-    "other_credential_state": {
-        "description": "State or jurisdiction for additional credential (if applicable)",
-        "examples": ["CA", "National", "NY", "Multi-State", "AHA", "N/A"],
-        "format": "State abbreviation, 'National', 'Multi-State', or certifying body",
-        "extraction_hints": [
-            "Many credentials are national (ACLS, BLS from AHA)",
-            "Some are state-specific or regional",
-            "May say 'National', 'All States', 'AHA', 'ACEP'",
-            "For board certifications: often 'National' or certifying board",
-            "Use 'NA' if not applicable or not specified"
-        ],
-        "confidence_factors": [
-            "Valid jurisdiction indicator",
-            "Consistent with credential type",
-            "Found in credentials section",
-            "Standard format"
-        ]
-    },
-    
-    "other_credential_expiration": {
-        "description": "Expiration date of additional credential",
-        "examples": ["03/31/2025", "2025-03-31", "March 31, 2025"],
-        "format": "MM/DD/YYYY or YYYY-MM-DD",
-        "extraction_hints": [
-            "Life support certs (ACLS, BLS, PALS) expire every 2 years",
-            "Board certifications expire every 5-10 years (or continuous)",
-            "Convert to consistent format: MM/DD/YYYY",
-            "Some credentials don't expire (use 'NA')",
-            "Check 'Valid Until', 'Expires', 'Renewal Date'"
-        ],
-        "confidence_factors": [
-            "Valid future date",
-            "Reasonable for credential type",
-            "Found in credentials section",
-            "Standard date format"
+            "Has all required fields",
+            "Dates are logical (issue < expiration if applicable)"
         ]
     },
     
     # =========================================================================
-    # BOARD CERTIFICATION
+    # BOARD CERTIFICATIONS (MULTIPLE SUPPORTED - NEW!)
     # =========================================================================
     
-    "board_cert_name": {
-        "description": "Name of board certification organization",
+    "board_certifications": {
+        "description": "Board certifications - CAN BE MULTIPLE (dual/triple certified)",
         "examples": [
-            "American Board of Internal Medicine", "ABIM",
-            "American Board of Surgery", "ABS",
-            "American Board of Family Medicine", "ABFM",
-            "American Board of Pediatrics"
+            [{"board_name": "ABIM", "specialty": "Internal Medicine", "issue_date": "05/15/2015", "expiration_date": "12/31/2025"}],
+            [
+                {"board_name": "American Board of Internal Medicine", "specialty": "Internal Medicine", "issue_date": "06/20/2010", "expiration_date": "06/30/2030"},
+                {"board_name": "ABIM", "specialty": "Cardiology", "issue_date": "08/15/2015", "expiration_date": "08/31/2025"},
+                {"board_name": "ABIM", "specialty": "Critical Care Medicine", "issue_date": "10/10/2018", "expiration_date": "10/31/2028"}
+            ]
         ],
-        "format": "Full board name or standard abbreviation",
+        "format": "JSON array of objects, each with: board_name, specialty, issue_date, expiration_date",
         "extraction_hints": [
-            "Look in 'Board Certification', 'Board Certified', 'Specialty Board' section",
-            "Usually starts with 'American Board of...'",
-            "Common abbreviations: ABIM, ABS, ABFM, ABP, ABEM",
-            "Indicates specialist certification beyond basic license",
-            "Separate from other credentials and licenses"
+            "Look in 'Board Certification', 'Board Certified', 'Specialty Board' sections",
+            "IMPORTANT: Providers can have MULTIPLE board certifications (primary + subspecialties)",
+            "Extract ALL board certifications found in the document",
+            "Each certification must have: board_name, specialty, issue_date, expiration_date",
+            "Board names: 'American Board of Internal Medicine' (ABIM), 'American Board of Surgery' (ABS), etc.",
+            "Specialties: 'Internal Medicine', 'Surgery', 'Cardiology', 'Gastroenterology', etc.",
+            "Subspecialty certifications are separate entries (e.g., IM + Cardiology = 2 certs)",
+            "Format dates as MM/DD/YYYY",
+            "If issue_date not found, use 'NA' for that field only",
+            "Board certifications typically expire every 5-10 years or continuous (MOC)",
+            "Some may say 'Lifetime' or 'Continuous' - use 'NA' for expiration_date if no date given",
+            "Return as JSON array: [{cert1}, {cert2}, ...]",
+            "If no board certifications found, return empty array: []"
         ],
         "confidence_factors": [
-            "Recognized board name",
+            "Recognized board name (American Board of...)",
+            "Valid medical specialty",
             "Found in board certification section",
-            "Standard format or abbreviation",
-            "Medical specialty board"
-        ]
-    },
-    
-    "board_cert_specialty": {
-        "description": "Medical specialty in which provider is board certified",
-        "examples": [
-            "Internal Medicine", "Surgery", "Family Medicine",
-            "Pediatrics", "Emergency Medicine", "Anesthesiology",
-            "Cardiology", "Gastroenterology"
-        ],
-        "format": "Specialty name (may include subspecialty)",
-        "extraction_hints": [
-            "Look in 'Board Certification' section under 'Specialty', 'Field'",
-            "Primary specialties: Internal Medicine, Surgery, Pediatrics, Family Medicine",
-            "Subspecialties: Cardiology (under IM), Trauma Surgery (under Surgery)",
-            "May list multiple if dual certified (use primary)",
-            "Should align with board_cert_name"
-        ],
-        "confidence_factors": [
-            "Valid medical specialty name",
-            "Matches certifying board",
-            "Found in board certification section",
-            "Standard specialty nomenclature"
+            "Has all required fields",
+            "Dates are logical (issue before expiration, ~10 year cycle)"
         ]
     }
 }
@@ -494,10 +484,10 @@ SYSTEM_PROMPT_CONFIG = {
         "Return 'NA' for ANY field you cannot find or are uncertain about (confidence < 0.50)",
         "Do not leave any field empty - use 'NA' for missing values",
         "IMPORTANT: For email, ONLY extract company/professional emails - IGNORE personal emails (gmail, yahoo, hotmail, outlook)",
-        "CRITICAL: state_licenses, dea_licenses, cds_licenses are ARRAYS - extract ALL licenses found",
-        "Each license object MUST have: license_number, state, issue_date, expiration_date",
-        "If issue_date not found, use 'NA' for that field but include other fields",
-        "Multiple licenses are COMMON for multi-state practice - extract ALL"
+        "CRITICAL: state_licenses, dea_licenses, cds_licenses, other_credentials, board_certifications are ARRAYS",
+        "Extract ALL instances found - providers often have multiple licenses, credentials, and certifications",
+        "Each array object MUST have ALL required fields (use 'NA' for missing dates)",
+        "If no items found for an array field, return empty array []"
     ],
     
     "confidence_guide": {
@@ -505,7 +495,7 @@ SYSTEM_PROMPT_CONFIG = {
         "0.85-0.94": "Strong match, minor formatting differences, clear context",
         "0.70-0.84": "Likely match, some interpretation needed, reasonable confidence",
         "0.50-0.69": "Possible match, moderate uncertainty, ambiguous context",
-        "below 0.50": "Field not found or too uncertain - MUST use 'NA'"
+        "below 0.50": "Field not found or too uncertain - MUST use 'NA' or []"
     },
     
     "output_format": """
@@ -525,26 +515,39 @@ LICENSE FIELDS (array values):
       {"license_number": "NY-67890", "state": "NY", "issue_date": "NA", "expiration_date": "06/30/2026"}
     ],
     "confidence": 0.92
-  },
-  "dea_licenses": {
+  }
+}
+
+OTHER CREDENTIALS (array values):
+{
+  "other_credentials": {
     "value": [
-      {"license_number": "AB1234563", "state": "CA", "issue_date": "06/01/2023", "expiration_date": "06/30/2026"}
+      {"credential_type": "ACLS", "state": "National", "issue_date": "01/10/2024", "expiration_date": "01/10/2026"},
+      {"credential_type": "BLS", "state": "AHA", "issue_date": "03/15/2023", "expiration_date": "03/15/2025"}
+    ],
+    "confidence": 0.88
+  }
+}
+
+BOARD CERTIFICATIONS (array values):
+{
+  "board_certifications": {
+    "value": [
+      {"board_name": "ABIM", "specialty": "Internal Medicine", "issue_date": "05/15/2015", "expiration_date": "12/31/2025"},
+      {"board_name": "ABIM", "specialty": "Cardiology", "issue_date": "08/15/2015", "expiration_date": "08/31/2025"}
     ],
     "confidence": 0.95
-  },
-  "cds_licenses": {
-    "value": [],
-    "confidence": 0.50
   }
 }
 
 CRITICAL RULES:
 - Return 'NA' with confidence 0.50 for simple fields not found
-- Return empty array [] for license fields not found
+- Return empty array [] for array fields not found
 - ALL configured fields MUST be present in response
 - Dates in MM/DD/YYYY format
 - Email MUST be company domain (not personal)
-- Extract ALL licenses (multiple are common)
+- Extract ALL licenses, credentials, certifications (multiple are common)
+- Each array object must have ALL required fields
 """,
     
     "restrictions": "Return ONLY the JSON object. No additional text, explanations, preamble, or markdown formatting (no ```json tags)."
@@ -581,55 +584,27 @@ def get_field_names():
 
 if __name__ == "__main__":
     print("="*80)
-    print("UPDATED FIELD LIBRARY - VALIDATION")
+    print("FINAL FIELD LIBRARY - VALIDATION")
     print("="*80)
     
     is_valid = validate_fields()
     
     if is_valid:
         print("\n" + "="*80)
-        print("KEY CHANGES:")
+        print("COMPLETE CHANGES:")
         print("="*80)
-        print("1. ✅ Email: Company domain ONLY (no gmail, yahoo, etc)")
+        print("1. ✅ Email: Company domain ONLY (@mpowerhealth.com, @vkhealth.com)")
         print("2. ✅ State Licenses: ARRAY with issue_date + expiration_date")
         print("3. ✅ DEA Licenses: ARRAY with issue_date + expiration_date")
         print("4. ✅ CDS Licenses: ARRAY with issue_date + expiration_date")
-        print("\n✅ Field library is ready with all updates!")
+        print("5. ✅ Other Credentials: ARRAY with issue_date + expiration_date")
+        print("6. ✅ Board Certifications: ARRAY with issue_date + expiration_date")
+        print("\n" + "="*80)
+        print("FIELD COUNT CHANGE:")
+        print("="*80)
+        print("Before: 27 fields (3 per license type)")
+        print("After: 18 fields (1 array per type)")
+        print("Reduction: 33% fewer fields, MUCH more flexible!")
+        print("\n✅ Field library is production-ready with ALL updates!")
     else:
         print("\n❌ Validation failed!")
-
-
-
-
-  -------
-
-  "extraction": {
-    "fields": [
-      "first_name",
-      "last_name",
-      "email",
-      "cell",
-      "birth_date",
-      "birth_place",
-      "birth_city",
-      "birth_state_province",
-      "birth_country",
-      "citizenship",
-      "degree",
-      "gender",
-      "ssn",
-      "state_licenses",
-      "dea_licenses",
-      "cds_licenses",
-      "other_credential_type",
-      "other_credential_state",
-      "other_credential_expiration",
-      "board_cert_name",
-      "board_cert_specialty"
-    ],
-    "confidence_threshold": 0.5,
-    "min_text_length": 10,
-    "na_value": "NA"
-  },
-
-  
