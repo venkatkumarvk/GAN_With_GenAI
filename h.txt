@@ -1,21 +1,407 @@
-"first_name",
-      "last_name",
-      "email",
-      "cell",
-      "birth_date",
-      "birth_place",
-      "birth_city",
-      "birth_state_province",
-      "birth_country",
-      "citizenship",
-      "degree",
-      "gender",
-      "ssn",
-      "state_licenses",
-      "dea_licenses",
-      "cds_licenses",
-      "other_credentials",
-      "board_certifications"
+"""
+MEDICAL CREDENTIALS - FIELD LIBRARY & PROMPTS
+Essential sections only - Clean and production-ready
+"""
+
+# =============================================================================
+# FIELD LIBRARY - Define all fields here
+# =============================================================================
+
+FIELD_LIBRARY = {
+    # Personal Information
+    "first_name": {
+        "description": "First/Given name of the individual",
+        "examples": ["John", "Mary", "Robert", "Jennifer", "Michael"],
+        "format": "Capitalized text, may include middle initial",
+        "extraction_hints": [
+            "Check for 'First Name' and 'Given Name' labels",
+            "Look for 'Full Name' or 'Name of Holder' sections",
+            "May be split across multiple lines"
+        ],
+        "confidence_factors": [
+            "Clear text with proper spacing",
+            "Found near expected location (top of document)"
+        ]
+    },
+    
+    "last_name": {
+        "description": "Last/Family name of the individual",
+        "examples": ["Smith", "Johnson", "Williams", "Brown", "Garcia"],
+        "format": "Capitalized text, may include suffixes (Jr., Sr., III, MD, DO)",
+        "extraction_hints": [
+            "Check for 'Last Name', 'Surname', 'Family Name' labels",
+            "May include professional suffixes (MD, DO, DDS)"
+        ],
+        "confidence_factors": [
+            "Clear text with proper spacing",
+            "Matches expected surname pattern"
+        ]
+    },
+    
+    "email": {
+        "description": "Company/Professional email address ONLY (domain-specific)",
+        "examples": [
+            "john.doe@mpowerhealth.com", 
+            "mary.smith@vkhealth.com",
+            "doctor@hospitalgroup.org"
+        ],
+        "format": "username@companydomain.com - MUST be company/organization domain",
+        "extraction_hints": [
+            "ONLY extract company/professional emails",
+            "IGNORE personal emails (gmail.com, yahoo.com, hotmail.com, outlook.com)",
+            "If only personal email found, return 'NA'"
+        ],
+        "confidence_factors": [
+            "Contains @ symbol with company domain",
+            "NOT a personal email provider"
+        ]
+    },
+    
+    "cell": {
+        "description": "Cell/Mobile phone number",
+        "examples": ["(555) 123-4567", "555-123-4567", "5551234567"],
+        "format": "10 digits, may include formatting: (XXX) XXX-XXXX",
+        "extraction_hints": [
+            "Look for 'Cell', 'Mobile', 'Cell Phone' labels",
+            "Extract 10-digit number, preserve formatting"
+        ],
+        "confidence_factors": [
+            "Contains 10 digits",
+            "Has standard phone formatting"
+        ]
+    },
+    
+    "birth_date": {
+        "description": "Date of birth",
+        "examples": ["01/15/1985", "1985-01-15", "January 15, 1985"],
+        "format": "MM/DD/YYYY or YYYY-MM-DD",
+        "extraction_hints": [
+            "Look for 'DOB', 'Date of Birth', 'Birth Date' labels",
+            "Convert to consistent format: MM/DD/YYYY"
+        ],
+        "confidence_factors": [
+            "Valid date format",
+            "Reasonable age for medical professional (25-80)"
+        ]
+    },
+    
+    "birth_place": {
+        "description": "Complete birth place (city, state/province, country)",
+        "examples": ["New York, NY, USA", "London, UK", "Toronto, ON, Canada"],
+        "format": "City, State/Province, Country (or partial if not all available)",
+        "extraction_hints": [
+            "Look for 'Place of Birth', 'Birth Place', 'POB' labels",
+            "Include all location details available"
+        ],
+        "confidence_factors": [
+            "Complete location information",
+            "Standard place name format"
+        ]
+    },
+    
+    "birth_city": {
+        "description": "City of birth",
+        "examples": ["New York", "Los Angeles", "Chicago", "Houston"],
+        "format": "City name only",
+        "extraction_hints": [
+            "Look for 'Birth City', 'City of Birth' labels",
+            "Extract city portion from full birth place if available"
+        ],
+        "confidence_factors": [
+            "Valid city name",
+            "Consistent with birth_place"
+        ]
+    },
+    
+    "birth_state_province": {
+        "description": "State or Province of birth",
+        "examples": ["California", "CA", "New York", "NY", "Ontario", "ON"],
+        "format": "Full state name or 2-letter abbreviation",
+        "extraction_hints": [
+            "Look for 'Birth State', 'State/Province of Birth' labels",
+            "May be full name or 2-letter abbreviation"
+        ],
+        "confidence_factors": [
+            "Valid state/province name or abbreviation",
+            "Consistent with birth_place"
+        ]
+    },
+    
+    "birth_country": {
+        "description": "Country of birth",
+        "examples": ["USA", "United States", "Canada", "United Kingdom"],
+        "format": "Full country name or standard abbreviation",
+        "extraction_hints": [
+            "Look for 'Birth Country', 'Country of Birth' labels",
+            "Accept common variations (US, USA, United States)"
+        ],
+        "confidence_factors": [
+            "Valid country name",
+            "Standard country format"
+        ]
+    },
+    
+    "citizenship": {
+        "description": "Citizenship/Nationality status",
+        "examples": ["US Citizen", "USA", "Canadian", "Permanent Resident"],
+        "format": "Country name or citizenship status",
+        "extraction_hints": [
+            "Look for 'Citizenship', 'Nationality', 'Citizen of' labels",
+            "May indicate status: 'US Citizen', 'Permanent Resident'"
+        ],
+        "confidence_factors": [
+            "Valid citizenship status",
+            "Clear indication of status"
+        ]
+    },
+    
+    "degree": {
+        "description": "Highest educational degree in medicine/healthcare",
+        "examples": ["MD", "DO", "MBBS", "PhD", "DDS", "PharmD", "RN", "PA", "NP"],
+        "format": "Degree abbreviation or full name",
+        "extraction_hints": [
+            "Look for 'Degree', 'Education', 'Qualification' labels",
+            "May appear after name with comma (John Doe, MD)"
+        ],
+        "confidence_factors": [
+            "Valid medical/healthcare degree",
+            "Standard abbreviation format"
+        ]
+    },
+    
+    "gender": {
+        "description": "Gender/Sex of individual",
+        "examples": ["Male", "Female", "M", "F"],
+        "format": "Male/Female or M/F",
+        "extraction_hints": [
+            "Look for 'Gender', 'Sex', 'M/F' labels or checkboxes",
+            "Standardize to full word if possible (M→Male, F→Female)"
+        ],
+        "confidence_factors": [
+            "Clear indication of gender",
+            "Standard format"
+        ]
+    },
+    
+    "ssn": {
+        "description": "Social Security Number (often partially masked)",
+        "examples": ["XXX-XX-1234", "1234", "***-**-1234"],
+        "format": "Usually last 4 digits only: XXXX or full: XXX-XX-XXXX",
+        "extraction_hints": [
+            "Look for 'SSN', 'Social Security', 'SS#' labels",
+            "Often only last 4 digits shown for privacy"
+        ],
+        "confidence_factors": [
+            "Correct format (full or last 4)",
+            "Found in identification section"
+        ]
+    },
+    
+    # Licenses (Arrays)
+    "state_licenses": {
+        "description": "State medical/professional licenses - CAN BE MULTIPLE",
+        "examples": [
+            [{"license_number": "A12345", "state": "CA", "issue_date": "01/15/2020", "expiration_date": "12/31/2025"}],
+            [
+                {"license_number": "MD123456", "state": "NY", "issue_date": "03/20/2019", "expiration_date": "03/31/2026"},
+                {"license_number": "TX-789012", "state": "TX", "issue_date": "06/10/2021", "expiration_date": "06/30/2025"}
+            ]
+        ],
+        "format": "JSON array of objects: [{license_number, state, issue_date, expiration_date}, ...]",
+        "extraction_hints": [
+            "IMPORTANT: Provider may have MULTIPLE state licenses",
+            "Extract ALL state licenses found",
+            "Each license: license_number, state, issue_date, expiration_date",
+            "If issue_date not found, use 'NA' for that field only",
+            "Return empty array [] if no licenses found"
+        ],
+        "confidence_factors": [
+            "Found in license section",
+            "Has all required fields",
+            "Dates are valid (issue < expiration)"
+        ]
+    },
+    
+    "dea_licenses": {
+        "description": "DEA registrations - CAN BE MULTIPLE",
+        "examples": [
+            [{"license_number": "AB1234563", "state": "CA", "issue_date": "06/01/2023", "expiration_date": "06/30/2026"}]
+        ],
+        "format": "JSON array of objects: [{license_number, state, issue_date, expiration_date}, ...]",
+        "extraction_hints": [
+            "IMPORTANT: Provider may have MULTIPLE DEA licenses",
+            "DEA format: 2 letters + 7 digits (9 total)",
+            "Extract ALL DEA licenses found",
+            "Return empty array [] if no licenses found"
+        ],
+        "confidence_factors": [
+            "Exactly 9 characters (2 letters + 7 digits)",
+            "Dates valid (~3 year renewal)"
+        ]
+    },
+    
+    "cds_licenses": {
+        "description": "CDS state licenses - CAN BE MULTIPLE",
+        "examples": [
+            [{"license_number": "CDS123456", "state": "MD", "issue_date": "02/15/2022", "expiration_date": "12/31/2025"}]
+        ],
+        "format": "JSON array of objects: [{license_number, state, issue_date, expiration_date}, ...]",
+        "extraction_hints": [
+            "IMPORTANT: Provider may have MULTIPLE CDS licenses",
+            "Common in: MD, NJ, TX, IL",
+            "Extract ALL CDS licenses found",
+            "Return empty array [] if no licenses found"
+        ],
+        "confidence_factors": [
+            "Found in CDS section",
+            "State known to require CDS"
+        ]
+    },
+    
+    "other_credentials": {
+        "description": "Additional credentials - CAN BE MULTIPLE",
+        "examples": [
+            [
+                {"credential_type": "ACLS", "state": "National", "issue_date": "01/10/2024", "expiration_date": "01/10/2026"},
+                {"credential_type": "BLS", "state": "AHA", "issue_date": "03/15/2023", "expiration_date": "03/15/2025"}
+            ]
+        ],
+        "format": "JSON array of objects: [{credential_type, state, issue_date, expiration_date}, ...]",
+        "extraction_hints": [
+            "IMPORTANT: Provider may have MANY credentials",
+            "Common: ACLS, BLS, PALS, NRP, ATLS",
+            "Extract ALL credentials found",
+            "Return empty array [] if none found"
+        ],
+        "confidence_factors": [
+            "Recognized credential name",
+            "Found in credentials section"
+        ]
+    },
+    
+    "board_certifications": {
+        "description": "Board certifications - CAN BE MULTIPLE",
+        "examples": [
+            [
+                {"board_name": "ABIM", "specialty": "Internal Medicine", "issue_date": "06/20/2010", "expiration_date": "06/30/2030"},
+                {"board_name": "ABIM", "specialty": "Cardiology", "issue_date": "08/15/2015", "expiration_date": "08/31/2025"}
+            ]
+        ],
+        "format": "JSON array of objects: [{board_name, specialty, issue_date, expiration_date}, ...]",
+        "extraction_hints": [
+            "IMPORTANT: Providers can have MULTIPLE certifications",
+            "Primary + subspecialties are separate entries",
+            "Extract ALL board certifications found",
+            "Return empty array [] if none found"
+        ],
+        "confidence_factors": [
+            "Recognized board name",
+            "Valid medical specialty"
+        ]
+    }
+}
+
+
+# =============================================================================
+# SYSTEM PROMPT CONFIGURATION
+# =============================================================================
+
+SYSTEM_PROMPT_CONFIG = {
+    "role": "You are an expert medical credentialing specialist with years of experience extracting information from healthcare provider documents.",
+    
+    "extraction_rules": [
+        "Extract EXACTLY what you see - do not infer or guess",
+        "If field not found or uncertain, use 'NA'",
+        "Convert dates to MM/DD/YYYY format",
+        "CRITICAL: Email must be company domain - IGNORE gmail, yahoo, hotmail, outlook",
+        "CRITICAL: Licenses, credentials, certifications are ARRAYS - extract ALL found",
+        "Each array object must have ALL required fields",
+        "Return empty array [] if no items found (not 'NA')"
+    ],
+    
+    "confidence_guide": {
+        "0.95-1.00": "Exact match, clear and unambiguous",
+        "0.85-0.94": "Strong match, minor differences",
+        "0.70-0.84": "Likely match, reasonable confidence",
+        "0.50-0.69": "Possible match, moderate uncertainty",
+        "below 0.50": "Use 'NA' or []"
+    },
+    
+    "output_format": """
+Return JSON with ALL fields:
+
+SIMPLE FIELDS:
+{"first_name": {"value": "John", "confidence": 0.95}}
+
+ARRAY FIELDS:
+{"state_licenses": {"value": [{...}, {...}], "confidence": 0.92}}
+
+RULES:
+- Use 'NA' for missing simple fields
+- Use [] for missing array fields
+- All dates in MM/DD/YYYY
+- Email must be company domain
+""",
+    
+    "restrictions": "Return ONLY JSON. No markdown, no preamble."
+}
+
+
+# =============================================================================
+# DOCUMENT TYPE HINTS
+# =============================================================================
+
+DOCUMENT_TYPE_HINTS = {
+    "medical_credentials": {
+        "title": "MEDICAL CREDENTIALING DOCUMENT",
+        "special_considerations": [
+            "Contains sensitive PHI (Protected Health Information)",
+            "License sections clearly separated: State, DEA, CDS",
+            "Multiple licenses common for multi-state practice",
+            "Use 'NA' for any field not found",
+            "Each license type has 4 fields: number, state, issue_date, expiration_date"
+        ]
+    }
+}
+
+
+# =============================================================================
+# RAG PROMPT TEMPLATE
+# =============================================================================
+
+RAG_PROMPT_TEMPLATE = {
+    "intro": "You have access to {num_docs} similar documents. Learn from their extraction patterns.",
+    "example_header": "SIMILAR DOCUMENTS:",
+    "transition": "Now extract from the CURRENT document using the same approach.",
+    "instructions": [
+        "Follow extraction patterns from examples",
+        "Return 'NA' for missing simple fields",
+        "Return [] for missing array fields",
+        "Maintain date format: MM/DD/YYYY"
+    ]
+}
+
+
+# =============================================================================
+# STANDARD PROMPT TEMPLATE
+# =============================================================================
+
+STANDARD_PROMPT_TEMPLATE = {
+    "header": "Extract fields from this medical credentialing document:",
+    "reminder": "Return ONLY JSON with all fields. Use 'NA' for missing values."
+}
+
+
+# =============================================================================
+# VALIDATION (Run at import)
+# =============================================================================
+
+if __name__ == "__main__":
+    print("="*80)
+    print("MEDICAL CREDENTIALS - FIELD LIBRARY")
+    print("="*80)
+    print(f"Total fields: {len(FIELD_LIBRARY)}")
+    print("✅ Configuration loaded successfully")
 
 
 ------------
