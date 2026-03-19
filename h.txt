@@ -1,0 +1,327 @@
+{
+  "_comment": "Medical Document Parser - Production Configuration v3.0 - CORRECTED",
+  "_comment_terminology": "vendortype = document/vendor type (cred, bus, claim, etc.)",
+  
+  "azure_keyvault": {
+    "vault_url": "https://your-keyvault-name.vault.azure.net/"
+  },
+  
+  "azure_blob": {
+    "connection_string": "@azureKeyVault(BlobConnectionString)",
+    "inputcontainer": "inputcontainer",
+    "outputcontainer": "outputcontainer",
+    "archivecontainer": "archivecontainer"
+  },
+  
+  "azure_document_intelligence": {
+    "_comment": "SHARED - Common OCR service for all vendortypes",
+    "endpoint": "@azureKeyVault(DocIntEndpoint)",
+    "key": "@azureKeyVault(DocIntKey)",
+    "api_version": "2024-07-31-preview"
+  },
+  
+  "vendortypes": {
+    "cred": {
+      "description": "Medical Credentials",
+      "prompt_module": "prompts.cred_prompt",
+      
+      "azure_openai": {
+        "general": {
+          "endpoint": "@azureKeyVault(OpenAIEndpoint)",
+          "api_key": "@azureKeyVault(OpenAIKey)",
+          "deployment_name": "gpt-4o",
+          "model_name": "gpt-4o",
+          "api_version": "2024-05-01-preview"
+        },
+        "batch": {
+          "endpoint": "@azureKeyVault(OpenAIBatchEndpoint)",
+          "api_key": "@azureKeyVault(OpenAIBatchKey)",
+          "deployment_name": "BatchDeployment-gpt-4o",
+          "model_name": "gpt-4o",
+          "api_version": "2024-12-01-preview"
+        }
+      },
+      
+      "azure_openai_embedding": {
+        "endpoint": "@azureKeyVault(OpenAIEndpoint)",
+        "api_key": "@azureKeyVault(OpenAIKey)",
+        "deployment_name": "text-embedding-ada-002",
+        "model_name": "text-embedding-ada-002"
+      },
+      
+      "azure_ai_search": {
+        "_comment": "Universal index for ALL cred vendors/providers",
+        "endpoint": "@azureKeyVault(SearchEndpoint)",
+        "key": "@azureKeyVault(SearchKey)",
+        "index_name": "cred-universal-index",
+        "api_version": "2024-07-01",
+        "auto_delete_days": 7,
+        "enable_auto_cleanup": true
+      },
+      
+      "folder_configs": {
+        "GEN & HR": {
+          "description": "Personal identification information",
+          "fields": [
+            "first_name",
+            "last_name",
+            "email",
+            "cell",
+            "birth_date",
+            "birth_place",
+            "birth_city",
+            "birth_state_province",
+            "birth_country",
+            "citizenship",
+            "gender",
+            "ssn"
+          ]
+        },
+        
+        "Licenses": {
+          "description": "All medical licenses and registrations",
+          "fields": [
+            "state_licenses",
+            "dea_licenses",
+            "cds_licenses",
+            "other_credentials"
+          ]
+        },
+        
+        "ED & TRAIN": {
+          "description": "Education and degrees",
+          "fields": [
+            "degrees"
+          ]
+        },
+        
+        "Certifications": {
+          "description": "Board certifications and credentials",
+          "fields": [
+            "board_certifications"
+          ]
+        }
+      }
+    },
+    
+    "bus": {
+      "description": "Business Documents (Invoices, Contracts)",
+      "prompt_module": "prompts.bus_prompt",
+      
+      "azure_openai": {
+        "general": {
+          "endpoint": "@azureKeyVault(OpenAIEndpoint)",
+          "api_key": "@azureKeyVault(OpenAIKey)",
+          "deployment_name": "gpt-4o",
+          "model_name": "gpt-4o",
+          "api_version": "2024-05-01-preview"
+        },
+        "batch": {
+          "endpoint": "@azureKeyVault(OpenAIBatchEndpoint)",
+          "api_key": "@azureKeyVault(OpenAIBatchKey)",
+          "deployment_name": "BatchDeployment-gpt-4o",
+          "model_name": "gpt-4o",
+          "api_version": "2024-12-01-preview"
+        }
+      },
+      
+      "azure_openai_embedding": {
+        "endpoint": "@azureKeyVault(OpenAIEndpoint)",
+        "api_key": "@azureKeyVault(OpenAIKey)",
+        "deployment_name": "text-embedding-ada-002",
+        "model_name": "text-embedding-ada-002"
+      },
+      
+      "azure_ai_search": {
+        "_comment": "Universal index for ALL business document vendors",
+        "endpoint": "@azureKeyVault(SearchEndpoint)",
+        "key": "@azureKeyVault(SearchKey)",
+        "index_name": "bus-universal-index",
+        "api_version": "2024-07-01",
+        "auto_delete_days": 3,
+        "enable_auto_cleanup": true
+      },
+      
+      "folder_configs": {
+        "Invoices": {
+          "description": "Invoice documents",
+          "fields": [
+            "vendor_name",
+            "invoice_number",
+            "invoice_date",
+            "customer_name",
+            "purchase_order",
+            "total_gross",
+            "freight",
+            "tax",
+            "total"
+          ]
+        },
+        
+        "Contracts": {
+          "description": "Contract documents",
+          "fields": [
+            "vendor_name",
+            "contract_number",
+            "contract_date",
+            "contract_value",
+            "start_date",
+            "end_date"
+          ]
+        },
+        
+        "PurchaseOrders": {
+          "description": "Purchase order documents",
+          "fields": [
+            "vendor_name",
+            "purchase_order",
+            "stock_code",
+            "unit_price",
+            "quantity"
+          ]
+        }
+      }
+    },
+    
+    "claim": {
+      "description": "Insurance Claims",
+      "prompt_module": "prompts.claim_prompt",
+      
+      "azure_openai": {
+        "general": {
+          "endpoint": "@azureKeyVault(OpenAIEndpoint)",
+          "api_key": "@azureKeyVault(OpenAIKey)",
+          "deployment_name": "gpt-4o-mini",
+          "model_name": "gpt-4o-mini",
+          "api_version": "2024-05-01-preview"
+        },
+        "batch": {
+          "endpoint": "@azureKeyVault(OpenAIBatchEndpoint)",
+          "api_key": "@azureKeyVault(OpenAIBatchKey)",
+          "deployment_name": "BatchDeployment-gpt-4o-mini",
+          "model_name": "gpt-4o-mini",
+          "api_version": "2024-12-01-preview"
+        }
+      },
+      
+      "azure_openai_embedding": {
+        "endpoint": "@azureKeyVault(OpenAIEndpoint)",
+        "api_key": "@azureKeyVault(OpenAIKey)",
+        "deployment_name": "text-embedding-3-small",
+        "model_name": "text-embedding-3-small"
+      },
+      
+      "azure_ai_search": {
+        "_comment": "Universal index for ALL insurance claim vendors",
+        "endpoint": "@azureKeyVault(SearchEndpoint)",
+        "key": "@azureKeyVault(SearchKey)",
+        "index_name": "claim-universal-index",
+        "api_version": "2024-07-01",
+        "auto_delete_days": 1,
+        "enable_auto_cleanup": true
+      },
+      
+      "folder_configs": {
+        "Claims": {
+          "description": "Claim forms",
+          "fields": [
+            "patient_name",
+            "claim_number",
+            "date_of_service",
+            "provider_name",
+            "diagnosis_codes",
+            "procedure_codes"
+          ]
+        },
+        
+        "EOB": {
+          "description": "Explanation of Benefits",
+          "fields": [
+            "claim_number",
+            "billed_amount",
+            "allowed_amount",
+            "paid_amount",
+            "patient_responsibility"
+          ]
+        },
+        
+        "Denials": {
+          "description": "Denial notices",
+          "fields": [
+            "claim_number",
+            "denial_reason",
+            "denial_code",
+            "appeal_deadline"
+          ]
+        }
+      }
+    }
+  },
+  
+  "extraction": {
+    "confidence_threshold": 0.70,
+    "min_text_length": 10,
+    "na_value": "NA",
+    "supported_formats": [".pdf", ".doc", ".docx", ".jpg", ".jpeg", ".png", ".tiff", ".bmp", ".gif", ".webp"],
+    "strategy": "adaptive",
+    "small_doc_threshold": 15000,
+    "medium_doc_threshold": 50000,
+    "large_doc_chunk_size": 12000,
+    "large_doc_overlap": 2000,
+    "max_chunks_for_extraction": 2
+  },
+  
+  "rag": {
+    "mode": "text",
+    "top_k": 3,
+    "similarity_threshold": 0.70,
+    "chunk_size": 12000,
+    "chunk_overlap": 2000,
+    "max_chunks_per_doc": 5,
+    "enable_priority_chunking": true
+  },
+  
+  "archive": {
+    "enabled": true,
+    "container": "archivecontainer",
+    "format": "zip",
+    "structure": "provider_based",
+    "processed_folder": "processed",
+    "unprocessed_folder": "unprocessed",
+    "blob_input_move_on": true,
+    "archive_name_format": "{vendortype}_{timestamp}.zip"
+  },
+  
+  "costs": {
+    "gpt-4o": {
+      "input_per_1k_tokens": 0.0025,
+      "output_per_1k_tokens": 0.01
+    },
+    "gpt-4o-mini": {
+      "input_per_1k_tokens": 0.000150,
+      "output_per_1k_tokens": 0.000600
+    },
+    "text-embedding-ada-002": {
+      "per_1k_tokens": 0.0001
+    },
+    "text-embedding-3-small": {
+      "per_1k_tokens": 0.00002
+    },
+    "ocr_per_page": 0.01,
+    "batch_discount_percentage": 50
+  },
+  
+  "processing": {
+    "max_doc_length_chars": 500000,
+    "batch_size": 10,
+    "enable_consolidation": true,
+    "timeout_seconds": 300
+  },
+  
+  "logging": {
+    "enabled": true,
+    "level": "INFO",
+    "log_folder": "logs",
+    "log_file_format": "{vendortype}_{timestamp}.log"
+  }
+}
