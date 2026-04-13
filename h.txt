@@ -1,0 +1,33 @@
+def test_setup_logger():
+    from utils.logger_helper import setup_logger, get_logger
+    import tempfile
+    tmp = tempfile.mkdtemp(prefix='test_log_')
+    fname = setup_logger(log_level='INFO', log_dir=tmp, log_prefix='test_run')
+    assert fname is not None
+    assert 'test_run' in fname
+    assert fname.endswith('.log')
+    print(f"  PASS: setup_logger creates '{os.path.basename(fname)}'")
+
+
+
+      # Change this line in test_azure_openai_embedding:
+
+# FROM:
+dt_config.get('azure_openai', {}).get('embedding', config.get('azure_openai_embedding', {}))
+
+# TO:
+config.get('azure_openai_embedding', {})
+
+
+  # FROM:
+def test_setup_logger():
+    from utils.logger_helper import setup_logger, get_logger
+    with tempfile.TemporaryDirectory() as tmp:
+        fname = setup_logger(log_level='INFO', log_dir=tmp, log_prefix='test_run')
+
+# TO:
+def test_setup_logger():
+    from utils.logger_helper import setup_logger, get_logger
+    import tempfile
+    tmp = tempfile.mkdtemp(prefix='test_log_')
+    fname = setup_logger(log_level='INFO', log_dir=tmp, log_prefix='test_run')
