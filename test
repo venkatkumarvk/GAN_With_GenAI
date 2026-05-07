@@ -1,0 +1,80 @@
+Here's the complete breakdown for your project:
+
+Azure AI Evaluation SDK -- All metrics classified:
+Metric	Ground Truth Needed?	What it needs	Good for your project?
+Groundedness	No	query + context + response	YES -- is extracted value supported by RAG chunks?
+GroundednessPro	No	query + context + response	YES -- stricter version, uses Azure Content Safety
+Relevance	No	query + response	YES -- is extracted value relevant to the field query?
+Retrieval	No	query + context	YES -- did RAG search find right chunks?
+Coherence	No	query + response	No -- for text generation, not field extraction
+Fluency	No	query + response	No -- for text generation
+Similarity	YES	response + ground_truth	Maybe -- compares extracted vs verified value
+F1 Score	YES	response + ground_truth	Maybe -- token overlap score
+BLEU	YES	response + ground_truth	No -- for translation/generation
+ROUGE	YES	response + ground_truth	No -- for text summarization
+ResponseCompleteness	YES	response + ground_truth	Maybe -- did response cover all info?
+
+For your project, the best combination:
+
+NO ground truth needed (use immediately):
+#	Metric	Input mapping for your project	What it tells you
+1	Groundedness	query = "What is state license number?", context = RAG chunks sent to GPT, response = "56359"	Is "56359" supported by the chunks GPT received?
+2	Relevance	query = "What is state license number?", response = "56359"	Is "56359" a relevant answer to "license number" question?
+3	Retrieval	query = "state license number", context = RAG chunks	Are the retrieved chunks actually about licenses?
+
+With ground truth (when you have verified data):
+#	Metric	Input	What it tells you
+4	Similarity	response = "56359", ground_truth = "56359"	How similar is extracted to verified? (1-5 scale)
+5	F1 Score	response = "56359", ground_truth = "56359"	Token overlap between extracted and verified
+
+How Azure AI metrics map to your pipeline:
+
+Your pipeline step              Azure AI metric           What it checks
+──────────────────              ──────────────            ──────────────
+RAG search (top 3 chunks)  →    Retrieval (1-5)      →   "Did search find license section?"
+GPT extraction (value)     →    Groundedness (1-5)   →   "Is value supported by chunks?"
+GPT extraction (value)     →    Relevance (1-5)      →   "Is value a valid answer to query?"
+Final output vs verified   →    Similarity (1-5)     →   "Does extracted match ground truth?"
+Final output vs verified   →    F1 Score (0-1)       →   "Token overlap with ground truth"
+
+Complete metrics strategy for your project:
+
+TIER 1 - Free, local, no API (implement now):
+  ├── Hallucination Detection    → value in OCR text?
+  ├── Completeness               → % fields extracted
+  └── LLM-as-Judge (existing)    → format, normalization
+
+TIER 2 - Azure AI SDK, no ground truth (implement next):
+  ├── Groundedness               → value grounded in RAG chunks?
+  ├── Relevance                  → value relevant to field query?
+  └── Retrieval                  → RAG search quality good?
+
+TIER 3 - Needs ground truth (implement when you have verified data):
+  ├── Field Accuracy (local)     → exact + fuzzy match
+  ├── Similarity (Azure AI)      → semantic similarity score
+  └── F1 Score (Azure AI)        → token overlap score
+
+Config structure:
+json
+
+"evaluation": {
+    "enabled": true,
+    "llm_judge": true,
+    "metrics": {
+        "hallucination": true,
+        "completeness": true,
+        "field_accuracy": {
+            "enabled": false,
+            "ground_truth_path": "ground_truth/cred_verified.json"
+        },
+        "azure_ai_eval": {
+            "enabled": true,
+            "evaluators": ["groundedness", "relevance", "retrieval"],
+            "model_config": {
+                "azure_endpoint": "@azureKeyVault(...)",
+                "api_key": "@azureKeyVault(...)",
+                "azure_deployment": "gpt-4o"
+            }
+        }
+    }
+}
