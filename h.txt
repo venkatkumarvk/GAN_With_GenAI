@@ -1,0 +1,15 @@
+"first_name": {
+    "value": "John",
+    "confidence": 0.96,
+    "source_folder": "Data",
+    "source_file": "CV.pdf",
+    "frequency": 15,
+    "total_documents": 20,
+    "evaluation": {
+        "llm_judge": {"score": 1.0, "description": "No issues found"},
+        "hallucination": {"score": 1.0, "found_in_source": true},
+        "groundedness": {"score": 5, "label": "pass"},
+        "relevance": {"score": 5, "label": "pass"},
+        "retrieval": {"score": 4, "label": "pass"}
+    }
+}
