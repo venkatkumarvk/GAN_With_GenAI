@@ -1,0 +1,192 @@
+{
+  "_comment": "Medical Document Parser - Production Configuration",
+  "_comment_usage": "Fill in your actual Azure credentials below",
+  
+  "azure_keyvault": {
+    "_comment": "Set to null to disable Key Vault and use direct values",
+    "vault_url": null
+  },
+  
+  "azure_blob": {
+    "connection_string": "DefaultEndpointsProtocol=https;AccountName=YOUR_STORAGE_ACCOUNT;AccountKey=YOUR_STORAGE_KEY;EndpointSuffix=core.windows.net",
+    "inputcontainer": "inputcontainer",
+    "outputcontainer": "outputcontainer",
+    "archivecontainer": "archivecontainer",
+    "_comment": "Connection string contains account name and key - no need for separate fields"
+  },
+  
+  "azure_document_intelligence": {
+    "endpoint": "https://YOUR_DOCINTEL_RESOURCE.cognitiveservices.azure.com/",
+    "key": "YOUR_DOCINTEL_KEY_HERE",
+    "api_version": "2024-07-31-preview"
+  },
+  
+  "extraction": {
+    "_comment": "Global extraction settings. Uses MIN confidence routing and per-field RAG internally.",
+    "confidence_threshold": 0.70,
+    "parallel_workers": 1,
+    "_comment_parallel": "Number of concurrent field extractions. 1=sequential, 3=3x faster, 5=5x faster. Only applies to general API. Increase Azure TPM quota before raising above 3.",
+    "min_text_length": 10,
+    "supported_formats": [".pdf", ".doc", ".docx", ".rtf", ".jpg", ".jpeg", ".png", ".tiff", ".bmp", ".gif", ".webp"],
+    "strategy": "adaptive",
+    "small_doc_threshold": 15000,
+    "medium_doc_threshold": 50000,
+    "large_doc_chunk_size": 12000,
+    "large_doc_overlap": 2000,
+    "max_chunks_for_extraction": 2
+  },
+  
+  "rag": {
+    "_comment": "RAG mode: 'text' or 'multimodal'. Reranking: false=vector only, true=vector + semantic reranker (retrieves more, reranks, picks best).",
+    "mode": "text",
+    "top_k": 3,
+    "similarity_threshold": 0.7,
+    "reranking": false,
+    "reranking_top_k": 10,
+    "_comment_reranking": "When reranking=true: retrieves reranking_top_k candidates, semantic reranker picks best top_k. Requires Semantic Ranker enabled on Azure AI Search index."
+  },
+  
+  "archive": {
+    "enabled": false,
+    "container": "archivecontainer",
+    "format": "zip",
+    "structure": "provider_based",
+    "processed_folder": "processed",
+    "unprocessed_folder": "unprocessed",
+    "blob_input_move_on": true,
+    "archive_name_format": "{doctype}_{timestamp}.zip"
+  },
+  
+  "costs": {
+    "_comment": "Cost per unit for estimation. Adjust to match your Azure pricing.",
+    "ocr_per_page": 0.01,
+    "gpt_input_per_1k_tokens": 0.003,
+    "gpt_output_per_1k_tokens": 0.012,
+    "embedding_per_1k_tokens": 0.0001,
+    "batch_discount_percentage": 50
+  },
+  
+  "processing": {
+    "max_doc_length_chars": 500000,
+    "batch_size": 10,
+    "enable_consolidation": true,
+    "timeout_seconds": 300
+  },
+  
+  "doctypes": {
+    "cred": {
+      "description": "Medical Credentials Extraction",
+      "prompt_module": "prompts.parser.cred_prompt",
+      
+      "_comment_api_type": "API type is set via CLI: --apitype general or --apitype batch. No need to set here.",
+      
+      "azure_openai": {
+        "general": {
+          "_comment": "Standard deployment (real-time). Deployment type: Standard or GlobalStandard in Azure Portal.",
+          "endpoint": "https://YOUR_OPENAI_RESOURCE.openai.azure.com/",
+          "api_key": "YOUR_OPENAI_KEY_HERE",
+          "deployment_name": "your-gpt5-standard",
+          "model_name": "gpt-5",
+          "api_version": "2024-05-01-preview"
+        },
+        "batch": {
+          "_comment_IMPORTANT": "MUST be a SEPARATE deployment with type 'Global-Batch' in Azure Portal. Cannot reuse the standard deployment. Create a new deployment: same model (gpt-5), but deployment type = Global-Batch.",
+          "endpoint": "https://YOUR_OPENAI_RESOURCE.openai.azure.com/",
+          "api_key": "YOUR_OPENAI_KEY_HERE",
+          "deployment_name": "BatchDeployment-gpt5",
+          "model_name": "gpt-5",
+          "api_version": "2025-01-01-preview",
+          "completion_window": "24h"
+        }
+      },
+      
+      "azure_openai_embedding": {
+        "endpoint": "https://YOUR_OPENAI_RESOURCE.openai.azure.com/",
+        "api_key": "YOUR_OPENAI_KEY_HERE",
+        "deployment_name": "text-embedding-ada-002",
+        "model_name": "text-embedding-ada-002",
+        "api_version": "2024-05-01-preview",
+        "dimensions": 1536
+      },
+      
+      "azure_ai_search": {
+        "endpoint": "https://YOUR_SEARCH_RESOURCE.search.windows.net",
+        "key": "YOUR_SEARCH_KEY_HERE",
+        "index_name": "cred-universal-index",
+        "api_version": "2024-07-01",
+        "auto_delete_days": 7,
+        "enable_auto_cleanup": true
+      },
+      
+      "evaluation": {
+        "_comment": "LLM-as-Judge + evaluation metrics. Set enabled true to add evaluation to output JSON.",
+        "enabled": false,
+        "llm_judge": true,
+        "eval_prompt_module": "prompts.evaluation.cred_eval_prompt",
+        "azure_openai": {
+          "endpoint": "@azureKeyVault(AzureOpenAIEndpoint)",
+          "api_key": "@azureKeyVault(AzureOpenAIApiKey)",
+          "deployment": "gpt-5",
+          "api_version": "2024-12-01-preview"
+        },
+        "metrics": {
+          "hallucination": true,
+          "completeness": true,
+          "field_accuracy": {
+            "enabled": false,
+            "ground_truth_path": ""
+          },
+          "azure_ai_eval": {
+            "enabled": false,
+            "evaluators": ["groundedness", "relevance", "retrieval"],
+            "model_config": {
+              "azure_endpoint": "@azureKeyVault(AzureOpenAIEndpoint)",
+              "api_key": "@azureKeyVault(AzureOpenAIApiKey)",
+              "azure_deployment": "gpt-4o"
+            }
+          }
+        }
+      },
+      
+      "folder_configs": {
+        "1. GEN & HR": {
+          "description": "Personal identification information",
+          "fields": [
+            "first_name",
+            "last_name",
+            "email",
+            "cell",
+            "birth_date",
+            "birth_place",
+            "birth_city",
+            "birth_state_province",
+            "birth_country",
+            "citizenship",
+            "state_licenses",
+            "dea_licenses",
+            "board_certifications"
+          ],
+          "_comment_multi_value": "state_licenses, dea_licenses, cds_licenses, board_certifications, other_credentials are multi-value fields. They automatically extract ALL occurrences as arrays."
+        }
+      }
+    }
+  },
+  
+  "log": {
+    "_comment": "Log file settings. prefix supports dynamic naming: e.g., cred_ragparser -> cred_ragparser_20260406_103000.log",
+    "prefix": "ragparser",
+    "directory": "logs",
+    "level": "INFO"
+  },
+  
+  "sql_server": {
+    "_comment": "SQL Server connection for provider-level logging. Use @azureKeyVault(SecretName) for secure storage.",
+    "connection_string": "@azureKeyVault(SQLServerDocumentProcessor)"
+  },
+  
+  "sql_logging": {
+    "_comment": "SQL logging to dbo.XLogDocumentParserRAG table. Set enabled: false to disable.",
+    "enabled": true,
+    "table_name": "dbo.XLogDocumentParserRAG"
+  }
+}
